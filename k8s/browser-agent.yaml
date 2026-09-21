@@ -1,0 +1,120 @@
+# browser-agent on cn1.
+#
+# One Deployment per profile. Each pod is a single browser identity with its
+# own persistent Chrome profile on a PVC. Pods are never scaled beyond
+# replicas: 1 — two pods sharing one profile dir is the one way to corrupt a
+# session, and a second browser in the same identity is not a thing a site
+# would ever see from a human.
+#
+# Image: push to the in-cluster registry on cn1 as browser-agent:<sha>.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: browser-agent
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: profile-x
+  namespace: browser-agent
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 2Gi
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: browser-agent-secrets
+  namespace: browser-agent
+type: Opaque
+stringData:
+  CONTROL_TOKEN: "replace-me"
+  # Optional: ops alert endpoint for escalations.
+  OPS_ALERT_URL: ""
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: profile-x
+  namespace: browser-agent
+  labels: { app: browser-agent, profile: x }
+spec:
+  replicas: 1
+  strategy:
+    # A profile is single-writer: never run two pods against one PVC.
+    type: Recreate
+  selector:
+    matchLabels: { app: browser-agent, profile: x }
+  template:
+    metadata:
+      labels: { app: browser-agent, profile: x }
+    spec:
+      # Kubernetes' equivalent of tini: without it Chrome's helper processes
+      # become zombies and hold the PID table open.
+      shareProcessNamespace: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        fsGroup: 10001
+      containers:
+        - name: agent
+          image: localhost:5000/browser-agent:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - { name: api, containerPort: 8000 }
+            - { name: novnc, containerPort: 6080 }
+          env:
+            - { name: AGENT_PROFILE, value: x }
+            - { name: PROFILES_ROOT, value: /profiles }
+            - { name: DATA_ROOT, value: /data }
+            - { name: NOVNC_PORT, value: "6080" }
+            - { name: SCREEN_WIDTH, value: "1440" }
+            - { name: SCREEN_HEIGHT, value: "900" }
+            # LLM fallback: llm-service, in-cluster. No per-call fees.
+            - { name: LLM_BASE_URL, value: "http://llm-service.llm-service.svc.cluster.local:8001/v1" }
+            - { name: LLM_MODEL, value: "glm-4.5v" }
+            - { name: LLM_ENABLED, value: "true" }
+            # Egress through the residential proxy. A datacenter IP is the
+            # fastest way to get a session flagged, so this is not optional.
+            - { name: HTTP_PROXY, value: "socks5://office-proxy.crawl.svc.cluster.local:1080" }
+            - { name: HTTPS_PROXY, value: "socks5://office-proxy.crawl.svc.cluster.local:1080" }
+          envFrom:
+            - secretRef: { name: browser-agent-secrets }
+          resources:
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { cpu: "2", memory: 3Gi }
+          volumeMounts:
+            - { name: profile, mountPath: /profiles }
+            - { name: data, mountPath: /data }
+          readinessProbe:
+            httpGet: { path: /healthz, port: api }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: api }
+            initialDelaySeconds: 20
+            periodSeconds: 30
+      volumes:
+        - name: profile
+          persistentVolumeClaim: { claimName: profile-x }
+        # Schedules + artifacts. Small, and losing it is not a disaster, so it
+        # shares the profile volume rather than getting its own claim.
+        - name: data
+          emptyDir: { sizeLimit: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: profile-x
+  namespace: browser-agent
+  labels: { app: browser-agent, profile: x }
+spec:
+  type: ClusterIP
+  selector: { app: browser-agent, profile: x }
+  ports:
+    - { name: api, port: 8000, targetPort: api }
+    - { name: novnc, port: 6080, targetPort: novnc }

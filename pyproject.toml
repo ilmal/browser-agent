@@ -1,0 +1,40 @@
+[project]
+name = "browser-agent"
+version = "0.1.0"
+description = "Browser agent with Playwright, LLM fallback and human takeover over noVNC"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.47",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "httpx>=0.27",
+    "pydantic>=2.7",
+    "python-multipart>=0.0.9",
+    "croniter>=2.0",
+]
+
+[project.optional-dependencies]
+agent = [
+    "browser-use>=0.2",
+]
+dev = [
+    "pytest>=8",
+    "ruff>=0.6",
+]
+
+[project.scripts]
+browser-agent = "browser_agent.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/browser_agent"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

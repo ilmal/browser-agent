@@ -1,0 +1,271 @@
+"""Task-runner integration tests.
+
+Proves the run loop's central promises:
+  * a successful recipe ends DONE,
+  * a recipe that hits a challenge ends BLOCKED and is NOT retried,
+  * a broken recipe falls through to the agent exactly once,
+  * a failed task never silently reports success.
+"""
+
+from __future__ import annotations
+
+import http.server
+import socket
+import sys
+import threading
+from pathlib import Path
+from typing import Any
+
+import pytest
+from playwright.async_api import async_playwright
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+
+from browser_agent.escalation import EscalationRequired  # noqa: E402
+from browser_agent.tasks import TaskRunner, TaskStatus, register  # noqa: E402
+
+CAPTCHA_PAGE = """<html><body><h1>Verify</h1>
+<img src="/captcha.png" class="captcha-image"></body></html>"""
+
+OK_PAGE = """<html><body><h1>Composer</h1>
+<div role="textbox" contenteditable="true" id="box"></div></body></html>"""
+
+
+def _free_port() -> int:
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+@pytest.fixture(scope="module")
+def site():
+    pages = {"/ok": OK_PAGE, "/captcha": CAPTCHA_PAGE}
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):  # noqa: N802
+            body = pages.get(self.path, "<html><body>x</body></html>").encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    port = _free_port()
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{port}"
+    server.shutdown()
+
+
+@pytest.fixture
+def settings(tmp_path, monkeypatch):
+    monkeypatch.setenv("AGENT_PROFILE", "pytest")
+    monkeypatch.setenv("PROFILES_ROOT", str(tmp_path / "profiles"))
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("HEADLESS", "true")
+    # The agent fallback is gated on the LLM being enabled. Tests inject a stub
+    # agent runner, so no call is made, but the gate must be open.
+    monkeypatch.setenv("LLM_ENABLED", "true")
+    monkeypatch.setenv("NOTIFY_ON_ESCALATION", "false")
+    from browser_agent.config import load_settings
+
+    return load_settings()
+
+
+class _Session:
+    """A BrowserSession factory that does not use a persistent profile.
+
+    Tests run against a throwaway headless context; the persistent-profile path
+    is exercised in the container, where a real display exists.
+    """
+
+    def __init__(self, pw, browser):
+        self._pw = pw
+        self._browser = browser
+        self._ctx = None
+
+    async def start(self):
+        if self._ctx is None:
+            self._ctx = await self._browser.new_context()
+        return self._ctx
+
+    async def page(self):
+        ctx = await self.start()
+        return ctx.pages[0] if ctx.pages else await ctx.new_page()
+
+    async def goto(self, url, *, wait_until="domcontentloaded"):
+        page = await self.page()
+        await page.goto(url, wait_until=wait_until)
+        return page
+
+    async def stop(self):
+        if self._ctx:
+            await self._ctx.close()
+
+
+@pytest.fixture
+async def runner_factory(settings, site):
+    """Builds a TaskRunner over a throwaway context, plus a call counter."""
+    async with async_playwright() as pw:
+        browser = await pw.chromium.launch(args=["--no-sandbox"])
+        made: list[TaskRunner] = []
+
+        def make(agent_runner=None):
+            session = _Session(pw, browser)
+            r = TaskRunner(settings, session, agent_runner=agent_runner)
+            made.append(r)
+            return r
+
+        try:
+            yield make, site
+        finally:
+            for r in made:
+                await r.stop()
+            await browser.close()
+
+
+async def _drain(runner: TaskRunner, task_id: str, timeout: float = 30) -> Any:
+    """Wait for a queued task to reach a terminal state."""
+    import asyncio
+
+    runner.start()
+    deadline = asyncio.get_event_loop().time() + timeout
+    while asyncio.get_event_loop().time() < deadline:
+        task = runner.tasks[task_id]
+        if task.status in {TaskStatus.DONE, TaskStatus.FAILED, TaskStatus.BLOCKED}:
+            return task
+        await asyncio.sleep(0.05)
+    raise TimeoutError(task_id)
+
+
+class _OkRecipe:
+    name = "test.ok"
+    description = "succeeds"
+    entry_url = ""
+
+    async def run(self, session, payload):
+        return {"did": "the thing"}
+
+
+class _BlockedRecipe:
+    name = "test.blocked"
+    description = "hits a challenge"
+    entry_url = ""
+
+    async def run(self, session, payload):
+        page = await session.page()
+        from browser_agent.recipes._helpers import require_clear
+
+        await require_clear(page)
+        return {"unreachable": True}
+
+
+class _BrokenRecipe:
+    name = "test.broken"
+    description = "raises"
+    entry_url = ""
+
+    async def run(self, session, payload):
+        raise RuntimeError("selector moved")
+
+
+@pytest.mark.asyncio
+async def test_successful_recipe_completes(runner_factory, site):
+    make, site_url = runner_factory
+    _OkRecipe.entry_url = f"{site_url}/ok"
+    register(_OkRecipe())
+    runner = make()
+    task = runner.submit("test.ok", {})
+    done = await _drain(runner, task.id)
+    assert done.status is TaskStatus.DONE
+    assert done.result == {"did": "the thing"}
+    assert done.used_agent is False
+
+
+@pytest.mark.asyncio
+async def test_challenge_blocks_and_does_not_retry(runner_factory, site):
+    """The central guarantee: a challenge ends the task, it does not loop."""
+    make, site_url = runner_factory
+    _BlockedRecipe.entry_url = f"{site_url}/captcha"
+    register(_BlockedRecipe())
+
+    calls = {"n": 0}
+
+    def counting_agent(session, url, payload):
+        calls["n"] += 1
+
+        async def _run():
+            return {"agent": True}
+
+        return _run()
+
+    runner = make(agent_runner=counting_agent)
+    task = runner.submit("test.blocked", {})
+    blocked = await _drain(runner, task.id)
+
+    assert blocked.status is TaskStatus.BLOCKED
+    assert "captcha" in blocked.detail.lower()
+    # The agent must NOT have been invoked: a challenge is a human's job.
+    assert calls["n"] == 0
+
+
+@pytest.mark.asyncio
+async def test_broken_recipe_uses_agent_once(runner_factory, site):
+    make, site_url = runner_factory
+    _BrokenRecipe.entry_url = f"{site_url}/ok"
+    register(_BrokenRecipe())
+
+    calls = {"n": 0}
+
+    async def agent(session, url, payload):
+        calls["n"] += 1
+        return {"agent": True}
+
+    runner = make(agent_runner=agent)
+    task = runner.submit("test.broken", {})
+    finished = await _drain(runner, task.id)
+
+    assert finished.status is TaskStatus.DONE
+    assert finished.used_agent is True
+    assert calls["n"] == 1
+
+
+@pytest.mark.asyncio
+async def test_broken_recipe_without_agent_fails(runner_factory, site):
+    make, site_url = runner_factory
+    _BrokenRecipe.entry_url = f"{site_url}/ok"
+    register(_BrokenRecipe())
+    runner = make(agent_runner=None)
+    task = runner.submit("test.broken", {})
+    failed = await _drain(runner, task.id)
+    assert failed.status is TaskStatus.FAILED
+    assert "no agent fallback" in failed.detail
+
+
+@pytest.mark.asyncio
+async def test_unknown_recipe_rejected(runner_factory):
+    make, _ = runner_factory
+    runner = make()
+    with pytest.raises(KeyError):
+        runner.submit("does.not.exist", {})
+
+
+@pytest.mark.asyncio
+async def test_agent_escalation_is_recorded_as_blocked(runner_factory, site):
+    """If the agent itself lands on a challenge, the task blocks, not passes."""
+    make, site_url = runner_factory
+    _BrokenRecipe.entry_url = f"{site_url}/ok"
+    register(_BrokenRecipe())
+
+    async def agent_hits_wall(session, url, payload):
+        from browser_agent.escalation import Challenge, ChallengeKind
+
+        raise EscalationRequired(Challenge(ChallengeKind.CAPTCHA, "agent saw one", url))
+
+    runner = make(agent_runner=agent_hits_wall)
+    task = runner.submit("test.broken", {})
+    finished = await _drain(runner, task.id)
+    assert finished.status is TaskStatus.BLOCKED

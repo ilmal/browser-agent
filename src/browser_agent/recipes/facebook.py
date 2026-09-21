@@ -1,0 +1,74 @@
+"""Facebook Page posting recipe.
+
+Posts to a Page the profile administers. Personal-timeline posting is
+deliberately not implemented: it is the surface Facebook polices hardest and
+the one a human should be present for.
+"""
+
+from __future__ import annotations
+
+import logging
+from typing import Any
+
+from ..browser import BrowserSession
+from ..tasks import register
+from ._helpers import click_first, rate_limited, require_clear
+
+log = logging.getLogger(__name__)
+
+
+class FacebookPagePost:
+    name = "facebook.page_post"
+    description = "Post a text update to a Facebook Page the profile administers."
+    entry_url = "https://www.facebook.com/"
+
+    async def run(self, session: BrowserSession, payload: dict[str, Any]) -> dict[str, Any]:
+        text = (payload.get("text") or "").strip()
+        page_id = (payload.get("page_id") or "").strip()
+        if not text:
+            raise ValueError("payload.text is required")
+        if not page_id:
+            raise ValueError("payload.page_id is required (numeric Page id)")
+
+        page = await session.page()
+        await page.goto(f"https://www.facebook.com/{page_id}", wait_until="domcontentloaded")
+        await require_clear(page)
+
+        # Open the Page composer.
+        opened = await click_first(
+            page,
+            [
+                "div[role='button'][aria-label*=\"What's on your mind\" i]",
+                "div[role='button'][aria-label*='Create post' i]",
+                "span[data-testid='page_composer_text']",
+            ],
+            timeout=12000,
+        )
+        if not opened:
+            raise RuntimeError("could not open the Page composer")
+
+        # The dialog lands asynchronously after the click.
+        editor = page.locator("div[role='dialog'] div[role='textbox']").first
+        await editor.wait_for(state="visible", timeout=15000)
+        await editor.click()
+        await page.keyboard.type(text, delay=25)
+
+        await require_clear(page)
+
+        posted = await click_first(
+            page,
+            [
+                "div[role='dialog'] div[role='button'][aria-label='Post']",
+                "div[role='dialog'] div[role='button'][aria-label*='Publish' i]",
+            ],
+            timeout=12000,
+        )
+        if not posted:
+            raise rate_limited("Publish button not found or not enabled")
+
+        await require_clear(page)
+        log.info("posted to Facebook page %s (%d chars)", page_id, len(text))
+        return {"posted": True, "page_id": page_id, "chars": len(text)}
+
+
+register(FacebookPagePost())
