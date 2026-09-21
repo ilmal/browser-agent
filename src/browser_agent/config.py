@@ -25,6 +25,16 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = _env(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 @dataclass(frozen=True)
 class Settings:
     """Resolved runtime settings for a single profile container."""
@@ -60,6 +70,33 @@ class Settings:
     llm_api_key: str
     llm_source: str
     llm_client_id: str
+
+    # Planner (the plan.task recipe). Same llm-service endpoint and client key
+    # as the fallback — the planner is an accelerator in front of the same
+    # control plane, not a second service — but a faster text model: it only
+    # has to emit JSON, not look at screenshots.
+    planner_model: str
+    planner_max_steps: int
+    planner_step_timeout_s: int
+    planner_client_id: str
+
+    # The freeform agent fallback. Without a bound it runs until the model
+    # decides to stop, which on a page with nothing to do is never — a task sat
+    # in RUNNING indefinitely and, because the queue has a single worker, every
+    # later task stayed QUEUED behind it. A step cap ends the loop; the wall
+    # clock is the backstop for a step that hangs inside the browser.
+    agent_max_steps: int
+    agent_timeout_s: int
+
+    # Laya — a 322M local classifier used by plan.task to pick which page
+    # element to activate and to confirm step outcomes. An optional dependency
+    # whose every failure mode degrades to "off": a broken gate must cost a
+    # repair attempt at most, never a crash and never a human escalation.
+    laya_enabled: bool
+    laya_pick_enabled: bool
+    laya_min_confidence: float
+    laya_max_candidates: int
+    laya_pick_retries: int
 
     # Control plane
     api_port: int
@@ -108,6 +145,24 @@ def load_settings() -> Settings:
         llm_api_key=_env("LLM_API_KEY"),
         llm_source=_env("LLM_SOURCE", "browser-agent"),
         llm_client_id=_env("LLM_CLIENT_ID", "browser-agent"),
+        # deepseek-v4.1-flash: fastest planner on llm-service's ollama_cloud
+        # backend that returns clean JSON (probed 2026-09-21). NOTE: the
+        # dash-spelled gpt-oss-120b routes to a backend our key cannot use.
+        planner_model=_env("PLANNER_MODEL", "deepseek-v4.1-flash"),
+        planner_max_steps=_env_int("PLANNER_MAX_STEPS", 12),
+        planner_step_timeout_s=_env_int("PLANNER_STEP_TIMEOUT_S", 10),
+        agent_max_steps=_env_int("AGENT_MAX_STEPS", 25),
+        agent_timeout_s=_env_int("AGENT_TIMEOUT_S", 600),
+        planner_client_id=_env("PLANNER_CLIENT_ID", "browser-agent-planner"),
+        laya_enabled=_env("LAYA_ENABLED", "true").lower() in {"1", "true", "yes"},
+        laya_pick_enabled=_env("LAYA_PICK_ENABLED", "true").lower() in {"1", "true", "yes"},
+        laya_min_confidence=_env_float("LAYA_MIN_CONFIDENCE", 0.75),
+        # 10, not more: laya warns that confidence for choice buckets >=11 is
+        # uncalibrated (its checkpoint ships clamp-distorted temperatures
+        # there), and 10 options fit the 512-token budget beside the page
+        # state. A target outside the top 10 falls to the agent fallback.
+        laya_max_candidates=_env_int("LAYA_MAX_CANDIDATES", 10),
+        laya_pick_retries=_env_int("LAYA_PICK_RETRIES", 1),
         api_port=_env_int("API_PORT", 8000),
         control_token=_env("CONTROL_TOKEN"),
         ops_alert_url=_env("OPS_ALERT_URL"),

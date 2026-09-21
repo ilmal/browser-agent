@@ -31,6 +31,21 @@ session = BrowserSession(settings)
 store = ScheduleStore(settings.state_db)
 runner = TaskRunner(settings, session, agent_runner=make_agent_runner(settings))
 
+# Shown on a freshly started pod so noVNC opens on a real page instead of a
+# blank X root window. A data URL on purpose: it cannot fail on DNS, on the
+# egress proxy, or on a site being down, and it costs no network to paint.
+_IDLE_PAGE = (
+    "data:text/html;charset=utf-8,"
+    "<meta charset=utf-8><title>browser-agent</title>"
+    "<style>html,body{height:100%;margin:0}"
+    "body{display:flex;align-items:center;justify-content:center;"
+    "background:#14161a;color:#e6e6e6;"
+    "font:15px/1.6 system-ui,-apple-system,Segoe UI,Roboto,sans-serif}"
+    "main{text-align:center}h1{font-size:17px;font-weight:600;margin:0 0 6px}"
+    "p{margin:0;color:#8b93a1}</style>"
+    "<main><h1>browser-agent</h1><p>Ready &mdash; no task running.</p></main>"
+)
+
 
 async def _schedule_loop() -> None:
     """Fire due schedules. One loop per pod, so no distributed lock is needed."""
@@ -50,6 +65,20 @@ async def _schedule_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
+
+    # Start the browser now rather than on first use. Everything a human sees
+    # over noVNC is this X display, and the browser was only launched lazily by
+    # the first task: a freshly started pod therefore served noVNC straight to
+    # an empty black root window, which reads as "the browser is broken" until
+    # something happens to run. Pre-warming also means a takeover has something
+    # to take over. A failure here must not take the control plane down with it.
+    try:
+        await session.start()
+        page = await session.page()
+        if page.url in ("", "about:blank"):
+            await page.goto(_IDLE_PAGE)
+    except Exception:
+        log.exception("browser pre-warm failed; the desktop may be empty until a task runs")
 
     runner.start()
     loop = asyncio.create_task(_schedule_loop())

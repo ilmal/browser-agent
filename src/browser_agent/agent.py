@@ -11,6 +11,7 @@ task fails cleanly rather than silently doing nothing.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, NoReturn
 
@@ -153,9 +154,27 @@ def make_agent_runner(settings: Settings):
         await browser.connect()
 
         agent = Agent(task=task_prompt, llm=llm, browser=browser)
-        log.info("agent fallback attaching to %s for %s", cdp_url, url)
+        log.info(
+            "agent fallback attaching to %s for %s (max_steps=%d, timeout=%ds)",
+            cdp_url,
+            url,
+            settings.agent_max_steps,
+            settings.agent_timeout_s,
+        )
         try:
-            history = await agent.run()
+            # browser-use defaults max_steps to 500, so an unbounded run is the
+            # default: a task with nothing left to do loops until the model
+            # happens to stop, and since the queue has ONE worker every later
+            # task sits QUEUED behind it forever. The step cap ends the loop;
+            # the wall clock is the backstop for a step hung in the browser.
+            history = await asyncio.wait_for(
+                agent.run(max_steps=settings.agent_max_steps),
+                timeout=settings.agent_timeout_s,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError(
+                f"agent exceeded its {settings.agent_timeout_s}s budget"
+            ) from None
         finally:
             # Detach only. Killing the browser here would close the tab the
             # recipe owns and take down the human's noVNC view with it.
