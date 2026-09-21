@@ -12,7 +12,7 @@ task fails cleanly rather than silently doing nothing.
 from __future__ import annotations
 
 import logging
-from typing import Any
+from typing import Any, NoReturn
 
 from .browser import BrowserSession
 from .config import Settings
@@ -62,6 +62,24 @@ def _load_browser_use():
             raise RuntimeError("could not locate browser-use's ChatOpenAI client") from exc
 
     return Agent, Browser, ChatOpenAI
+
+
+def _raise_for_no_result(history: Any, url: str) -> NoReturn:
+    """Classify an agent run that produced no result.
+
+    Only "the agent could not do it" is a failure a human need not act on. An
+    unreachable LLM or an errored run raises RuntimeError (FAILED); anything
+    else means the agent stopped for a reason a person must resolve, which is
+    BLOCKED. Never silently report success.
+    """
+    if history.is_successful() is False or history.has_errors():
+        reasons = "; ".join(str(e) for e in (history.errors() or []) if e)
+        raise RuntimeError(
+            f"agent could not complete the task: {reasons[:300] or 'no reason given'}"
+        )
+    raise EscalationRequired(
+        Challenge(ChallengeKind.UNKNOWN, "agent finished without a result", url)
+    )
 
 
 def make_agent_runner(settings: Settings):
@@ -117,15 +135,10 @@ def make_agent_runner(settings: Settings):
             raise EscalationRequired(challenge)
 
         result = history.final_result()
-        if result is None:
-            raise EscalationRequired(
-                Challenge(
-                    ChallengeKind.UNKNOWN,
-                    "agent finished without a result",
-                    page.url,
-                )
-            )
-        log.info("agent fallback finished")
-        return {"agent_result": str(result), "url": page.url}
+        if result is not None:
+            log.info("agent fallback finished")
+            return {"agent_result": str(result), "url": page.url}
+
+        _raise_for_no_result(history, page.url)
 
     return run

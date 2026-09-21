@@ -54,3 +54,51 @@ async def test_running_browser_exposes_cdp_endpoint(settings):
 async def test_cdp_endpoint_absent_before_start(settings):
     session = BrowserSession(settings)
     assert session.cdp_endpoint is None
+
+
+class _FakeHistory:
+    """Minimal stand-in for browser-use's AgentHistoryList."""
+
+    def __init__(self, *, final=None, successful=None, errors=None):
+        self._final = final
+        self._successful = successful
+        self._errors = errors or []
+
+    def final_result(self):
+        return self._final
+
+    def is_successful(self):
+        return self._successful
+
+    def has_errors(self):
+        return bool(self._errors)
+
+    def errors(self):
+        return self._errors
+
+
+def test_agent_llm_failure_is_a_failure_not_a_blocker():
+    """An unreachable LLM must not read as 'a human must solve a captcha'."""
+    from browser_agent.agent import _raise_for_no_result
+
+    with pytest.raises(RuntimeError, match="agent could not complete"):
+        _raise_for_no_result(
+            _FakeHistory(successful=False, errors=["Connection refused"]),
+            "https://x.test/",
+        )
+
+
+def test_agent_error_run_is_a_failure():
+    from browser_agent.agent import _raise_for_no_result
+
+    with pytest.raises(RuntimeError):
+        _raise_for_no_result(_FakeHistory(errors=["step 3 blew up"]), "https://x.test/")
+
+
+def test_agent_stopping_without_result_blocks():
+    """Stopping cleanly but without a result is the human's call."""
+    from browser_agent.agent import _raise_for_no_result
+    from browser_agent.escalation import EscalationRequired
+
+    with pytest.raises(EscalationRequired):
+        _raise_for_no_result(_FakeHistory(successful=None), "https://x.test/")
