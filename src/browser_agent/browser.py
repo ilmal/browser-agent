@@ -167,6 +167,42 @@ class BrowserSession:
 
 
 def profile_exists(settings: Settings) -> bool:
-    """True when this profile has been initialised (i.e. a human logged in once)."""
+    """True when a human has signed in to this profile.
+
+    Chrome writes the profile directory on its very first launch, so "the
+    directory has files in it" is true of a bot that has never been touched —
+    which is exactly the state the operator needs to be warned about. The
+    roster renders this as its signed-in / not-signed-in pill, so a fresh bot
+    claiming to be signed in is worse than no signal at all.
+
+    The honest test is whether a login left cookies behind: Chrome creates the
+    empty Cookies database on first launch and fills it only when a site sets
+    one. Measured on this deployment — a never-used profile has 0, a signed-in
+    one has 11. The count is read over the file's own SQLite, read-only and
+    with a short timeout, because the browser holds it open while running.
+    """
+    import sqlite3
+
     path: Path = settings.profile_dir
-    return path.is_dir() and any(path.iterdir())
+    if not path.is_dir():
+        return False
+    cookies = path / "Default" / "Cookies"
+    if not cookies.is_file():
+        # Pre-Chromium-96 layouts kept it under Default/Network. Checked rather
+        # than assumed so a profile from an older image still reports right.
+        cookies = path / "Default" / "Network" / "Cookies"
+    if not cookies.is_file():
+        return False
+    try:
+        # A locked database is not an error worth raising: it means the
+        # browser is running, and the count is a roster nicety, not a control
+        # path. Fall back to the directory check so a running-but-unknown
+        # profile stays visible rather than flipping to "not signed in".
+        con = sqlite3.connect(f"file:{cookies}?mode=ro", uri=True, timeout=1.0)
+        try:
+            n = con.execute("select count(*) from cookies").fetchone()[0]
+        finally:
+            con.close()
+        return bool(n)
+    except sqlite3.Error:
+        return any(path.iterdir())
