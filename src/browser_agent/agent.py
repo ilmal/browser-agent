@@ -64,6 +64,42 @@ def _load_browser_use():
     return Agent, Browser, ChatOpenAI
 
 
+def _build_gateway_llm(settings: Settings, ChatOpenAI):
+    """A browser-use chat client that satisfies llm-service's caller contract.
+
+    browser-use's ChatOpenAI can set static headers (``default_headers``) but
+    has no way to put ``client_id`` in the request body: it rejects an unknown
+    ``client_id`` kwarg with TypeError, its ``model_params`` is a closed set, and
+    ``ainvoke(**kwargs)`` accepts and silently drops extras. llm-service reads
+    the client id from the body only (OpenAI ``user``), with no header fallback,
+    so the id has to be injected at the one point that controls the wire format.
+    """
+
+    client = ChatOpenAI(
+        model=settings.llm_model,
+        base_url=settings.llm_base_url,
+        # A real key is required; `api_key="not-required"` was the 403.
+        api_key=settings.llm_api_key,
+        default_headers={"X-LLM-Source": settings.llm_source},
+    )
+
+    original_get_client = client.get_client
+
+    def get_client(*args, **kwargs):
+        underlying = original_get_client(*args, **kwargs)
+        create = underlying.chat.completions.create
+
+        async def create_with_client_id(*a, **kw):
+            kw.setdefault("user", settings.llm_client_id)
+            return await create(*a, **kw)
+
+        underlying.chat.completions.create = create_with_client_id
+        return underlying
+
+    client.get_client = get_client
+    return client
+
+
 def _raise_for_no_result(history: Any, url: str) -> NoReturn:
     """Classify an agent run that produced no result.
 
@@ -107,11 +143,12 @@ def make_agent_runner(settings: Settings):
                 "attach to the session a human can see"
             )
 
-        llm = ChatOpenAI(
-            model=settings.llm_model,
-            base_url=settings.llm_base_url,
-            api_key="not-required",
-        )
+        if not settings.llm_api_key:
+            # Fail with the cause rather than letting llm-service answer 403 and
+            # reporting it as "the agent could not complete the task".
+            raise RuntimeError("LLM_API_KEY is not set; llm-service rejects every call")
+
+        llm = _build_gateway_llm(settings, ChatOpenAI)
         browser = Browser(cdp_url=cdp_url, is_local=True, headless=settings.headless)
         await browser.connect()
 

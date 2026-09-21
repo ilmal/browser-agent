@@ -24,6 +24,10 @@ from browser_agent.llm import LLMClient  # noqa: E402
 def settings(tmp_path, monkeypatch):
     monkeypatch.setenv("LLM_BASE_URL", "http://llm-service.llm-service.svc.cluster.local:8001/v1")
     monkeypatch.setenv("LLM_ENABLED", "true")
+    # A real key: the health probe is an authenticated call, so without one the
+    # client is "configured: false" and never reaches the transport these tests
+    # are inspecting.
+    monkeypatch.setenv("LLM_API_KEY", "llm_sk_placeholder")
     monkeypatch.setenv("PROFILES_ROOT", str(tmp_path / "profiles"))
     monkeypatch.setenv("DATA_ROOT", str(tmp_path / "data"))
     return load_settings()
@@ -74,11 +78,17 @@ async def test_llm_client_ignores_ambient_proxy(settings, monkeypatch):
         async def __aexit__(self, *exc):
             return False
 
-        async def get(self, url):
+        async def post(self, url, json, headers=None):
             seen["url"] = url
 
             class _R:
                 status_code = 200
+
+                def raise_for_status(self):
+                    return None
+
+                def json(self):
+                    return {"choices": [{"message": {"content": "PONG"}}]}
 
             return _R()
 

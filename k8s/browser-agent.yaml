@@ -25,16 +25,25 @@ spec:
     requests:
       storage: 2Gi
 ---
-# NOTE: no Secret here. The control-plane token is created out of band and
-# never committed — this repo is public:
+# NOTE: no Secret here. The control-plane token and the llm-service key are
+# created out of band and never committed — this repo is public:
 #
 #   kubectl -n browser-agent create secret generic browser-agent-secrets \
 #     --from-literal=CONTROL_TOKEN="$(openssl rand -hex 32)" \
+#     --from-literal=LLM_API_KEY="<your-client-key>" \
 #     --from-literal=OPS_ALERT_URL=""
 #
-# The Deployment references it via envFrom below, so applying this file without
-# that Secret leaves the pod in CreateContainerConfigError rather than running
-# with a guessable token.
+# The llm-service key must be a *client* key with no entry in llm-service's
+# LLM_KEY_POLICIES: a policy-scoped key can be limited to backends that do not
+# serve the configured model (the "nanobrowser" key is ollama_cloud-only and
+# rejects glm-4.5v). Create one with:
+#
+#   curl -X POST http://localhost:8001/v1/keys \
+#     -H 'Content-Type: application/json' -d '{"name":"browser-agent"}'
+#
+# The Deployment references the Secret via envFrom below, so applying this file
+# without it leaves the pod in CreateContainerConfigError rather than running
+# with a guessable token and a dead LLM fallback.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -99,6 +108,14 @@ spec:
             - { name: LLM_BASE_URL, value: "http://llm-service.llm-service.svc.cluster.local:8001/v1" }
             - { name: LLM_MODEL, value: "glm-4.5v" }
             - { name: LLM_ENABLED, value: "true" }
+            # llm-service authenticates every token-spending call and requires a
+            # client id in the body. The source lands in its call log, so it is
+            # named for this caller rather than the default "openai-compat".
+            - { name: LLM_SOURCE, value: "browser-agent" }
+            - { name: LLM_CLIENT_ID, value: "browser-agent" }
+            # LLM_API_KEY comes from the Secret (envFrom below), which is the
+            # name llm-service's own manifests already use for it.
+            #
             # Egress through the residential proxy. A datacenter IP is the
             # fastest way to get a session flagged, so this is not optional.
             # Named BROWSER_PROXY, not HTTP_PROXY: the conventional names are

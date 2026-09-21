@@ -53,6 +53,13 @@ class Settings:
     llm_base_url: str
     llm_model: str
     llm_enabled: bool
+    # llm-service is authenticated: every token-spending call needs a key, the
+    # X-LLM-Source header, and a client_id in the body (the OpenAI-compatible
+    # `user` field — llm-service has no header fallback for it). All three were
+    # missing, which surfaced as 403 "Invalid API key." on every escalation.
+    llm_api_key: str
+    llm_source: str
+    llm_client_id: str
 
     # Control plane
     api_port: int
@@ -98,6 +105,9 @@ def load_settings() -> Settings:
         llm_base_url=_env("LLM_BASE_URL", "http://llm-service.llm-service.svc.cluster.local:8001/v1"),
         llm_model=_env("LLM_MODEL", "glm-4.5v"),
         llm_enabled=_env("LLM_ENABLED", "true").lower() in {"1", "true", "yes"},
+        llm_api_key=_env("LLM_API_KEY"),
+        llm_source=_env("LLM_SOURCE", "browser-agent"),
+        llm_client_id=_env("LLM_CLIENT_ID", "browser-agent"),
         api_port=_env_int("API_PORT", 8000),
         control_token=_env("CONTROL_TOKEN"),
         ops_alert_url=_env("OPS_ALERT_URL"),

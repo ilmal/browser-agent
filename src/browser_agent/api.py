@@ -132,6 +132,11 @@ async def state() -> dict[str, Any]:
         # captcha. This is deliberately NOT in /healthz: that backs the k8s
         # liveness probe, and an LLM outage must not restart the pod.
         "llm_reachable": await runner.llm.healthy(),
+        # off | no-key | ready | unreachable — distinguishes a missing key from
+        # an unreachable service, because they need different fixes. Both are
+        # cached (see LLMClient.healthy), so polling never waits on the model.
+        "llm_status": await runner.llm.status(),
+        "llm_enabled": runner.llm.enabled,
         "recipes": list_recipes(),
         "current": runner.current.to_dict() if runner.current else None,
         "tasks": [t.to_dict() for t in tasks],
