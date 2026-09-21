@@ -40,8 +40,9 @@ class Settings:
     novnc_port: int
 
     # Public base URL for the admin UI + browser view, when the pod is reached
-    # through a reverse proxy (e.g. https://browser.ilmal.se). Empty means the
-    # caller reaches the pod ports directly.
+    # through a reverse proxy. Empty means the caller reaches the pod ports
+    # directly. The real value is deployment-specific, so it is applied at
+    # deploy time rather than committed.
     browser_base_url: str
 
     # Browser
