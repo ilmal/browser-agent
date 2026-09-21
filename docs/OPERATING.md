@@ -129,6 +129,31 @@ curl -X POST http://localhost:8899/api/schedules \
 Keep cadence human. Several profiles firing on the same minute is a pattern a
 site can see; stagger them.
 
+## plan.task — freeform task, planned and executed
+
+`plan.task` takes `{"task": "<freeform instruction>"}`. A fast text model
+(`PLANNER_MODEL`, default `deepseek-v4.1-flash` via llm-service) plans **once**;
+the plan runs deterministically:
+
+1. Navigate / click / type / extract / wait, in order, from `entry_url`.
+2. A click or type without a CSS selector is resolved by the Laya classifier,
+   which picks among the page's visible elements (bounded by
+   `LAYA_MAX_CANDIDATES`); the executor binds by index.
+3. A step proves itself with its `done_when` predicate; click/type steps
+   without one are confirmed by Laya yes/no above `LAYA_MIN_CONFIDENCE`.
+4. A step that fails — or a planner that cannot be reached — hands the
+   **original task text** to the browser-use agent fallback, which starts from
+   the plan's own entry URL.
+5. A captcha or account challenge anywhere BLOCKs for a human, as everywhere
+   else. The planner is forbidden from planning login, payment or account
+   changes; a plan that fails validation FAILs visibly (`plan rejected: …`)
+   instead of reaching the agent.
+
+The gate summary in a done task's result shows how much Laya did
+(`picks`/`confirms`/`inconclusive`). In k8s the picker starts flag-off
+(`LAYA_PICK_ENABLED=false`) until the fixture accuracy bench gives it a real
+number; confirmation is on.
+
 ## Reading the failure states
 
 | Status | Meaning | What to do |
