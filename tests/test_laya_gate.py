@@ -265,7 +265,7 @@ async def test_http_contract_key_source_user_model_and_no_proxy(http_settings, f
     assert call["url"] == _DECIDE
     assert call["headers"]["Authorization"] == "Bearer llm_sk_test"
     assert call["headers"]["X-LLM-Source"] == "browser-agent-test"
-    assert call["json"]["user"] == "browser-agent-test"  # body, no header fallback
+    assert call["json"]["client_id"] == "browser-agent-test"  # decide route: no `user` alias
     assert call["json"]["model"] == "english"
     assert call["json"]["state"] == "page text"
     assert call["json"]["questions"]["v"]["type"] == "noul"
@@ -293,7 +293,7 @@ async def test_http_without_key_sends_a_bare_engine_payload(tmp_path, monkeypatc
     call = fake_http.instances[0].post_calls[0]
     assert "Authorization" not in call["headers"]
     assert "X-LLM-Source" not in call["headers"]
-    assert "user" not in call["json"]
+    assert "client_id" not in call["json"]
 
 
 async def test_http_choice_uses_the_chosen_labels_probability(http_settings, fake_http):

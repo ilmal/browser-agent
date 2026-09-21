@@ -200,10 +200,12 @@ class LayaGate:
         }
         if self.settings.llm_api_key:
             # llm-service requires these on every route; the bare engine
-            # ignores them, so one payload serves both.
+            # ignores them, so one payload serves both. The /v1/decide route
+            # takes `client_id` literally — unlike the OpenAI-compat routes
+            # it has no `user` alias (measured live 2026-09-21: `user` → 400).
             headers["Authorization"] = f"Bearer {self.settings.llm_api_key}"
             headers["X-LLM-Source"] = self.settings.llm_source
-            payload["user"] = self.settings.llm_client_id
+            payload["client_id"] = self.settings.llm_client_id
         try:
             # trust_env=False: llm-service/engine live on the tailnet/in-cluster;
             # an ambient HTTP_PROXY must never apply.
