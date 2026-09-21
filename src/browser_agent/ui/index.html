@@ -195,7 +195,10 @@ async function refresh() {
 
   $("profile").textContent = "profile: " + st.profile;
   $("queue").textContent = "queue: " + st.queue_depth;
-  $("llm").textContent = "llm: " + (st.llm_enabled ? "on" : "off");
+  // "on" but unreachable is the state that matters: the fallback would fail
+  // every escalation. Show reachability, not the config flag.
+  $("llm").textContent = "llm: " + (!st.llm_enabled ? "off"
+    : st.llm_reachable ? "ready" : "unreachable");
   // Through a proxy the browser is a sibling path on the same domain; the pod
   // port only makes sense when it is forwarded directly.
   const novncUrl = st.browser_base_url

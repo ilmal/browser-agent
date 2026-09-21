@@ -126,6 +126,12 @@ async def state() -> dict[str, Any]:
         # when the pod port is forwarded directly; set via BROWSER_BASE_URL when
         # reached through a reverse proxy (then it is the domain, not :port).
         "browser_base_url": settings.browser_base_url,
+        # Whether the fallback can actually reach the model, not just whether it
+        # is switched on. The two diverged silently once (an ambient proxy sent
+        # the call through SOCKS), which made every escalation look like a
+        # captcha. This is deliberately NOT in /healthz: that backs the k8s
+        # liveness probe, and an LLM outage must not restart the pod.
+        "llm_reachable": await runner.llm.healthy(),
         "recipes": list_recipes(),
         "current": runner.current.to_dict() if runner.current else None,
         "tasks": [t.to_dict() for t in tasks],
