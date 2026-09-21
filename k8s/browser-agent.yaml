@@ -120,12 +120,13 @@ spec:
             - { name: PLANNER_MAX_STEPS, value: "12" }
             - { name: PLANNER_STEP_TIMEOUT_S, value: "10" }
             - { name: PLANNER_CLIENT_ID, value: "browser-agent-planner" }
-            # Laya gate. The picker stays OFF here until the fixture accuracy
-            # bench gives it a real number (flip LAYA_PICK_ENABLED then);
-            # confirmation is on — its failure mode is a repair attempt, not
-            # a human page. Requires the image built with the `laya` extra
-            # (weights baked in at build time).
+            # Laya gate. Runs over HTTP against llm-service's /v1/decide
+            # proxy (see the llm-service skill) — no torch in this image.
+            # The picker stays OFF until the fixture accuracy bench gives it
+            # a real number (flip LAYA_PICK_ENABLED then); confirmation is
+            # on — its failure mode is a repair attempt, not a human page.
             - { name: LAYA_ENABLED, value: "true" }
+            - { name: LAYA_DECIDE_URL, value: "http://llm-service.llm-service.svc.cluster.local:8001/v1/decide" }
             - { name: LAYA_PICK_ENABLED, value: "false" }
             - { name: LAYA_MIN_CONFIDENCE, value: "0.75" }
             # 10 = the calibrated choice range (buckets >=11 ship distorted
@@ -145,10 +146,8 @@ spec:
           envFrom:
             - secretRef: { name: browser-agent-secrets }
           resources:
-            # Memory headroom for the baked Laya weights (~0.7 GB resident when
-            # the gate loads) on top of Chrome + the agent fallback.
-            requests: { cpu: 500m, memory: 1500Mi }
-            limits: { cpu: "2", memory: 4Gi }
+            requests: { cpu: 500m, memory: 1Gi }
+            limits: { cpu: "2", memory: 3Gi }
           volumeMounts:
             - { name: profile, mountPath: /profiles }
             - { name: data, mountPath: /data }

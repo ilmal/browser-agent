@@ -55,16 +55,11 @@ COPY pyproject.toml README.md ./
 COPY src ./src
 
 # `agent` extra adds browser-use. Kept in the image because the fallback is the
-# whole point of the design; it is inert unless a recipe fails. `laya` adds the
-# 322M classifier behind the plan.task gate (pulls torch — CPU is fine).
-RUN uv pip install --system --no-cache ".[agent,laya]"
-
-# Bake the Laya weights: a first-boot download would make every cold pod start
-# depend on huggingface.co, and a blocked download would silently leave the
-# gate permanently off. Readable by the runtime user, not writable.
-ENV HF_HOME=/models/hf
-RUN python -c "from laya import Agent; Agent()" \
-    && chmod -R a+rX /models
+# whole point of the design; it is inert unless a recipe fails. The Laya gate
+# is NOT in the image: in the pod it runs over HTTP against llm-service's
+# /v1/decide proxy (LAYA_DECIDE_URL), so no torch and no weights are baked —
+# the in-process pip backend is a laptop-development fallback only.
+RUN uv pip install --system --no-cache ".[agent]"
 
 # Browsers live outside any user's home: Playwright's default is $HOME/.cache,
 # which differs between build (root) and runtime (agent) and would silently

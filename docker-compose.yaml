@@ -37,11 +37,14 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_MODEL: ${LLM_MODEL:-glm-4.5v}
       LLM_API_KEY: ${LLM_API_KEY:-}
-      # plan.task: planner + Laya gate.
+      # plan.task: planner + Laya gate. Empty LAYA_DECIDE_URL uses the
+      # in-process pip backend if laya is installed; the pod points this at
+      # llm-service's /v1/decide proxy instead.
       PLANNER_MODEL: ${PLANNER_MODEL:-deepseek-v4.1-flash}
       PLANNER_MAX_STEPS: ${PLANNER_MAX_STEPS:-12}
       PLANNER_STEP_TIMEOUT_S: ${PLANNER_STEP_TIMEOUT_S:-10}
       LAYA_ENABLED: ${LAYA_ENABLED:-true}
+      LAYA_DECIDE_URL: ${LAYA_DECIDE_URL:-}
       LAYA_PICK_ENABLED: ${LAYA_PICK_ENABLED:-true}
       LAYA_MIN_CONFIDENCE: ${LAYA_MIN_CONFIDENCE:-0.75}
       LAYA_MAX_CANDIDATES: ${LAYA_MAX_CANDIDATES:-10}

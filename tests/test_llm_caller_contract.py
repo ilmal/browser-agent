@@ -55,6 +55,7 @@ def _settings(**over) -> Settings:
         agent_max_steps=25,
         agent_timeout_s=600,
         laya_enabled=True,
+        laya_decide_url="",
         laya_pick_enabled=True,
         laya_min_confidence=0.75,
         laya_max_candidates=20,

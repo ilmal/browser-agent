@@ -88,11 +88,14 @@ class Settings:
     agent_max_steps: int
     agent_timeout_s: int
 
-    # Laya — a 322M local classifier used by plan.task to pick which page
-    # element to activate and to confirm step outcomes. An optional dependency
-    # whose every failure mode degrades to "off": a broken gate must cost a
-    # repair attempt at most, never a crash and never a human escalation.
+    # Laya — a decision model used by plan.task to pick which page element to
+    # activate and to confirm step outcomes. Two backends: the shared
+    # decision engine over HTTP (LAYA_DECIDE_URL, prod = llm-service's
+    # /v1/decide proxy) or the in-process pip package when no URL is set.
+    # Every failure mode degrades to "off": a broken gate must cost a repair
+    # attempt at most, never a crash and never a human escalation.
     laya_enabled: bool
+    laya_decide_url: str
     laya_pick_enabled: bool
     laya_min_confidence: float
     laya_max_candidates: int
@@ -155,6 +158,7 @@ def load_settings() -> Settings:
         agent_timeout_s=_env_int("AGENT_TIMEOUT_S", 600),
         planner_client_id=_env("PLANNER_CLIENT_ID", "browser-agent-planner"),
         laya_enabled=_env("LAYA_ENABLED", "true").lower() in {"1", "true", "yes"},
+        laya_decide_url=_env("LAYA_DECIDE_URL"),
         laya_pick_enabled=_env("LAYA_PICK_ENABLED", "true").lower() in {"1", "true", "yes"},
         laya_min_confidence=_env_float("LAYA_MIN_CONFIDENCE", 0.75),
         # 10, not more: laya warns that confidence for choice buckets >=11 is
