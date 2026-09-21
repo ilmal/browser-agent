@@ -150,6 +150,22 @@ class FakeLaya:
         return self.yes, self.conf
 
 
+class FakePicker:
+    """Stands in for the LLM element picker (browser_agent.picker)."""
+
+    enabled = True
+
+    def __init__(self, pick: int | None = 0) -> None:
+        self._pick = pick
+        self.calls: list[tuple[str, list[str]]] = []
+
+    async def pick(self, goal: str, state: str, lines: list[str]):
+        self.calls.append((goal, list(lines)))
+        if self._pick is None:
+            return None, 0.0
+        return self._pick, 1.0
+
+
 class _Session:
     def __init__(self, pw, browser):
         self._pw = pw
@@ -181,8 +197,8 @@ async def runner_factory(settings, site):
         browser = await pw.chromium.launch(args=["--no-sandbox"])
         made: list[TaskRunner] = []
 
-        def make(agent_runner=None, planner=None, laya=None):
-            register(PlanTask(planner=planner, laya=laya, settings=settings))
+        def make(agent_runner=None, planner=None, laya=None, picker=None):
+            register(PlanTask(planner=planner, laya=laya, settings=settings, picker=picker))
             session = _Session(pw, browser)
             r = TaskRunner(settings, session, agent_runner=agent_runner)
             made.append(r)
@@ -405,6 +421,54 @@ async def test_picker_binds_by_index_not_text(runner_factory, site):
     assert len(laya.seen_lines) == 2
     assert "Submit" in laya.seen_lines[1]
     assert "picked?which=2" in done.result["final_url"]
+
+
+async def test_llm_picker_resolves_when_laya_declines(runner_factory, site):
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/twins",
+        "steps": [
+            {"action": "click", "goal": "submit the form"},
+            {"action": "extract", "goal": "heading", "selector": "h1"},
+        ],
+    }
+    picker = FakePicker(pick=1)
+    runner = make(planner=FakePlanner(plan), laya=FakeLaya(pick=None), picker=picker)
+    task = runner.submit("plan.task", {"task": "submit"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is False
+    assert "picked?which=2" in done.result["final_url"]
+    # The picker saw the same numbered lines laya would have.
+    assert len(picker.calls) == 1
+    assert len(picker.calls[0][1]) == 2
+
+
+async def test_picker_decline_too_falls_back_to_agent(runner_factory, site):
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/twins",
+        "steps": [{"action": "click", "goal": "submit the form"}],
+    }
+    agent_calls = {"n": 0}
+
+    async def agent(session, url, payload):
+        agent_calls["n"] += 1
+        return {"agent": True}
+
+    runner = make(
+        agent_runner=agent,
+        planner=FakePlanner(plan),
+        laya=FakeLaya(pick=None),
+        picker=FakePicker(pick=None),
+    )
+    task = runner.submit("plan.task", {"task": "submit"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is True
+    assert agent_calls["n"] == 1
 
 
 async def test_low_confidence_pick_falls_back_to_agent(runner_factory, site):

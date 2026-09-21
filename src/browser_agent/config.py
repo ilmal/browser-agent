@@ -116,6 +116,20 @@ class Settings:
     # to Chrome explicitly at launch instead.
     browser_proxy: str
 
+    # Element picker for plan.task's selectorless click/type steps. Same
+    # numbered-lines/bind-by-index contract as the laya picker, but the model
+    # is an LLM: benched in the prod pod 2026-09-21, laya could not
+    # discriminate candidates on either head (choice 4/18 with flat
+    # probabilities, yes/no tournament all p in 0.41-0.55) while
+    # deepseek-v4.1-flash went 18/18 at ~1 s/pick — see
+    # scripts/laya_pick_bench.py and scripts/llm_pick_bench.py. Laya keeps
+    # the confirm role, where it measures well. Off by default; prod turns
+    # it on explicitly.
+    picker_enabled: bool = False
+    picker_model: str = "deepseek-v4.1-flash"
+    picker_client_id: str = "browser-agent-picker"
+    picker_timeout_s: float = 20.0
+
     @property
     def profile_dir(self) -> Path:
         """Persistent Chrome user-data-dir for this profile."""
@@ -180,4 +194,8 @@ def load_settings() -> Settings:
         ops_alert_url=_env("OPS_ALERT_URL"),
         notify_on_escalation=_env("NOTIFY_ON_ESCALATION", "true").lower() in {"1", "true", "yes"},
         browser_proxy=_env("BROWSER_PROXY"),
+        picker_enabled=_env("PICKER_ENABLED", "false").lower() in {"1", "true", "yes"},
+        picker_model=_env("PICKER_MODEL", "deepseek-v4.1-flash"),
+        picker_client_id=_env("PICKER_CLIENT_ID", "browser-agent-picker"),
+        picker_timeout_s=_env_float("PICKER_TIMEOUT_S", 20.0),
     )

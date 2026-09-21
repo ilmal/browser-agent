@@ -25,6 +25,7 @@ from ..browser import BrowserSession
 from ..config import Settings
 from ..escalation import EscalationRequired  # noqa: F401  (re-raised, never caught here)
 from ..laya_gate import LayaGate
+from ..picker import ElementPicker
 from ..plan_model import DoneWhen, Plan, Step, StepFailure
 from ._candidates import CLICK_BASE, TYPE_BASE, extract_candidates
 from ._helpers import require_clear
@@ -80,14 +81,21 @@ async def _retry_transient(op, *, what: str):
 
 
 async def resolve_target(
-    page: Page, step: Step, laya: LayaGate, settings: Settings, *, base: str
+    page: Page,
+    step: Step,
+    laya: LayaGate,
+    settings: Settings,
+    *,
+    base: str,
+    picker: ElementPicker | None = None,
 ) -> Locator:
     """The element a click/type step acts on.
 
     Explicit selector first (deterministic beats clever). Without one, the
-    Laya picker chooses among the page's visible candidates and the executor
-    binds by index — never by re-matching text, which identical buttons would
-    make ambiguous.
+    pickers choose among the page's visible candidates and the executor binds
+    by index — never by re-matching text, which identical buttons would make
+    ambiguous. Laya is asked first (cheap, and decisive on single-candidate
+    pages); the LLM picker answers when laya declines.
     """
     timeout_ms = settings.planner_step_timeout_s * 1000
     if step.selector:
@@ -98,26 +106,40 @@ async def resolve_target(
             raise StepFailure(f"selector never became visible: {step.selector!r}") from exc
         return loc
 
-    if not laya.pick_enabled:
-        raise StepFailure(f"no selector and the Laya picker is off for: {step.goal!r}")
+    if not laya.pick_enabled and not (picker is not None and picker.enabled):
+        raise StepFailure(f"no selector and no picker is enabled for: {step.goal!r}")
     floor = settings.laya_min_confidence
     for _ in range(settings.laya_pick_retries + 1):
         loc, lines = await extract_candidates(page, base, settings.laya_max_candidates)
         if not lines:
             break
-        idx, conf = await laya.choose(
-            "Which numbered element should be activated to accomplish the page goal?",
-            lines,
-            f"Goal: {step.goal}\n{await state_text(page, 400)}",
-        )
-        if idx is None or conf < floor:
-            continue
-        return loc.nth(idx)
+        state = f"Goal: {step.goal}\n{await state_text(page, 400)}"
+        # Laya first: ~50 ms warm vs ~1 s for the LLM picker. It stays in the
+        # chain even though the bench shows it cannot clear the floor on
+        # multi-candidate pages — the single-candidate case it can do, and the
+        # LLM picker only pays when laya declines.
+        if laya.pick_enabled:
+            idx, conf = await laya.choose(
+                "Which numbered element should be activated to accomplish the page goal?",
+                lines,
+                state,
+            )
+            if idx is not None and conf >= floor:
+                return loc.nth(idx)
+        if picker is not None and picker.enabled:
+            idx, _ = await picker.pick(step.goal or "", state, lines)
+            if idx is not None:
+                return loc.nth(idx)
     raise StepFailure(f"no element picked for: {step.goal!r}")
 
 
 async def exec_step(
-    page: Page, step: Step, laya: LayaGate, settings: Settings, extracts: dict[str, str]
+    page: Page,
+    step: Step,
+    laya: LayaGate,
+    settings: Settings,
+    extracts: dict[str, str],
+    picker: ElementPicker | None = None,
 ) -> str:
     timeout_ms = settings.planner_step_timeout_s * 1000
     if step.action == "navigate":
@@ -127,7 +149,7 @@ async def exec_step(
         await _retry_transient(_go, what=f"navigate to {step.text!r}")
         return f"navigated to {page.url}"
     if step.action == "click":
-        target = await resolve_target(page, step, laya, settings, base=CLICK_BASE)
+        target = await resolve_target(page, step, laya, settings, base=CLICK_BASE, picker=picker)
 
         async def _click() -> None:
             await target.click(timeout=timeout_ms)
@@ -135,7 +157,7 @@ async def exec_step(
         await _retry_transient(_click, what=f"click for {step.goal!r}")
         return f"clicked for: {step.goal or step.selector}"
     if step.action == "type":
-        target = await resolve_target(page, step, laya, settings, base=TYPE_BASE)
+        target = await resolve_target(page, step, laya, settings, base=TYPE_BASE, picker=picker)
         await target.fill(step.text or "")
         return f"typed into: {step.goal or step.selector}"
     if step.action == "extract":
@@ -170,6 +192,7 @@ async def run_plan(
     task_text: str,
     settings: Settings,
     laya: LayaGate,
+    picker: ElementPicker | None = None,
 ) -> dict:
     log_ = activity_of(session)
     log_.note("info", f"plan: {len(plan.steps)} step(s), entry {plan.entry_url}")
@@ -186,7 +209,7 @@ async def run_plan(
             await control.checkpoint(page.url)
         log_.note("step", f"{i + 1}/{len(plan.steps)} {step.action}: {desc}", step=i + 1)
         try:
-            outcome = await exec_step(page, step, laya, settings, extracts)
+            outcome = await exec_step(page, step, laya, settings, extracts, picker=picker)
         except StepFailure as exc:
             log_.note("error", f"step {i + 1} failed: {exc}")
             raise StepFailure(f"step {i} ({desc}): {exc}", task_text, plan.entry_url) from exc

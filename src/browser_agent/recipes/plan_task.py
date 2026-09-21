@@ -24,6 +24,7 @@ from typing import Any
 from ..browser import BrowserSession
 from ..config import load_settings
 from ..laya_gate import LayaGate
+from ..picker import ElementPicker
 from ..plan_model import PlanRejected, parse_plan
 from ..planner import PlannerClient
 from ..tasks import register
@@ -41,12 +42,13 @@ class PlanTask:
     entry_url = "about:blank"
 
     def __init__(self, planner: PlannerClient | None = None, laya: LayaGate | None = None,
-                 settings: Any = None) -> None:
+                 settings: Any = None, picker: ElementPicker | None = None) -> None:
         # Injectable for tests; lazily built from the environment otherwise, so
         # importing this module never pays for model or client construction.
         self._planner = planner
         self._laya = laya
         self._settings = settings
+        self._picker = picker
 
     def _deps(self) -> None:
         if self._settings is None:
@@ -55,6 +57,8 @@ class PlanTask:
             self._planner = PlannerClient(self._settings)
         if self._laya is None:
             self._laya = LayaGate(self._settings)
+        if self._picker is None:
+            self._picker = ElementPicker(self._settings)
 
     async def run(self, session: BrowserSession, payload: dict[str, Any]) -> dict[str, Any]:
         self._deps()
@@ -71,7 +75,8 @@ class PlanTask:
             "plan for %r: %d step(s), entry %s",
             task_text[:80], len(plan.steps), plan.entry_url,
         )
-        return await run_plan(session, plan, task_text, self._settings, self._laya)
+        return await run_plan(session, plan, task_text, self._settings, self._laya,
+                              picker=self._picker)
 
 
 register(PlanTask())
