@@ -207,7 +207,7 @@ class TaskRunner:
             task.detail = f"recipe failed: {exc}"
 
         # Deterministic path failed. Only now do we spend an LLM call.
-        if self._agent_runner is None or not self.llm.enabled:
+        if self._agent_runner is None or not self.llm.configured:
             task.status = TaskStatus.FAILED
             task.detail += " (no agent fallback available)"
             return
@@ -232,12 +232,28 @@ class TaskRunner:
 
     async def _run_freeform(self, task: Task, recipe: Recipe) -> None:
         """Run a task that is only an instruction, with no deterministic path."""
-        if self._agent_runner is None or not self.llm.enabled:
+        if self._agent_runner is None or not self.llm.configured:
             task.status = TaskStatus.FAILED
-            task.detail = "agent not available (LLM disabled or browser-use missing)"
+            task.detail = "agent not available (llm not configured, or browser-use missing)"
+            return
+
+        # A freeform task must start somewhere. `entry_url` for this recipe is
+        # about:blank, so without a caller-supplied url the agent would be handed
+        # a blank page and no site to work on. The documented `url` payload was
+        # never read and the session was never navigated, so freeform could only
+        # ever operate on whatever page happened to be open.
+        url = (task.payload.get("url") or recipe.entry_url or "").strip()
+        if not url or url == "about:blank":
+            task.status = TaskStatus.FAILED
+            task.detail = "freeform tasks need a start url in the payload"
             return
         try:
-            task.result = await self._agent_runner(self.session, recipe.entry_url, task.payload)
+            page = await self.session.goto(url)
+            challenge = await detect_challenge(page)
+            if challenge is not None:
+                await self._block(task, challenge)
+                return
+            task.result = await self._agent_runner(self.session, url, task.payload)
             task.used_agent = True
             task.status = TaskStatus.DONE
             task.detail = "agent completed the task"

@@ -113,6 +113,11 @@
     <p class="sub" id="run-sub">A recipe runs a known, deterministic flow. If its selectors break, the agent takes over automatically.</p>
     <label for="recipe">Recipe</label>
     <select id="recipe"></select>
+    <div id="url-wrap" class="hidden">
+      <label for="taskUrl">Start URL</label>
+      <input id="taskUrl" placeholder="https://example.com/some/page">
+      <div class="muted" style="margin-top:6px">A freeform instruction needs a page to work on.</div>
+    </div>
     <label for="text">Instructions</label>
     <textarea id="text" placeholder="What should it do? e.g. Post: hello world"></textarea>
     <details>
@@ -312,10 +317,14 @@ function renderBanner() {
 function renderRunGate() {
   const st = state;
   const btn = $("run"), why = $("run-why");
+  // A freeform task has no site of its own, so it must be given one.
+  const freeform = $("recipe").value === "agent.task";
+  $("url-wrap").classList.toggle("hidden", !freeform);
+
   let reason = "";
   if (!st.profile_initialised) reason = "No session yet — open the browser and sign in first.";
-  else if ($("recipe").value === "agent.task" && st.llm_status !== "ready")
-    reason = "Needs a working model.";
+  else if (freeform && !$("taskUrl").value.trim()) reason = "Give it a start URL.";
+  else if (freeform && st.llm_status !== "ready") reason = "Needs a working model.";
   btn.disabled = !!reason;
   why.textContent = reason;
 }
@@ -412,6 +421,8 @@ $("run").onclick = () => act(async () => {
   const p = {};
   const t = $("text").value.trim();
   if (t) p.text = t;
+  const url = $("taskUrl").value.trim();
+  if (url) p.url = url;
   const extra = $("extra").value.trim();
   if (extra) Object.assign(p, JSON.parse(extra));
   await api("/api/tasks", { method: "POST",
@@ -420,6 +431,8 @@ $("run").onclick = () => act(async () => {
 });
 
 $("recipe").onchange = renderRunGate;
+$("taskUrl").oninput = renderRunGate;
+$("taskUrl").oninput = renderRunGate;
 
 $("open-vnc").onclick = () => window.open(browserUrl(), "_blank", "noopener");
 

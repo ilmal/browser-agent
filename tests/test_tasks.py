@@ -21,14 +21,25 @@ from playwright.async_api import async_playwright
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
+from browser_agent import recipes  # noqa: E402,F401  (registers built-ins)
 from browser_agent.escalation import EscalationRequired  # noqa: E402
-from browser_agent.tasks import TaskRunner, TaskStatus, register  # noqa: E402
+from browser_agent.tasks import (  # noqa: E402
+    AGENT_RECIPE,
+    TaskRunner,
+    TaskStatus,
+    register,
+)
 
 CAPTCHA_PAGE = """<html><body><h1>Verify</h1>
 <img src="/captcha.png" class="captcha-image"></body></html>"""
 
 OK_PAGE = """<html><body><h1>Composer</h1>
 <div role="textbox" contenteditable="true" id="box"></div></body></html>"""
+
+
+def _start_url() -> str:
+    """A real page for freeform tests: the start url is now required."""
+    return "about:blank#start"
 
 
 def _free_port() -> int:
@@ -66,9 +77,11 @@ def settings(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILES_ROOT", str(tmp_path / "profiles"))
     monkeypatch.setenv("DATA_ROOT", str(tmp_path / "data"))
     monkeypatch.setenv("HEADLESS", "true")
-    # The agent fallback is gated on the LLM being enabled. Tests inject a stub
-    # agent runner, so no call is made, but the gate must be open.
+    # The agent fallback is gated on the LLM being *configured* — enabled and
+    # carrying a key, since an unauthenticated call is rejected. Tests inject a
+    # stub agent runner, so no call is made, but the gate must be open.
     monkeypatch.setenv("LLM_ENABLED", "true")
+    monkeypatch.setenv("LLM_API_KEY", "llm_sk_placeholder")
     monkeypatch.setenv("NOTIFY_ON_ESCALATION", "false")
     from browser_agent.config import load_settings
 
@@ -275,7 +288,6 @@ async def test_agent_escalation_is_recorded_as_blocked(runner_factory, site):
 async def test_freeform_task_goes_straight_to_agent(runner_factory, site):
     """agent.task has no deterministic path: the agent is the implementation."""
     make, site_url = runner_factory
-    from browser_agent.tasks import AGENT_RECIPE
 
     seen = {}
 
@@ -285,7 +297,7 @@ async def test_freeform_task_goes_straight_to_agent(runner_factory, site):
         return {"agent_result": "did it"}
 
     runner = make(agent_runner=agent)
-    task = runner.submit(AGENT_RECIPE, {"goal": "open settings"})
+    task = runner.submit(AGENT_RECIPE, {"goal": "open settings", "url": site_url})
     finished = await _drain(runner, task.id)
 
     assert finished.status is TaskStatus.DONE
@@ -299,7 +311,7 @@ async def test_freeform_task_without_agent_fails_cleanly(runner_factory):
     from browser_agent.tasks import AGENT_RECIPE
 
     runner = make(agent_runner=None)
-    task = runner.submit(AGENT_RECIPE, {"goal": "do something"})
+    task = runner.submit(AGENT_RECIPE, {"goal": "do something", "url": _start_url()})
     finished = await _drain(runner, task.id)
     assert finished.status is TaskStatus.FAILED
     assert "agent not available" in finished.detail
@@ -316,6 +328,29 @@ async def test_freeform_task_blocks_on_challenge(runner_factory):
         raise EscalationRequired(Challenge(ChallengeKind.CAPTCHA, "wall", url))
 
     runner = make(agent_runner=agent)
-    task = runner.submit(AGENT_RECIPE, {"goal": "do something"})
+    task = runner.submit(AGENT_RECIPE, {"goal": "do something", "url": _start_url()})
     finished = await _drain(runner, task.id)
     assert finished.status is TaskStatus.BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_freeform_requires_a_start_url(runner_factory):
+    """A freeform instruction is meaningless without a page to work on.
+
+    entry_url is empty for this recipe and the session is never navigated by the
+    deterministic path, so without a caller-supplied url the agent would be
+    handed whatever page happened to be open -- about:blank on a fresh pod,
+    which is the state the first freeform task actually ran in.
+    """
+    make, _site = runner_factory
+
+    async def agent(session, url, payload):  # pragma: no cover - must not run
+        raise AssertionError("the agent must not be reached without a url")
+
+    runner = make(agent_runner=agent)
+    task = runner.submit(AGENT_RECIPE, {"goal": "do a thing"})
+    finished = await _drain(runner, task.id)
+
+    assert finished.status is TaskStatus.FAILED
+    assert "start url" in finished.detail
+    assert finished.used_agent is False

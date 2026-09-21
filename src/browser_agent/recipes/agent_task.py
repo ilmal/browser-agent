@@ -20,8 +20,11 @@ from ..tasks import AGENT_RECIPE, register
 
 class AgentTask:
     name = AGENT_RECIPE
-    description = "Freeform: give the agent an instruction and let it work the page."
-    entry_url = "about:blank"
+    description = "Freeform: give the agent an instruction and a start URL."
+    # No default: a freeform instruction is meaningless without a page to work
+    # on, so the runner requires `url` in the payload rather than silently
+    # handing the agent a blank page.
+    entry_url = ""
 
     async def run(self, session: BrowserSession, payload: dict[str, Any]) -> dict[str, Any]:
         # The runner intercepts this recipe before calling run(); reaching here
