@@ -87,7 +87,7 @@ spec:
         kubernetes.io/arch: amd64
       containers:
         - name: agent
-          image: localhost:5000/browser-agent:8ec50d5
+          image: localhost:5000/browser-agent:48a5ec8
           imagePullPolicy: IfNotPresent
           ports:
             - { name: api, containerPort: 8000 }
@@ -127,9 +127,12 @@ spec:
             - { name: PLANNER_CLIENT_ID, value: "browser-agent-planner" }
             # Laya gate. Runs over HTTP against llm-service's /v1/decide
             # proxy (see the llm-service skill) — no torch in this image.
-            # The picker stays OFF until the fixture accuracy bench gives it
-            # a real number (flip LAYA_PICK_ENABLED then); confirmation is
-            # on — its failure mode is a repair attempt, not a human page.
+            # PICK stays off on engine grounds: benched in this pod
+            # 2026-09-21 (scripts/laya_pick_bench.py), laya could not
+            # discriminate candidates — choice head 4/18 with flat
+            # probabilities, yes/no tournament all p in 0.41-0.55 — so no
+            # confidence floor is ever cleared. CONFIRM stays on: its
+            # failure mode is a repair attempt, not a human page.
             - { name: LAYA_ENABLED, value: "true" }
             - { name: LAYA_DECIDE_URL, value: "http://llm-service.llm-service.svc.cluster.local:8001/v1/decide" }
             - { name: LAYA_PICK_ENABLED, value: "false" }
@@ -138,6 +141,15 @@ spec:
             # temperatures) and fits the 512-token budget.
             - { name: LAYA_MAX_CANDIDATES, value: "10" }
             - { name: LAYA_PICK_RETRIES, value: "1" }
+            # Element picker: same numbered-lines/bind-by-index contract as
+            # the laya picker, but the model is deepseek-v4.1-flash —
+            # benched 18/18 at ~1 s/pick on the same fixtures
+            # (scripts/llm_pick_bench.py) where laya scored 4/18. Selectorless
+            # click/type steps bind by index through this; laya is asked
+            # first and only answers on single-candidate pages.
+            - { name: PICKER_ENABLED, value: "true" }
+            - { name: PICKER_MODEL, value: "deepseek-v4.1-flash" }
+            - { name: PICKER_CLIENT_ID, value: "browser-agent-picker" }
             # LLM_API_KEY comes from the Secret (envFrom below), which is the
             # name llm-service's own manifests already use for it.
             #
