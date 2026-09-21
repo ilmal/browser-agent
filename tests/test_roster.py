@@ -311,3 +311,26 @@ def test_the_served_page_carries_the_prefix(bot_env):
 
         # And the page really uses it: every api() call is prefixed.
         assert "fetch(PREFIX + path" in page.text
+
+
+def test_the_live_view_url_keeps_the_prefix_with_a_base_url(bot_env, monkeypatch):
+    """A configured BROWSER_BASE_URL must not drop the roster prefix.
+
+    browser_base_url is the deployment's own domain, which under a roster is
+    the ROSTER's. Using it raw sent "Open the browser" to the roster's
+    /vnc.html — a live view of the wrong window that looks like it worked.
+    The prefix is what distinguishes them and it belongs in both branches.
+    """
+    from fastapi.testclient import TestClient
+
+    with TestClient(bot_env.app) as client:
+        state = client.get("/api/state", headers={
+            "Authorization": "Bearer test-token",
+            "X-Forwarded-Prefix": "/b/linkedin",
+        }).json()
+        assert state["url_prefix"] == "/b/linkedin"
+
+        page = client.get("/", headers={"Authorization": "Bearer test-token"}).text
+        # The page composes base + prefix + "/vnc.html"; with the roster base
+        # set this is the exact expression that was wrong.
+        assert "base + prefix + \"/vnc.html\"" in page

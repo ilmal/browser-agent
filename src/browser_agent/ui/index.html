@@ -356,8 +356,12 @@ function set(id, html) {
 // part that differs. Empty prefix = the old one-domain-per-bot behaviour.
 function browserUrl() {
   if (!state) return null;
-  if (state.browser_base_url) return state.browser_base_url.replace(/\/$/, "") + "/vnc.html";
-  return location.origin + (state.url_prefix || "") + "/vnc.html";
+  // The prefix applies to BOTH bases, not just the inferred one. With the
+  // roster, browser_base_url is the roster's own domain, so using it raw sent
+  // the live view to the roster's /vnc.html — the wrong window, silently.
+  const prefix = state.url_prefix || "";
+  const base = (state.browser_base_url || location.origin).replace(/\/$/, "");
+  return base + prefix + "/vnc.html";
 }
 
 // True when this page is a bot inside a roster rather than the whole app.
