@@ -198,18 +198,24 @@ async function refresh() {
   $("llm").textContent = "llm: " + (st.llm_enabled ? "on" : "off");
   // Through a proxy the browser is a sibling path on the same domain; the pod
   // port only makes sense when it is forwarded directly.
-  $("novnc").value = st.browser_base_url
+  const novncUrl = st.browser_base_url
     ? st.browser_base_url + "/vnc.html"
     : location.hostname + ":" + st.novnc_port;
+  $("novnc").value = novncUrl;
 
   const blocked = st.tasks.filter(t => t.status === "blocked");
   if (blocked.length) {
+    // The link is the whole point of this banner: a blocked run needs a human
+    // to reach the browser, so it must be clickable and correct behind a proxy
+    // rather than naming a pod port the operator cannot open.
     $("banner").innerHTML = `<div class="alert"><strong>Needs a human.</strong> ` +
       blocked.map(t => `${esc(t.recipe)} — ${esc(t.detail)}`).join("<br>") +
-      `<br><br>Open noVNC on ${esc(st.novnc_port)}, clear it, then use Retry.`;
+      `<br><br><a href="${esc(novncUrl)}" target="_blank" rel="noopener">Open the browser</a>, ` +
+      `clear it, then use Retry.`;
   } else if (!st.profile_initialised) {
     $("banner").innerHTML = `<div class="alert ok">This profile has no session yet. ` +
-      `Open the login URL over noVNC and sign in once — the profile persists after that.</div>`;
+      `<a href="${esc(novncUrl)}" target="_blank" rel="noopener">Open the browser</a>, ` +
+      `sign in once — the profile persists after that.</div>`;
   } else {
     $("banner").innerHTML = "";
   }
