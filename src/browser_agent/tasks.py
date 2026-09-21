@@ -326,12 +326,23 @@ class TaskRunner:
         await self._agent_attempt(task, agent_url, agent_payload, prefix="agent fallback")
 
     async def _agent_attempt(
-        self, task: Task, url: str, payload: dict[str, Any], *, prefix: str
+        self,
+        task: Task,
+        url: str,
+        payload: dict[str, Any],
+        *,
+        prefix: str,
+        propagate_amendment: bool = False,
     ) -> None:
         """Run the agent fallback and record the outcome on the task.
 
         Shared by every path that reaches the agent, so the Cancelled /
-        amendment / challenge handling is identical whichever way it got here.
+        challenge handling is identical whichever way it got here.
+
+        An amendment is *re-raised* when ``propagate_amendment`` is set: only the
+        caller knows what "the instruction changed" means for it. A freeform task
+        re-runs the agent, a plan re-plans; the generic fallback has nothing to
+        re-interpret, so it fails there and asks for a Retry.
         """
         try:
             task.result = await self._agent_runner(self.session, url, payload)
@@ -344,9 +355,11 @@ class TaskRunner:
             task.status = TaskStatus.FAILED
             task.detail = "stopped by the operator"
             self.activity.note("error", "stopped by the operator")
-        except Amended as exc:
+        except Amended:
+            if propagate_amendment:
+                raise
             task.status = TaskStatus.FAILED
-            task.detail = f"{prefix}: {exc}; re-plan needed"
+            task.detail = f"{prefix}: instruction changed mid-run; re-plan needed"
             self.activity.note(
                 "info", "instruction changed mid-run; press Retry to re-plan it"
             )
@@ -355,8 +368,29 @@ class TaskRunner:
             task.detail = f"{prefix} failed: {exc}"
             log.error("%s failed for %s: %s", prefix, task.id, exc)
 
+    def _apply_amendment(self, task: Task, exc: Amended) -> None:
+        """Adopt the operator's new instruction as the task's own text.
+
+        Written into the payload so a retry does not silently revert to the
+        original wording — the task the operator is watching is the amended one.
+        """
+        task.amended_count += 1
+        task.payload = {**task.payload, "task": exc.instruction, "text": exc.instruction}
+        # The agent reads `goal` first, so leaving a stale one would make the
+        # amendment look ignored.
+        task.payload["goal"] = exc.instruction
+        self.activity.note(
+            "info", f"instruction changed; restarting with it ({task.amended_count})"
+        )
+
     async def _run_freeform(self, task: Task, recipe: Recipe) -> None:
-        """Run a task that is only an instruction, with no deterministic path."""
+        """Run a task that is only an instruction, with no deterministic path.
+
+        An amendment restarts the agent with the new instruction: there is no
+        step list to repair, so "carry on with different words" is the whole
+        behaviour. The browser is left where the previous attempt stopped, which
+        is what makes a mid-run correction cheap — the site state is intact.
+        """
         if self._agent_runner is None or not self.llm.configured:
             task.status = TaskStatus.FAILED
             task.detail = "agent not available (llm not configured, or browser-use missing)"
@@ -372,22 +406,38 @@ class TaskRunner:
             task.status = TaskStatus.FAILED
             task.detail = "freeform tasks need a start url in the payload"
             return
-        try:
-            page = await self.session.goto(url)
-            challenge = await detect_challenge(page)
-            if challenge is not None:
-                await self._block(task, challenge)
+
+        for _attempt in range(MAX_AMENDMENTS + 1):
+            # Only the first attempt navigates: a mid-run amendment must not
+            # throw away the page the operator is watching.
+            if not task.amended_count:
+                try:
+                    page = await self.session.goto(url)
+                    challenge = await detect_challenge(page)
+                    if challenge is not None:
+                        await self._block(task, challenge)
+                        return
+                except Cancelled:
+                    task.status = TaskStatus.FAILED
+                    task.detail = "stopped by the operator"
+                    return
+                except Exception as exc:
+                    task.status = TaskStatus.FAILED
+                    task.detail = f"agent failed: {exc}"
+                    log.error("freeform task %s failed to open %s: %s", task.id, url, exc)
+                    return
+            try:
+                await self._agent_attempt(
+                    task, url, task.payload, prefix="agent", propagate_amendment=True
+                )
                 return
-        except Cancelled:
-            task.status = TaskStatus.FAILED
-            task.detail = "stopped by the operator"
-            return
-        except Exception as exc:
-            task.status = TaskStatus.FAILED
-            task.detail = f"agent failed: {exc}"
-            log.error("freeform task %s failed to open %s: %s", task.id, url, exc)
-            return
-        await self._agent_attempt(task, url, task.payload, prefix="agent")
+            except Amended as exc:
+                self._apply_amendment(task, exc)
+                self.session.control.amendments.clear()
+                continue
+
+        task.status = TaskStatus.FAILED
+        task.detail = f"too many amendments ({MAX_AMENDMENTS}) without a completed run"
 
     async def _run_plan_recipe(self, task: Task, recipe: Recipe) -> None:
         """plan.task, with the operator's amendment able to re-plan mid-run.
@@ -419,11 +469,7 @@ class TaskRunner:
             except Amended as exc:
                 # The operator's new instruction replaces the task text; the
                 # amended URL, when the agent reported one, becomes the entry.
-                task.amended_count += 1
-                self.activity.note(
-                    "info", f"instruction changed; re-planning ({task.amended_count})"
-                )
-                task.payload = {**task.payload, "task": exc.instruction, "text": exc.instruction}
+                self._apply_amendment(task, exc)
                 if exc.url and exc.url.startswith("http"):
                     task.payload["entry_url"] = exc.url
                 self.session.control.amendments.clear()

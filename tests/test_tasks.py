@@ -354,3 +354,89 @@ async def test_freeform_requires_a_start_url(runner_factory):
     assert finished.status is TaskStatus.FAILED
     assert "start url" in finished.detail
     assert finished.used_agent is False
+
+
+@pytest.mark.asyncio
+async def test_freeform_amendment_reruns_the_agent_with_the_new_text(runner_factory, site):
+    """Changing the instruction mid-run must not just end the task.
+
+    The operator's whole reason for typing into a running task is to change what
+    it does, so the run has to continue with the new wording rather than stop and
+    ask for a manual Retry. browser-use raises the amendment out of the step
+    hook; the runner is what turns that into "start again with this instead".
+    """
+    make, site_url = runner_factory
+    from browser_agent.control import Amended
+    from browser_agent.tasks import AGENT_RECIPE
+
+    calls: list[str] = []
+
+    async def agent(session, url, payload):
+        calls.append(payload.get("goal") or payload.get("task") or "")
+        if len(calls) == 1:
+            # What a running agent does when the operator steers it.
+            runner_ref[0].control.steer("just say the title")
+            raise Amended("just say the title", url)
+        return {"agent_result": "did the amended thing"}
+
+    runner = make(agent_runner=agent)
+    runner_ref = [runner]
+    task = runner.submit(
+        AGENT_RECIPE, {"goal": "read every story", "url": site_url}
+    )
+    finished = await _drain(runner, task.id)
+
+    assert finished.status is TaskStatus.DONE, finished.detail
+    assert calls == ["read every story", "just say the title"]
+    assert finished.amended_count == 1
+
+
+@pytest.mark.asyncio
+async def test_freeform_amendment_loop_is_bounded(runner_factory, site):
+    """An instruction that can never be satisfied must be refused, not retried
+    forever. A person steering a run corrects it a few times; a loop means the
+    instruction itself is unworkable and belongs in front of a human."""
+    make, site_url = runner_factory
+    from browser_agent.control import Amended
+    from browser_agent.tasks import AGENT_RECIPE, MAX_AMENDMENTS
+
+    calls: list[int] = []
+
+    async def agent(session, url, payload):
+        calls.append(1)
+        runner_ref[0].control.steer("still not right")
+        raise Amended("still not right", url)
+
+    runner = make(agent_runner=agent)
+    runner_ref = [runner]
+    task = runner.submit(AGENT_RECIPE, {"goal": "do the thing", "url": site_url})
+    finished = await _drain(runner, task.id)
+
+    assert finished.status is TaskStatus.FAILED
+    assert "amendments" in finished.detail
+    # One initial run plus one per permitted amendment -- and then it stops.
+    assert len(calls) == MAX_AMENDMENTS + 1
+
+
+@pytest.mark.asyncio
+async def test_stop_is_failed_not_blocked(runner_factory, site):
+    """The operator stopping a run is a decision, not a captcha.
+
+    BLOCKED pages a human and is never auto-retried; a deliberate stop must not
+    do either, or stopping a task would itself raise an alert.
+    """
+    make, site_url = runner_factory
+    from browser_agent.control import Cancelled
+    from browser_agent.tasks import AGENT_RECIPE
+
+    async def agent(session, url, payload):
+        runner_ref[0].control.cancel()
+        raise Cancelled("stopped by operator")
+
+    runner = make(agent_runner=agent)
+    runner_ref = [runner]
+    task = runner.submit(AGENT_RECIPE, {"goal": "do the thing", "url": site_url})
+    finished = await _drain(runner, task.id)
+
+    assert finished.status is TaskStatus.FAILED
+    assert "operator" in finished.detail
