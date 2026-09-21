@@ -26,6 +26,7 @@ from .browser import BrowserSession
 from .config import Settings
 from .escalation import EscalationRequired, detect_challenge, looks_logged_out
 from .llm import LLMClient
+from .plan_model import PlanRejected, StepFailure
 
 log = logging.getLogger(__name__)
 
@@ -194,6 +195,7 @@ class TaskRunner:
             await self._block(task, challenge)
             return
 
+        plan_failure: StepFailure | None = None
         try:
             task.result = await recipe.run(self.session, task.payload)
             task.status = TaskStatus.DONE
@@ -204,6 +206,15 @@ class TaskRunner:
             return
         except Exception as exc:
             log.warning("recipe %s failed for %s: %s", task.recipe, task.id, exc)
+            if isinstance(exc, PlanRejected):
+                # A plan that never validated is a caller/model-quality bug.
+                # Failing visibly beats spending an agent run on the same
+                # garbage input the next planner call would likely reproduce.
+                task.status = TaskStatus.FAILED
+                task.detail = f"plan rejected: {exc}"
+                return
+            if isinstance(exc, StepFailure):
+                plan_failure = exc
             task.detail = f"recipe failed: {exc}"
 
         # Deterministic path failed. Only now do we spend an LLM call.
@@ -218,8 +229,17 @@ class TaskRunner:
             await self._block(task, challenge)
             return
 
+        # A half-run plan hands the agent the original task and the plan's own
+        # starting URL, so it finishes the job instead of retrying the step
+        # that broke.
+        agent_url = recipe.entry_url
+        agent_payload = task.payload
+        if plan_failure is not None:
+            agent_url = plan_failure.entry_url or agent_url
+            agent_payload = {**task.payload, "goal": plan_failure.goal}
+
         try:
-            task.result = await self._agent_runner(self.session, recipe.entry_url, task.payload)
+            task.result = await self._agent_runner(self.session, agent_url, agent_payload)
             task.used_agent = True
             task.status = TaskStatus.DONE
             task.detail = "agent fallback succeeded"

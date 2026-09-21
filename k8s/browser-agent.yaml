@@ -113,6 +113,25 @@ spec:
             # named for this caller rather than the default "openai-compat".
             - { name: LLM_SOURCE, value: "browser-agent" }
             - { name: LLM_CLIENT_ID, value: "browser-agent" }
+            # plan.task: the planner reuses the same endpoint, key and source
+            # as the fallback, with a faster text model and its own client id
+            # so llm-service's call log can tell the two callers apart.
+            - { name: PLANNER_MODEL, value: "deepseek-v4.1-flash" }
+            - { name: PLANNER_MAX_STEPS, value: "12" }
+            - { name: PLANNER_STEP_TIMEOUT_S, value: "10" }
+            - { name: PLANNER_CLIENT_ID, value: "browser-agent-planner" }
+            # Laya gate. The picker stays OFF here until the fixture accuracy
+            # bench gives it a real number (flip LAYA_PICK_ENABLED then);
+            # confirmation is on — its failure mode is a repair attempt, not
+            # a human page. Requires the image built with the `laya` extra
+            # (weights baked in at build time).
+            - { name: LAYA_ENABLED, value: "true" }
+            - { name: LAYA_PICK_ENABLED, value: "false" }
+            - { name: LAYA_MIN_CONFIDENCE, value: "0.75" }
+            # 10 = the calibrated choice range (buckets >=11 ship distorted
+            # temperatures) and fits the 512-token budget.
+            - { name: LAYA_MAX_CANDIDATES, value: "10" }
+            - { name: LAYA_PICK_RETRIES, value: "1" }
             # LLM_API_KEY comes from the Secret (envFrom below), which is the
             # name llm-service's own manifests already use for it.
             #
@@ -126,8 +145,10 @@ spec:
           envFrom:
             - secretRef: { name: browser-agent-secrets }
           resources:
-            requests: { cpu: 500m, memory: 1Gi }
-            limits: { cpu: "2", memory: 3Gi }
+            # Memory headroom for the baked Laya weights (~0.7 GB resident when
+            # the gate loads) on top of Chrome + the agent fallback.
+            requests: { cpu: 500m, memory: 1500Mi }
+            limits: { cpu: "2", memory: 4Gi }
           volumeMounts:
             - { name: profile, mountPath: /profiles }
             - { name: data, mountPath: /data }

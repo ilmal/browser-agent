@@ -17,8 +17,12 @@ dependencies = [
 agent = [
     "browser-use>=0.2",
 ]
+laya = [
+    "laya",
+]
 dev = [
     "pytest>=8",
+    "pytest-asyncio>=0.23",
     "ruff>=0.6",
 ]
 

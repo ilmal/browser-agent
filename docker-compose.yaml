@@ -36,6 +36,15 @@ services:
       LLM_ENABLED: ${LLM_ENABLED:-false}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_MODEL: ${LLM_MODEL:-glm-4.5v}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      # plan.task: planner + Laya gate.
+      PLANNER_MODEL: ${PLANNER_MODEL:-deepseek-v4.1-flash}
+      PLANNER_MAX_STEPS: ${PLANNER_MAX_STEPS:-12}
+      PLANNER_STEP_TIMEOUT_S: ${PLANNER_STEP_TIMEOUT_S:-10}
+      LAYA_ENABLED: ${LAYA_ENABLED:-true}
+      LAYA_PICK_ENABLED: ${LAYA_PICK_ENABLED:-true}
+      LAYA_MIN_CONFIDENCE: ${LAYA_MIN_CONFIDENCE:-0.75}
+      LAYA_MAX_CANDIDATES: ${LAYA_MAX_CANDIDATES:-10}
       NOTIFY_ON_ESCALATION: "false"
       # Uncomment to route through the residential proxy. From a laptop you
       # would point this at an ssh -D tunnel instead of the in-cluster name.
