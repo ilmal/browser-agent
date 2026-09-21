@@ -28,8 +28,8 @@ Each identity gets its own container and its own persistent Chrome profile
 directory (`profiles/<name>/`), bind-mounted from the host. Profiles are never
 committed and never shared between identities.
 
-> `profiles/` and `driver_user/` hold **live session cookies**. They are
-> gitignored and the pre-commit hook blocks them. This repo is public.
+> `profiles/` holds **live session cookies**. It is gitignored and the
+> pre-commit hook blocks it. This repo is public.
 
 ## Taking over a run
 
@@ -83,11 +83,7 @@ src/browser_agent/
 k8s/              one Deployment + PVC + Service per profile
 hooks/pre-commit  secret + profile guard (enable via core.hooksPath)
 Dockerfile        Chrome + Xvfb + x11vnc + noVNC, tini as PID 1
-src/main.py       the original Snapchat bot, kept for reference
 ```
-
-`src/main.py` / `src/modules/snapchat/` are the original single-site
-implementation, kept for reference while recipes are ported.
 
 ## Design notes
 
