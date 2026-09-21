@@ -53,6 +53,16 @@ spec:
     metadata:
       labels: { app: browser-agent, profile: x }
     spec:
+      # A fixed hostname, because it leaks into Chrome's profile lock.
+      # user_data_dir/SingletonLock is a symlink whose target text is
+      # "<hostname>-<pid>". A pod's default hostname is its own name, which
+      # changes on every recreate, while the profile sits on a stable PVC. If
+      # Chrome is killed rather than closed (node loss, OOM, SIGKILL) the lock
+      # survives, and on the next boot Chrome sees a foreign hostname in it and
+      # exits with PROFILE_IN_USE without starting. Pinning the hostname keeps
+      # the lock valid across restarts; the app also clears a stale lock on
+      # boot.
+      hostname: browser-agent
       # Kubernetes' equivalent of tini: without it Chrome's helper processes
       # become zombies and hold the PID table open.
       shareProcessNamespace: true

@@ -43,6 +43,30 @@ def _read_devtools_endpoint(profile_dir: Path, timeout_s: float = 10.0) -> str |
     return None
 
 
+def _clear_stale_profile_lock(profile_dir: Path) -> None:
+    """Remove a leftover Chrome profile lock when no browser holds it.
+
+    `SingletonLock` is a symlink whose target text is "<hostname>-<pid>". Chrome
+    refuses to start with PROFILE_IN_USE when that hostname is not the local
+    one. A clean shutdown unlinks the lock, but a SIGKILL, OOM kill or node
+    loss does not, so on a PVC-backed profile the next boot can find a lock
+    belonging to a pod that no longer exists. Only removed when the DevTools
+    port file is absent, which is what distinguishes "crashed" from "a live
+    browser owns this profile" — clearing it under a running browser would be
+    the very corruption the single-writer rule exists to prevent.
+    """
+    lock = profile_dir / "SingletonLock"
+    if not lock.exists() and not lock.is_symlink():
+        return
+    if _read_devtools_endpoint(profile_dir, timeout_s=0.1) is not None:
+        return
+    try:
+        lock.unlink()
+        log.warning("cleared a stale Chrome profile lock in %s", profile_dir)
+    except OSError:
+        log.warning("could not clear the stale profile lock in %s", profile_dir, exc_info=True)
+
+
 class BrowserSession:
     """Owns one Playwright persistent context and its pages."""
 
@@ -71,6 +95,7 @@ class BrowserSession:
             return self._context
 
         self.settings.profile_dir.mkdir(parents=True, exist_ok=True)
+        _clear_stale_profile_lock(self.settings.profile_dir)
         self._playwright = await async_playwright().start()
 
         launch: dict = {
