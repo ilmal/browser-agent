@@ -64,6 +64,11 @@ spec:
         runAsNonRoot: true
         runAsUser: 10001
         fsGroup: 10001
+      # cn1 is amd64, office-server is arm64. The image ships as a single amd64
+      # manifest, so an unpinned pod scheduled onto office-server dies with an
+      # exec-format error. Build multi-arch before removing this.
+      nodeSelector:
+        kubernetes.io/arch: amd64
       containers:
         - name: agent
           image: $IMAGE
