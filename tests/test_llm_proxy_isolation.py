@@ -86,3 +86,46 @@ async def test_llm_client_ignores_ambient_proxy(settings, monkeypatch):
 
     assert await LLMClient(settings).healthy() is True
     assert seen.get("trust_env") is False, "LLM client must not honour ambient proxies"
+
+
+@pytest.mark.asyncio
+async def test_escalation_alert_ignores_ambient_proxy(settings, monkeypatch, tmp_path):
+    """The alert path has the same exposure as the LLM path.
+
+    notify_escalation swallows exceptions by design, so a proxy that breaks the
+    POST would turn a blocked account into a silent one.
+    """
+    from dataclasses import replace
+
+    from browser_agent.escalation import Challenge, ChallengeKind
+    from browser_agent.notify import notify_escalation
+
+    settings = replace(settings, ops_alert_url="http://ops-alerts.example/hook")
+    monkeypatch.setenv("HTTP_PROXY", "socks5://egress.example:1080")
+
+    seen: dict = {}
+
+    class _FakeClient:
+        def __init__(self, *a, **kw):
+            seen.update(kw)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, json):
+            seen["url"] = url
+
+            class _R:
+                def raise_for_status(self):
+                    return None
+
+            return _R()
+
+    monkeypatch.setattr("browser_agent.notify.httpx.AsyncClient", _FakeClient)
+
+    challenge = Challenge(ChallengeKind.CAPTCHA, "a captcha", "https://example.test")
+    assert await notify_escalation(settings, challenge, "https://browser.example/vnc.html")
+    assert seen.get("trust_env") is False, "alert client must not honour ambient proxies"

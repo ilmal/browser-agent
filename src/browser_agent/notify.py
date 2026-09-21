@@ -41,7 +41,10 @@ async def notify_escalation(settings: Settings, challenge: Challenge, takeover_u
         f"take over: {takeover_url}"
     )
     try:
-        async with httpx.AsyncClient(timeout=10) as client:
+        # trust_env=False: the alert must not depend on the browser's egress
+        # proxy being reachable, and a failure here is swallowed by design —
+        # exactly the kind of silent drop this module exists to avoid.
+        async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
             resp = await client.post(settings.ops_alert_url, json={"message": message})
             resp.raise_for_status()
         log.info("escalation alert delivered for %s", settings.profile)
