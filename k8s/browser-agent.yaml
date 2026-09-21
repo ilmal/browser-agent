@@ -87,7 +87,7 @@ spec:
         kubernetes.io/arch: amd64
       containers:
         - name: agent
-          image: localhost:5000/browser-agent:000dfd1
+          image: localhost:5000/browser-agent:4e67822
           imagePullPolicy: IfNotPresent
           ports:
             - { name: api, containerPort: 8000 }
