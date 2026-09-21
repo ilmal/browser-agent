@@ -112,6 +112,8 @@ async def test_http_500_is_planner_unavailable(settings, fake_http):
     fake_http._response = _Resp(status_code=500)
     with pytest.raises(PlannerUnavailable, match="transport failed"):
         await PlannerClient(settings).plan("task")
+    # The 500 is a transport failure, so it was retried once before giving up.
+    assert len(fake_http.instances) == 2
 
 
 async def test_connection_error_is_planner_unavailable(settings, fake_http, monkeypatch):
@@ -121,6 +123,25 @@ async def test_connection_error_is_planner_unavailable(settings, fake_http, monk
     monkeypatch.setattr(fake_http, "post", _boom)
     with pytest.raises(PlannerUnavailable):
         await PlannerClient(settings).plan("task")
+
+
+async def test_transient_transport_failure_is_retried_once(settings, fake_http, monkeypatch):
+    """An llm-service roll must not skip the fast path: fail once, then work."""
+    fake_http._response = _Resp()  # earlier tests leave a 500 on the class
+    real_post = fake_http.post
+    calls = {"n": 0}
+
+    async def _flaky(self, url, json=None, headers=None):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise httpx.ReadTimeout("")
+        return await real_post(self, url, json=json, headers=headers)
+
+    monkeypatch.setattr(fake_http, "post", _flaky)
+    out = await PlannerClient(settings).plan("task")
+
+    assert out.endswith('{"entry_url":"https://x/","steps":[]}')
+    assert calls["n"] == 2
 
 
 async def test_empty_choices_is_planner_unavailable(settings, fake_http):

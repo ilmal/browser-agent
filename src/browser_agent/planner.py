@@ -64,7 +64,22 @@ class PlannerClient:
         }
 
     async def plan(self, task: str) -> str:
-        """One planner call. Raises PlannerUnavailable on any transport failure."""
+        """One planner call, retried once on transport failure.
+
+        Raises PlannerUnavailable after the retry also fails — the caller
+        falls back to the agent, as designed.
+        """
+        try:
+            return await self._plan_once(task)
+        except PlannerUnavailable as exc:
+            # An llm-service roll (deploy/restart) leaves a pod that accepts
+            # the connection but never answers; seen in prod 2026-09-21, where
+            # the transient skipped the whole fast path for the task. One
+            # bounded retry costs at most one extra timeout, then falls back.
+            log.warning("planner call failed (%s); retrying once", exc)
+            return await self._plan_once(task)
+
+    async def _plan_once(self, task: str) -> str:
         if not self.enabled:
             raise PlannerUnavailable("planner is not configured (LLM_ENABLED or LLM_API_KEY)")
 
