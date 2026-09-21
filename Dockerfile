@@ -46,6 +46,14 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         tini \
     && rm -rf /var/lib/apt/lists/*
 
+# noVNC's app/ui.js fetches ./package.json on startup and fills the version
+# badge from it. Debian's novnc package ships the JS but not that file, so the
+# fetch 404s and the badge is hidden — the one console error the live view
+# produces. Written here rather than hardcoded so it tracks the apt version.
+RUN NOVNC_VERSION="$(dpkg-query -W -f='${Version}' novnc | cut -d: -f2 | cut -d- -f1)" \
+    && printf '{"name":"novnc","version":"%s"}\n' "$NOVNC_VERSION" > /usr/share/novnc/package.json \
+    && chmod a+r /usr/share/novnc/package.json
+
 WORKDIR /app
 
 # uv for a reproducible, cached dependency install.
