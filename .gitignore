@@ -41,3 +41,7 @@ playwright-report/
 .idea/
 .vscode/
 .claude/
+docker-compose.profiles.yaml
+.local/
+profiles/
+data/

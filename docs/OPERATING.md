@@ -69,11 +69,24 @@ ssh cn1 'kubectl rollout status deployment/profile-x -n browser-agent --timeout=
 
 ### Adding a profile
 
-Copy the `profile-x` Deployment + PVC + Service block, rename `x` to the new
-profile everywhere, and set `AGENT_PROFILE` to match. Each profile needs its
-own PVC — sharing one between pods corrupts the session. Pods run with
+```bash
+./scripts/add-profile.sh linkedin > k8s/profiles/linkedin.yaml
+ssh cn1 'kubectl apply -f -' < k8s/profiles/linkedin.yaml
+```
+
+One profile = one Deployment + PVC + Service. Each profile needs its own PVC —
+sharing one between pods corrupts the session. Pods run with
 `strategy: Recreate` and `replicas: 1` for the same reason: a Chrome profile
 is single-writer.
+
+### Several profiles at once (locally)
+
+```bash
+CONTROL_TOKEN=devtoken ./scripts/profiles-up.sh x linkedin facebook
+```
+
+Writes a compose override with one service per profile and starts them.
+Admin UIs land on `:8900, :8901, :8902`, noVNC on `:6080, :6081, :6082`.
 
 ### Reaching the UI and noVNC
 
