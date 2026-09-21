@@ -40,7 +40,9 @@ class LLMClient:
             "max_tokens": max_tokens,
         }
         url = self.settings.llm_base_url.rstrip("/") + "/chat/completions"
-        async with httpx.AsyncClient(timeout=120) as client:
+        # trust_env=False: the LLM lives in-cluster, so an ambient HTTP_PROXY
+        # (egress proxy) must not be applied to this call.
+        async with httpx.AsyncClient(timeout=120, trust_env=False) as client:
             resp = await client.post(url, json=payload)
             resp.raise_for_status()
             data = resp.json()
@@ -54,7 +56,7 @@ class LLMClient:
         """True when the endpoint answers. Used by /healthz, never fatal."""
         try:
             url = self.settings.llm_base_url.rstrip("/") + "/models"
-            async with httpx.AsyncClient(timeout=5) as client:
+            async with httpx.AsyncClient(timeout=5, trust_env=False) as client:
                 return (await client.get(url)).status_code < 500
         except Exception:
             return False

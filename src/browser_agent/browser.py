@@ -96,11 +96,11 @@ class BrowserSession:
         }
         # A persistent context cannot be launched with a proxy per-page; the
         # proxy belongs to the browser. Residential egress (office-proxy) is
-        # what keeps these sessions from being flagged as datacenter.
-        if self.settings.https_proxy or self.settings.http_proxy:
-            launch["proxy"] = {
-                "server": self.settings.https_proxy or self.settings.http_proxy,
-            }
+        # what keeps these sessions from being flagged as datacenter. This is
+        # the only place the proxy is configured — it is not exported as
+        # HTTP_PROXY, which the LLM client would otherwise pick up.
+        if self.settings.browser_proxy:
+            launch["proxy"] = {"server": self.settings.browser_proxy}
 
         self._context = await self._playwright.chromium.launch_persistent_context(**launch)
         self._context.set_default_timeout(30_000)

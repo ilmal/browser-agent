@@ -87,9 +87,11 @@ spec:
             - { name: LLM_MODEL, value: "glm-4.5v" }
             - { name: LLM_ENABLED, value: "true" }
             # Residential egress. A datacenter IP is the fastest way to get a
-            # session flagged, so this is not optional.
-            - { name: HTTP_PROXY, value: "socks5://office-proxy.crawl.svc.cluster.local:1080" }
-            - { name: HTTPS_PROXY, value: "socks5://office-proxy.crawl.svc.cluster.local:1080" }
+            # session flagged, so this is not optional. Named BROWSER_PROXY,
+            # not HTTP_PROXY: the conventional names are honoured implicitly by
+            # every HTTP client in the process, which would route the
+            # in-cluster LLM call through the proxy and fail.
+            - { name: BROWSER_PROXY, value: "socks5://office-proxy.crawl.svc.cluster.local:1080" }
           envFrom:
             - secretRef: { name: browser-agent-secrets }
           resources:

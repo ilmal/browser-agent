@@ -62,9 +62,12 @@ class Settings:
     ops_alert_url: str
     notify_on_escalation: bool
 
-    # Egress
-    http_proxy: str
-    https_proxy: str
+    # Browser egress proxy. Deliberately its own variable rather than the
+    # conventional HTTP_PROXY/HTTPS_PROXY: those are honoured implicitly by
+    # every httpx/requests client in the process, so the in-cluster LLM call
+    # would be routed through the egress proxy and fail. This value is passed
+    # to Chrome explicitly at launch instead.
+    browser_proxy: str
 
     @property
     def profile_dir(self) -> Path:
@@ -99,6 +102,5 @@ def load_settings() -> Settings:
         control_token=_env("CONTROL_TOKEN"),
         ops_alert_url=_env("OPS_ALERT_URL"),
         notify_on_escalation=_env("NOTIFY_ON_ESCALATION", "true").lower() in {"1", "true", "yes"},
-        http_proxy=_env("HTTP_PROXY"),
-        https_proxy=_env("HTTPS_PROXY"),
+        browser_proxy=_env("BROWSER_PROXY"),
     )

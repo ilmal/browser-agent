@@ -23,8 +23,7 @@ def settings(tmp_path, monkeypatch):
     monkeypatch.setenv("PROFILES_ROOT", str(tmp_path / "profiles"))
     monkeypatch.setenv("DATA_ROOT", str(tmp_path / "data"))
     monkeypatch.setenv("HEADLESS", "true")
-    monkeypatch.setenv("HTTP_PROXY", "")
-    monkeypatch.setenv("HTTPS_PROXY", "")
+    monkeypatch.setenv("BROWSER_PROXY", "")
     from browser_agent.config import load_settings
 
     return load_settings()
