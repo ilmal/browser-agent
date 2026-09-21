@@ -30,12 +30,20 @@
   .pill.warn { color: var(--warn); border-color: #55491f; }
   .pill.bad { color: var(--bad); border-color: #55292d; }
   .spacer { flex: 1; }
-  main { padding: 20px; max-width: 1080px; margin: 0 auto; display: grid; gap: 16px; }
+  /* minmax(0, 1fr) + min-width:0 on the children: a grid item defaults to
+     min-width:auto, so it refuses to shrink below its longest unbreakable
+     token. One captcha URL in a task detail stretched the whole page to
+     ~3900px regardless of viewport. */
+  main {
+    padding: 20px; max-width: 1080px; margin: 0 auto;
+    display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px;
+  }
+  main > * { min-width: 0; }
   @media (max-width: 720px) { main { padding: 12px; } }
 
-  section { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; min-width: 0; }
   section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 4px; }
-  section .sub { color: var(--dim); font-size: 12px; margin: 0 0 14px; }
+  section .sub { color: var(--dim); font-size: 12px; margin: 0 0 14px; overflow-wrap: anywhere; }
 
   label { display: block; font-size: 12px; color: var(--dim); margin: 12px 0 4px; }
   label:first-of-type { margin-top: 0; }
@@ -56,7 +64,10 @@
   .row.end { justify-content: flex-end; }
 
   table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  /* A task detail is often a raw URL and URLs have no spaces: without
+     anywhere-breaking the cell sets the table's min width, not the reverse. */
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line);
+    vertical-align: top; overflow-wrap: anywhere; }
   th { color: var(--dim); font-weight: 500; font-size: 12px; }
   tr:last-child td { border-bottom: 0; }
   code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--dim); }
@@ -69,7 +80,8 @@
   .status.queued { color: var(--dim); }
 
   .alert { border-radius: 9px; padding: 12px 14px; font-size: 13px;
-    border: 1px solid var(--warn); background: #2a2413; color: #f0dda0; }
+    border: 1px solid var(--warn); background: #2a2413; color: #f0dda0;
+    min-width: 0; overflow-wrap: anywhere; }
   .alert.bad { border-color: #55292d; background: #2a1618; color: #f0b6ba; }
   .alert a { color: inherit; font-weight: 600; }
   .alert .row { margin-top: 10px; }
@@ -82,7 +94,8 @@
     padding: 10px; overflow: auto; max-height: 260px; font-size: 12px; margin: 8px 0 0; }
   iframe { width: 100%; height: 560px; border: 1px solid var(--line); border-radius: 8px; background: #000; }
   .steps { counter-reset: s; list-style: none; padding: 0; margin: 0; }
-  .steps li { counter-increment: s; position: relative; padding: 0 0 14px 30px; }
+  .steps li { counter-increment: s; position: relative; padding: 0 0 14px 30px;
+    min-width: 0; overflow-wrap: anywhere; }
   .steps li::before {
     content: counter(s); position: absolute; left: 0; top: 1px;
     width: 20px; height: 20px; border-radius: 50%; background: var(--panel-2);
@@ -321,13 +334,19 @@ function set(id, html) {
   if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; }
 }
 
-// The browser view is a sibling path on the same origin when reached through a
-// proxy; the pod port only applies when it is forwarded directly. Either way it
-// needs a protocol — the old version produced "host:6080/vnc.html".
+// Where the noVNC view lives, as seen from the operator's browser.
+//
+// BROWSER_BASE_URL is deployment-specific and deliberately empty in the tracked
+// manifest (see k8s/browser-agent.yaml), so it is the one setting an image-only
+// redeploy can silently wipe. Never guess "host:novnc_port" from it: the pod
+// port is not exposed (the reverse proxy serves /vnc.html instead), and that
+// guess is what produced the refused "browser.ilmal.se:6080/vnc.html". The same
+// origin is always right, because whatever proxy the operator reached this page
+// through is the one that serves /vnc.html.
 function browserUrl() {
   if (!state) return null;
   if (state.browser_base_url) return state.browser_base_url.replace(/\/$/, "") + "/vnc.html";
-  return location.protocol + "//" + location.hostname + ":" + state.novnc_port + "/vnc.html";
+  return location.origin + "/vnc.html";
 }
 
 function renderPills() {
