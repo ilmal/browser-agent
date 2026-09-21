@@ -196,7 +196,11 @@ async function refresh() {
   $("profile").textContent = "profile: " + st.profile;
   $("queue").textContent = "queue: " + st.queue_depth;
   $("llm").textContent = "llm: " + (st.llm_enabled ? "on" : "off");
-  $("novnc").value = location.hostname + ":" + st.novnc_port;
+  // Through a proxy the browser is a sibling path on the same domain; the pod
+  // port only makes sense when it is forwarded directly.
+  $("novnc").value = st.browser_base_url
+    ? st.browser_base_url + "/vnc.html"
+    : location.hostname + ":" + st.novnc_port;
 
   const blocked = st.tasks.filter(t => t.status === "blocked");
   if (blocked.length) {

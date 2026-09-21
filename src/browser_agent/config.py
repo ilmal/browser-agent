@@ -39,6 +39,11 @@ class Settings:
     screen_depth: int
     novnc_port: int
 
+    # Public base URL for the admin UI + browser view, when the pod is reached
+    # through a reverse proxy (e.g. https://browser.ilmal.se). Empty means the
+    # caller reaches the pod ports directly.
+    browser_base_url: str
+
     # Browser
     headless: bool
     slow_mo_ms: int
@@ -83,6 +88,7 @@ def load_settings() -> Settings:
         screen_height=_env_int("SCREEN_HEIGHT", 900),
         screen_depth=_env_int("SCREEN_DEPTH", 24),
         novnc_port=_env_int("NOVNC_PORT", 6080),
+        browser_base_url=_env("BROWSER_BASE_URL"),
         headless=_env("HEADLESS", "false").lower() in {"1", "true", "yes"},
         slow_mo_ms=_env_int("SLOW_MO_MS", 0),
         llm_base_url=_env("LLM_BASE_URL", "http://llm-service.llm-service.svc.cluster.local:8001/v1"),

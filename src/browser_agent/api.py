@@ -122,6 +122,10 @@ async def state() -> dict[str, Any]:
         "profile": settings.profile,
         "profile_initialised": profile_exists(settings),
         "novnc_port": settings.novnc_port,
+        # Where the browser UI is reachable from the operator's machine. Empty
+        # when the pod port is forwarded directly; set via BROWSER_BASE_URL when
+        # reached through a reverse proxy (then it is the domain, not :port).
+        "browser_base_url": settings.browser_base_url,
         "recipes": list_recipes(),
         "current": runner.current.to_dict() if runner.current else None,
         "tasks": [t.to_dict() for t in tasks],

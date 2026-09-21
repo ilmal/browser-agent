@@ -45,3 +45,16 @@ docker-compose.profiles.yaml
 .local/
 profiles/
 data/
+
+# ---- Local-only deployment specifics -------------------------------------
+# This repo is PUBLIC. Anything specific to the real deployment — real
+# tokens, host names, device IPs, TLS material — stays here on disk and never
+# reaches the remote. The committed k8s manifest keeps placeholders only.
+k8s/local/
+k8s/*.local.yaml
+k8s/*.secret.yaml
+deploy/
+*.htpasswd
+ssh/
+*.local.sh
+Dockerfile.local
