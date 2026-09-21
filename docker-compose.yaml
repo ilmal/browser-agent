@@ -1,23 +1,68 @@
+# Local multi-profile stack.
+#
+# One service per browser identity, each with its own persistent Chrome
+# profile, its own admin UI port and its own noVNC port. This mirrors the
+# k8s layout (one Deployment per profile) so a recipe behaves the same in
+# both places.
+#
+#   docker compose up -d --build
+#   open http://localhost:8901/   (profile "x")
+#   open http://localhost:6081/vnc.html
+#
+# Never put the noVNC ports on a public interface: a logged-in browser behind
+# a public port is an account takeover. On a server, bind them to the
+# Tailscale address or reach them through an SSH tunnel.
+
+x-common: &common
+  build: .
+  restart: unless-stopped
+  shm_size: 2g
+  # Chrome is a multi-process app; without an init it leaves zombies.
+  init: true
+  # Run as the invoking user so the bind-mounted profiles/ and data/ dirs are
+  # writable without a chown. (In k8s this is what fsGroup does.)
+  user: "${UID:-1000}:${GID:-1000}"
+
 services:
-  snapchat-bot:
-    build:
-      context: .
-      dockerfile: Dockerfile-vnc
-    image: snapchat-bot-vnc
-    ports:
-      - "6080:6080"  # noVNC web interface
-      - "5900:5900"  # VNC server (optional)
-    volumes:
-      - ./driver_user:/app/src/driver_user  # Mount to the path the app expects
+  profile-x:
+    <<: *common
+    container_name: browser-agent-x
     environment:
-      - DISPLAY=:99
-      - PYTHONUNBUFFERED=1
-      - SCREEN_WIDTH=720
-      - SCREEN_HEIGHT=1280
-      - SCREEN_DEPTH=24
-      - SNAPCHAT_USERNAME=your_username_here
-      - SNAPCHAT_PASSWORD=your_password_here
-    shm_size: 4g
-    container_name: snapchat-bot-vnc
-    stop_signal: SIGTERM
-    stop_grace_period: 10s
+      AGENT_PROFILE: x
+      PROFILES_ROOT: /profiles
+      DATA_ROOT: /data
+      NOVNC_PORT: "6080"
+      CONTROL_TOKEN: ${CONTROL_TOKEN:-devtoken}
+      LLM_ENABLED: ${LLM_ENABLED:-false}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_MODEL: ${LLM_MODEL:-glm-4.5v}
+      NOTIFY_ON_ESCALATION: "false"
+      # Uncomment to route through the residential proxy. From a laptop you
+      # would point this at an ssh -D tunnel instead of the in-cluster name.
+      # HTTP_PROXY: socks5://host.docker.internal:1080
+      # HTTPS_PROXY: socks5://host.docker.internal:1080
+    ports:
+      - "127.0.0.1:8901:8000"   # admin UI + API
+      - "127.0.0.1:6081:6080"   # noVNC (takeover)
+    volumes:
+      - ./profiles/x:/profiles/x
+      - ./data/x:/data
+
+  # A second identity. Copy this block to add more.
+  #
+  # profile-linkedin:
+  #   <<: *common
+  #   container_name: browser-agent-linkedin
+  #   environment:
+  #     AGENT_PROFILE: linkedin
+  #     PROFILES_ROOT: /profiles
+  #     DATA_ROOT: /data
+  #     NOVNC_PORT: "6080"
+  #     CONTROL_TOKEN: ${CONTROL_TOKEN:-devtoken}
+  #     LLM_ENABLED: "false"
+  #   ports:
+  #     - "127.0.0.1:8902:8000"
+  #     - "127.0.0.1:6082:6080"
+  #   volumes:
+  #     - ./profiles/linkedin:/profiles/linkedin
+  #     - ./data/linkedin:/data

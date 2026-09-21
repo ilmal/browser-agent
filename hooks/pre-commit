@@ -22,9 +22,14 @@ if echo "$scan" | grep -qE "$patterns"; then
 fi
 
 # 3. Hardcoded credential assignments (not env lookups).
-if echo "$scan" | grep -qE "(password|passwd|secret|api_?key|token|bearer)[\"']?\s*[:=]\s*[\"'][^\"'\$]{8,}[\"']"; then
+# Placeholders are allowed: a manifest has to show the shape of a value without
+# carrying a real one. Anything else is treated as a credential.
+cred_re='(password|passwd|secret|api_?key|token|bearer)["'"'"']?[[:space:]]*[:=][[:space:]]*["'"'"'][^"'"'"'$]{8,}["'"'"']'
+placeholder='(replace|change|your[_-]?|xxx+|<[a-z]|not-required|example|dummy|placeholder|todo|redacted|\*\*\*|not[_-]?needed|unused)'
+hits=$(echo "$scan" | grep -Ei "$cred_re" | grep -Eiv "$placeholder")
+if [ -n "$hits" ]; then
   echo "BLOCKED: hardcoded credential assignment staged:"
-  echo "$scan" | grep -nEi "(password|passwd|secret|api_?key|token|bearer)[\"']?\s*[:=]\s*[\"'][^\"'\$]{8,}[\"']" | head -5
+  echo "$hits" | head -5
   fail=1
 fi
 

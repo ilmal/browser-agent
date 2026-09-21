@@ -56,9 +56,15 @@ COPY src ./src
 
 # `agent` extra adds browser-use. Kept in the image because the fallback is the
 # whole point of the design; it is inert unless a recipe fails.
-RUN uv pip install --system --no-cache ".[agent]" \
-    && python -m playwright install --with-deps chromium \
-    && rm -rf /root/.cache
+RUN uv pip install --system --no-cache ".[agent]"
+
+# Browsers live outside any user's home: Playwright's default is $HOME/.cache,
+# which differs between build (root) and runtime (agent) and would silently
+# disappear. One fixed path, readable by everyone.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN python -m playwright install --with-deps chromium \
+    && chmod -R a+rX /ms-playwright \
+    && rm -rf /var/lib/apt/lists/*
 
 # Non-root, with a home so Chrome has somewhere to write.
 RUN useradd -m -u 10001 agent && mkdir -p /profiles /data && chown -R agent:agent /profiles /data

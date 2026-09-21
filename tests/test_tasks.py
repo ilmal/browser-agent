@@ -269,3 +269,53 @@ async def test_agent_escalation_is_recorded_as_blocked(runner_factory, site):
     task = runner.submit("test.broken", {})
     finished = await _drain(runner, task.id)
     assert finished.status is TaskStatus.BLOCKED
+
+
+@pytest.mark.asyncio
+async def test_freeform_task_goes_straight_to_agent(runner_factory, site):
+    """agent.task has no deterministic path: the agent is the implementation."""
+    make, site_url = runner_factory
+    from browser_agent.tasks import AGENT_RECIPE
+
+    seen = {}
+
+    async def agent(session, url, payload):
+        seen["url"] = url
+        seen["payload"] = payload
+        return {"agent_result": "did it"}
+
+    runner = make(agent_runner=agent)
+    task = runner.submit(AGENT_RECIPE, {"goal": "open settings"})
+    finished = await _drain(runner, task.id)
+
+    assert finished.status is TaskStatus.DONE
+    assert finished.used_agent is True
+    assert seen["payload"]["goal"] == "open settings"
+
+
+@pytest.mark.asyncio
+async def test_freeform_task_without_agent_fails_cleanly(runner_factory):
+    make, _ = runner_factory
+    from browser_agent.tasks import AGENT_RECIPE
+
+    runner = make(agent_runner=None)
+    task = runner.submit(AGENT_RECIPE, {"goal": "do something"})
+    finished = await _drain(runner, task.id)
+    assert finished.status is TaskStatus.FAILED
+    assert "agent not available" in finished.detail
+
+
+@pytest.mark.asyncio
+async def test_freeform_task_blocks_on_challenge(runner_factory):
+    """The freeform path obeys the same stop-and-ask rule as the fallback."""
+    make, _ = runner_factory
+    from browser_agent.escalation import Challenge, ChallengeKind
+    from browser_agent.tasks import AGENT_RECIPE
+
+    async def agent(session, url, payload):
+        raise EscalationRequired(Challenge(ChallengeKind.CAPTCHA, "wall", url))
+
+    runner = make(agent_runner=agent)
+    task = runner.submit(AGENT_RECIPE, {"goal": "do something"})
+    finished = await _drain(runner, task.id)
+    assert finished.status is TaskStatus.BLOCKED

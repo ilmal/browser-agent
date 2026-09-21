@@ -3,6 +3,6 @@
 Importing this module registers every built-in recipe.
 """
 
-from . import facebook, linkedin, x  # noqa: F401
+from . import agent_task, facebook, linkedin, x  # noqa: F401
 
-__all__ = ["facebook", "linkedin", "x"]
+__all__ = ["agent_task", "facebook", "linkedin", "x"]

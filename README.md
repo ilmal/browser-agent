@@ -49,16 +49,54 @@ git config core.hooksPath hooks   # enable the secret/profile guard
 secret-shaped values from being staged. It is not a substitute for review —
 read `git diff --cached` before you push.
 
+## Quick start
+
+```bash
+uv venv --python 3.12 .venv
+uv pip install --python .venv/bin/python -e ".[dev]"
+.venv/bin/python -m playwright install chromium
+
+export AGENT_PROFILE=dev PROFILES_ROOT=$PWD/.local/profiles DATA_ROOT=$PWD/.local/data
+export MANAGE_DISPLAY=false HEADLESS=false LLM_ENABLED=false CONTROL_TOKEN=devtoken
+export PYTHONPATH=src
+.venv/bin/python -m uvicorn browser_agent.api:app --port 8899
+```
+
+Open <http://localhost:8899/>. Full instructions — local run, the k8s deploy,
+adding profiles, scheduling, and what each failure state means — are in
+[`docs/OPERATING.md`](docs/OPERATING.md).
+
 ## Layout
 
 ```
-hooks/pre-commit        secret + profile guard (enable via core.hooksPath)
-Dockerfile-vnc          Chrome + Xvfb + x11vnc + noVNC
-docker-compose.yaml     one service per profile
-src/main.py             entrypoint
-src/modules/            driver + element helpers
-src/modules/snapchat/   the original single-site implementation
+src/browser_agent/
+  api.py          control-plane API + serves the admin UI
+  tasks.py        task model, recipe registry, run loop (the escalation gate)
+  escalation.py   challenge detection + EscalationRequired
+  browser.py      persistent Playwright context (headed, so noVNC can take over)
+  agent.py        browser-use fallback, same profile and display
+  llm.py          OpenAI-compatible client (points at llm-service)
+  scheduler.py    SQLite-backed cron store
+  notify.py       escalation alerts
+  ui/index.html   single-page admin UI
+  recipes/        one thin file per site: x, facebook, linkedin
+k8s/              one Deployment + PVC + Service per profile
+hooks/pre-commit  secret + profile guard (enable via core.hooksPath)
+Dockerfile        Chrome + Xvfb + x11vnc + noVNC, tini as PID 1
+src/main.py       the original Snapchat bot, kept for reference
 ```
 
-`src/modules/snapchat/` is the original bot, kept for reference while the
-per-site recipes are ported to the Playwright + agent structure above.
+`src/main.py` / `src/modules/snapchat/` are the original single-site
+implementation, kept for reference while recipes are ported.
+
+## Design notes
+
+- **A profile is single-writer.** Pods use `replicas: 1` with
+  `strategy: Recreate`, and each profile has its own volume. Two browsers in
+  one profile corrupts the session, and a site would never see that from a
+  human.
+- **The escalation gate is structural.** `EscalationRequired` unwinds the
+  task, so a recipe cannot step over a captcha. `tests/test_tasks.py` asserts
+  that a blocked task does not invoke the agent and is not retried.
+- **The browser is headed on purpose.** A headless context could not be taken
+  over by a person, which is the entire point of the noVNC layer.

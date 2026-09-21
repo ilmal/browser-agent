@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sqlite3
 import time
 from dataclasses import dataclass
@@ -62,8 +63,17 @@ class Schedule:
 class ScheduleStore:
     def __init__(self, db_path: Path) -> None:
         self.db_path = db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        try:
+            db_path.parent.mkdir(parents=True, exist_ok=True)
+            self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        except sqlite3.OperationalError as exc:
+            # A bind mount owned by another uid is the usual cause, and the
+            # raw sqlite error does not say so. Fail with the fix in it.
+            raise RuntimeError(
+                f"cannot open {db_path} — is {db_path.parent} writable by uid "
+                f"{os.getuid()}? For a bind mount, chown it or run the container "
+                f"with `user: \"$(id -u):$(id -g)\"`."
+            ) from exc
         self._conn.row_factory = sqlite3.Row
         self._conn.executescript(_SCHEMA)
         self._conn.commit()

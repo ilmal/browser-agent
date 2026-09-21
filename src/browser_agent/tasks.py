@@ -77,6 +77,10 @@ class Recipe(Protocol):
     async def run(self, session: BrowserSession, payload: dict[str, Any]) -> dict[str, Any]: ...
 
 
+#: Pseudo-recipe for freeform instructions. It has no deterministic path: the
+#: agent is the implementation.
+AGENT_RECIPE = "agent.task"
+
 _REGISTRY: dict[str, Recipe] = {}
 
 
@@ -174,6 +178,14 @@ class TaskRunner:
         task.started_at = time.time()
         self.current = task
 
+        # A freeform task has no deterministic path: the agent is the recipe,
+        # so it goes straight there. This is the "just do this thing for me"
+        # entry point, and it carries the same guardrails and the same
+        # challenge-stop rule as the fallback path.
+        if task.recipe == AGENT_RECIPE:
+            await self._run_freeform(task, recipe)
+            return
+
         page = await self.session.goto(recipe.entry_url)
 
         # A challenge before we even start means the profile is not usable.
@@ -217,6 +229,24 @@ class TaskRunner:
             task.status = TaskStatus.FAILED
             task.detail = f"agent fallback failed: {exc}"
             log.error("agent fallback failed for %s: %s", task.id, exc)
+
+    async def _run_freeform(self, task: Task, recipe: Recipe) -> None:
+        """Run a task that is only an instruction, with no deterministic path."""
+        if self._agent_runner is None or not self.llm.enabled:
+            task.status = TaskStatus.FAILED
+            task.detail = "agent not available (LLM disabled or browser-use missing)"
+            return
+        try:
+            task.result = await self._agent_runner(self.session, recipe.entry_url, task.payload)
+            task.used_agent = True
+            task.status = TaskStatus.DONE
+            task.detail = "agent completed the task"
+        except EscalationRequired as exc:
+            await self._block(task, exc.challenge)
+        except Exception as exc:
+            task.status = TaskStatus.FAILED
+            task.detail = f"agent failed: {exc}"
+            log.error("freeform task %s failed: %s", task.id, exc)
 
     async def _block(self, task: Task, challenge) -> None:
         """Record a blocker and hand it to a human. Never retried automatically."""
