@@ -78,9 +78,11 @@ spec:
             - { name: PROFILES_ROOT, value: /profiles }
             - { name: DATA_ROOT, value: /data }
             - { name: NOVNC_PORT, value: "6080" }
-            # Reached through host nginx, so the UI links the domain rather
-            # than a pod port the operator cannot open.
-            - { name: BROWSER_BASE_URL, value: "https://browser.ilmal.se" }
+            # Set to the public base URL when the pod is reached through a
+            # reverse proxy, so the UI links it instead of a pod port. Left
+            # empty here because the real host name is deployment-specific and
+            # kept local (see k8s/local/).
+            - { name: BROWSER_BASE_URL, value: "" }
             - { name: SCREEN_WIDTH, value: "1440" }
             - { name: SCREEN_HEIGHT, value: "900" }
             # LLM fallback: llm-service, in-cluster. No per-call fees.
