@@ -334,3 +334,31 @@ def test_the_live_view_url_keeps_the_prefix_with_a_base_url(bot_env, monkeypatch
         # The page composes base + prefix + "/vnc.html"; with the roster base
         # set this is the exact expression that was wrong.
         assert "base + prefix + \"/vnc.html\"" in page
+
+
+def test_the_live_view_url_tells_novnc_where_its_socket_is(bot_env):
+    """The live view must carry autoconnect and its own websockify path.
+
+    noVNC resolves "path" against the PAGE's directory and defaults it to
+    "websockify". Unprefixed that is the origin root, which is right for the
+    plain one-bot deployment but wrong under a roster: the page would open the
+    ROSTER's socket, or sit at the connect panel when the path does not exist.
+    Both failures look like a working page that shows nothing.
+    """
+    from fastapi.testclient import TestClient
+
+    with TestClient(bot_env.app) as client:
+        page = client.get("/", headers={"Authorization": "Bearer test-token"}).text
+        # autoconnect, so the operator does not have to find the Connect button
+        assert "autoconnect=1" in page
+        # and the socket is named relative to the proxy's mount, not the origin
+        assert 'const sock = (prefix + "/websockify").replace(/^\\//, "");' in page
+
+    # The roster's own links must carry the same two parameters.
+    roster = Path(__file__).resolve().parents[1] / "src" / "browser_agent" / "ui" / "roster.html"
+    html = roster.read_text()
+    assert "function liveUrl(profile)" in html
+    assert "autoconnect=1" in html
+    assert "path=b/${esc(profile)}/websockify" in html
+    # No bare vnc.html links left on the roster: those are the ones that hang.
+    assert 'href="${esc(url)}vnc.html"' not in html

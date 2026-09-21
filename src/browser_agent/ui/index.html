@@ -360,8 +360,22 @@ function browserUrl() {
   // roster, browser_base_url is the roster's own domain, so using it raw sent
   // the live view to the roster's /vnc.html — the wrong window, silently.
   const prefix = state.url_prefix || "";
+
+  // noVNC opens its websocket at "path" resolved against the page's DIRECTORY,
+  // and its default is "websockify" — i.e. the directory the page is in. Without
+  // a prefix that is the origin root, which is correct today. Under a roster it
+  // is not: /b/x/vnc.html would open /b/x/websockify (right) but /b/x/anything
+  // else lands wherever the default sends it, and an unprefixed page (reached by
+  // a proxy that serves vnc.html at its root) opens the ROSTER's socket instead
+  // of this bot's. Naming the path explicitly, relative to the proxy's own
+  // mount, is what makes both shapes open the same bot's screen.
+  //
+  // autoconnect=1 because the roster's "watch it work" moment must not depend on
+  // the operator finding the Connect button.
+  const sock = (prefix + "/websockify").replace(/^\//, "");
+  const q = `?autoconnect=1&resize=scale&path=${encodeURIComponent(sock)}`;
   const base = (state.browser_base_url || location.origin).replace(/\/$/, "");
-  return base + prefix + "/vnc.html";
+  return base + prefix + "/vnc.html" + q;
 }
 
 // True when this page is a bot inside a roster rather than the whole app.

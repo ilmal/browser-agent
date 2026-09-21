@@ -169,6 +169,17 @@ async function api(path, opts = {}) {
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
   c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 
+// A bot's live view, with the two parameters noVNC needs to actually connect.
+//
+// The roster is not the bot, so the path is the bot's prefix — and noVNC
+// resolves its websocket path against the PAGE's directory, so "path" has to
+// name this bot's socket explicitly or the page sits at the connect panel (or,
+// worse, opens another bot's screen). autoconnect so "watch it work" is one
+// click, resize so the framebuffer fits the window.
+function liveUrl(profile) {
+  return `/b/${esc(profile)}/vnc.html?autoconnect=1&resize=scale&path=b/${esc(profile)}/websockify`;
+}
+
 function set(id, html) {
   const el = $(id);
   if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; }
@@ -198,7 +209,7 @@ function botCard(b) {
        ${b.error === "ConnectError" || b.error === "ConnectTimeout" ? " — the pod may still be starting." : ""}</div>`}
     <div class="acts">
       <a class="primary" href="${esc(url)}" target="_blank" rel="noopener">Open</a>
-      <a href="${esc(url)}vnc.html" target="_blank" rel="noopener">Watch live</a>
+      <a href="${liveUrl(b.profile)}" target="_blank" rel="noopener">Watch live</a>
       <button class="ghost" data-edit="${esc(b.profile)}">Notes</button>
     </div>
     <div class="edit hidden" id="edit-${esc(b.profile)}">
@@ -259,7 +270,7 @@ document.addEventListener("click", async (ev) => {
         notes: $("c-notes").value.trim(),
       })});
       banner("ok", `<b>${esc(profile)}</b> created. Its pod is starting — sign in once over
-        <a href="/b/${esc(profile)}/vnc.html" target="_blank" rel="noopener">its live view</a>, then it is ready.`);
+        <a href="${liveUrl(profile)}" target="_blank" rel="noopener">its live view</a>, then it is ready.`);
       ["c-profile", "c-name", "c-job", "c-notes"].forEach(id => $(id).value = "");
       $("create-form").classList.add("hidden"); $("show-create").classList.remove("hidden");
       refresh();
