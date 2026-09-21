@@ -12,6 +12,16 @@ RUN apt-get update && apt-get install -y \
     x11vnc \
     novnc \
     websockify \
+    procps \
+    net-tools \
+    fonts-liberation \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libdrm2 \
+    libxkbcommon0 \
+    libxrandr2 \
+    libxss1 \
+    libgtk-3-0 \
     && wget -q -O chrome.deb https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb \
     && dpkg -i chrome.deb || apt-get install -f -y \
     && rm -f chrome.deb \
@@ -26,10 +36,31 @@ COPY . .
 
 # Set environment variables
 ENV DISPLAY=:99
+ENV SCREEN_WIDTH=1920
+ENV SCREEN_HEIGHT=1080
+ENV SCREEN_DEPTH=24
 
 # Expose VNC ports
 EXPOSE 5900
 EXPOSE 6080
 
-# Clean up any existing Xvfb lock file and start Xvfb, VNC server, noVNC, and Python
-CMD ["bash", "-c", "rm -f /tmp/.X99-lock && Xvfb :99 -screen 0 1920x1080x24 -ac & sleep 10 && x11vnc -display :99 -forever -nopw -shared > /dev/null 2>&1 & websockify --web /usr/share/novnc 6080 localhost:5900 & python3 -u src/main.py"]
+# Clean up any existing Xvfb lock file and start services with proper timing
+CMD ["bash", "-c", "\
+    rm -f /tmp/.X99-lock && \
+    echo 'Starting Xvfb...' && \
+    Xvfb :99 -screen 0 ${SCREEN_WIDTH}x${SCREEN_HEIGHT}x${SCREEN_DEPTH} -ac -nolisten tcp -dpi 96 +extension RANDR & \
+    XVFB_PID=$! && \
+    sleep 10 && \
+    echo 'Starting x11vnc...' && \
+    x11vnc -display :99 -forever -nopw -shared -rfbport 5900 -bg -o /var/log/x11vnc.log && \
+    sleep 5 && \
+    echo 'Checking if VNC server is running...' && \
+    netstat -ln | grep :5900 || (echo 'VNC server failed to start' && exit 1) && \
+    echo 'Starting websockify...' && \
+    websockify --web /usr/share/novnc 6080 localhost:5900 & \
+    WEBSOCK_PID=$! && \
+    sleep 3 && \
+    echo 'Starting Python application...' && \
+    python3 -u ${MAIN_SCRIPT:-src/main.py}; \
+    echo 'Python application finished, keeping container alive...'; \
+    wait"]

@@ -56,4 +56,4 @@ def snap_listener(driver):
             
 
 if __name__ == "__main__":
-    snap_listener()
+    pass
