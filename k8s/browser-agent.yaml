@@ -25,16 +25,16 @@ spec:
     requests:
       storage: 2Gi
 ---
-apiVersion: v1
-kind: Secret
-metadata:
-  name: browser-agent-secrets
-  namespace: browser-agent
-type: Opaque
-stringData:
-  CONTROL_TOKEN: "replace-me"
-  # Optional: ops alert endpoint for escalations.
-  OPS_ALERT_URL: ""
+# NOTE: no Secret here. The control-plane token is created out of band and
+# never committed — this repo is public:
+#
+#   kubectl -n browser-agent create secret generic browser-agent-secrets \
+#     --from-literal=CONTROL_TOKEN="$(openssl rand -hex 32)" \
+#     --from-literal=OPS_ALERT_URL=""
+#
+# The Deployment references it via envFrom below, so applying this file without
+# that Secret leaves the pod in CreateContainerConfigError rather than running
+# with a guessable token.
 ---
 apiVersion: apps/v1
 kind: Deployment
@@ -78,6 +78,9 @@ spec:
             - { name: PROFILES_ROOT, value: /profiles }
             - { name: DATA_ROOT, value: /data }
             - { name: NOVNC_PORT, value: "6080" }
+            # Reached through host nginx, so the UI links the domain rather
+            # than a pod port the operator cannot open.
+            - { name: BROWSER_BASE_URL, value: "https://browser.ilmal.se" }
             - { name: SCREEN_WIDTH, value: "1440" }
             - { name: SCREEN_HEIGHT, value: "900" }
             # LLM fallback: llm-service, in-cluster. No per-call fees.
