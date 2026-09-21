@@ -40,12 +40,19 @@ async def notify_escalation(settings: Settings, challenge: Challenge, takeover_u
         f"{challenge.describe()}\n"
         f"take over: {takeover_url}"
     )
+    # Carry the text under every common webhook key. The receivers disagree —
+    # Discord wants `content`, Slack wants `text`, a generic receiver wants
+    # `message` — and a mismatch is not an error: Discord answers 400 "Cannot
+    # send an empty message" for a payload with no `content`, which
+    # raise_for_status would then report as a delivery failure for an alert
+    # that never had a chance. Sending all three makes any of them work.
+    payload = {"message": message, "content": message, "text": message}
     try:
         # trust_env=False: the alert must not depend on the browser's egress
         # proxy being reachable, and a failure here is swallowed by design —
         # exactly the kind of silent drop this module exists to avoid.
         async with httpx.AsyncClient(timeout=10, trust_env=False) as client:
-            resp = await client.post(settings.ops_alert_url, json={"message": message})
+            resp = await client.post(settings.ops_alert_url, json=payload)
             resp.raise_for_status()
         log.info("escalation alert delivered for %s", settings.profile)
         return True

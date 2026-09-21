@@ -117,6 +117,7 @@ async def test_escalation_alert_ignores_ambient_proxy(settings, monkeypatch, tmp
 
         async def post(self, url, json):
             seen["url"] = url
+            seen["payload"] = json
 
             class _R:
                 def raise_for_status(self):
@@ -129,3 +130,50 @@ async def test_escalation_alert_ignores_ambient_proxy(settings, monkeypatch, tmp
     challenge = Challenge(ChallengeKind.CAPTCHA, "a captcha", "https://example.test")
     assert await notify_escalation(settings, challenge, "https://browser.example/vnc.html")
     assert seen.get("trust_env") is False, "alert client must not honour ambient proxies"
+
+
+@pytest.mark.asyncio
+async def test_alert_payload_speaks_common_webhook_shapes(settings, monkeypatch):
+    """The text must be under `content` and `text` as well as `message`.
+
+    Discord ignores a payload whose only key is `message` and answers 400
+    "Cannot send an empty message", so an alert aimed at a Discord webhook
+    would never have a chance to land.
+    """
+    from dataclasses import replace
+
+    from browser_agent.escalation import Challenge, ChallengeKind
+    from browser_agent.notify import notify_escalation
+
+    settings = replace(settings, ops_alert_url="http://ops-alerts.example/hook")
+
+    seen: dict = {}
+
+    class _FakeClient:
+        def __init__(self, *a, **kw):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *exc):
+            return False
+
+        async def post(self, url, json):
+            seen["payload"] = json
+
+            class _R:
+                def raise_for_status(self):
+                    return None
+
+            return _R()
+
+    monkeypatch.setattr("browser_agent.notify.httpx.AsyncClient", _FakeClient)
+
+    challenge = Challenge(ChallengeKind.CAPTCHA, "a captcha", "https://example.test")
+    await notify_escalation(settings, challenge, "https://browser.example/vnc.html")
+
+    payload = seen["payload"]
+    for key in ("message", "content", "text"):
+        assert key in payload, f"alert payload has no {key!r}"
+    assert payload["content"] == payload["message"] == payload["text"]
