@@ -20,13 +20,14 @@ import logging
 
 from playwright.async_api import Locator, Page
 
+from ..activity import activity_of
+from ..browser import BrowserSession
 from ..config import Settings
 from ..escalation import EscalationRequired  # noqa: F401  (re-raised, never caught here)
 from ..laya_gate import LayaGate
 from ..plan_model import DoneWhen, Plan, Step, StepFailure
 from ._candidates import CLICK_BASE, TYPE_BASE, extract_candidates
 from ._helpers import require_clear
-from ..browser import BrowserSession
 
 log = logging.getLogger(__name__)
 
@@ -170,19 +171,30 @@ async def run_plan(
     settings: Settings,
     laya: LayaGate,
 ) -> dict:
+    log_ = activity_of(session)
+    log_.note("info", f"plan: {len(plan.steps)} step(s), entry {plan.entry_url}")
     page = await session.goto(plan.entry_url)
     extracts: dict[str, str] = {}
     executed = 0
 
     for i, step in enumerate(plan.steps):
         desc = step.goal or f"{step.action} {step.selector or step.text or ''}".strip()
+        # Between steps, not during one: the operator's pause/stop/amend land
+        # here, where neither Playwright nor the LLM is mid-action.
+        control = getattr(session, "control", None)
+        if control is not None:
+            await control.checkpoint(page.url)
+        log_.note("step", f"{i + 1}/{len(plan.steps)} {step.action}: {desc}", step=i + 1)
         try:
             outcome = await exec_step(page, step, laya, settings, extracts)
         except StepFailure as exc:
+            log_.note("error", f"step {i + 1} failed: {exc}")
             raise StepFailure(f"step {i} ({desc}): {exc}", task_text, plan.entry_url) from exc
         except Exception as exc:
+            log_.note("error", f"step {i + 1} failed: {exc}")
             raise StepFailure(f"step {i} ({desc}): {exc}", task_text, plan.entry_url) from exc
         log.info("plan step %d ok: %s", i, outcome)
+        log_.note("step", f"step {i + 1} ok: {outcome}", step=i + 1)
 
         # A captcha between steps stops the run — never stepped over, never retried.
         await require_clear(page)

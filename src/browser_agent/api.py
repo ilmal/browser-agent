@@ -6,6 +6,7 @@ served from here, so there is no separate frontend build to keep in sync.
 
 from __future__ import annotations
 
+import contextlib
 import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -130,6 +131,14 @@ class LoginRequest(BaseModel):
     url: str
 
 
+class SteerRequest(BaseModel):
+    instructions: str
+
+
+class RetryRequest(BaseModel):
+    instructions: str = ""
+
+
 # -- status ----------------------------------------------------------------
 
 
@@ -147,6 +156,11 @@ async def healthz() -> dict[str, Any]:
 async def state() -> dict[str, Any]:
     """Everything the admin UI needs, in one call."""
     tasks = sorted(runner.tasks.values(), key=lambda t: t.created_at, reverse=True)[:50]
+    current = runner.current.to_dict() if runner.current else None
+    if current is not None and runner.control is not None:
+        # Rides on the task because the UI's question is "what is this task
+        # doing", and the controls only exist while one is running.
+        current["control"] = runner.control.to_dict()
     return {
         "profile": settings.profile,
         "profile_initialised": profile_exists(settings),
@@ -167,12 +181,42 @@ async def state() -> dict[str, Any]:
         "llm_status": await runner.llm.status(),
         "llm_enabled": runner.llm.enabled,
         "recipes": list_recipes(),
-        "current": runner.current.to_dict() if runner.current else None,
+        "current": current,
         "tasks": [t.to_dict() for t in tasks],
         "schedules": [s.to_dict() for s in store.all()],
         "queue_depth": runner.queue.qsize(),
         "takeover_url": "/vnc.html",
     }
+
+
+@app.get("/api/activity", dependencies=[Depends(require_token)])
+async def activity() -> dict[str, Any]:
+    """What the running task is doing, step by step.
+
+    Separate from /api/state because it changes far faster: the state poll is
+    about the pod, this is about the run, and the operator watching a task wants
+    the second one second-by-second.
+    """
+    current = runner.current
+    return {
+        "task_id": current.id if current else None,
+        "status": current.status.value if current else None,
+        "control": runner.control.to_dict() if runner.control else None,
+        "detail": current.detail if current else "",
+        "entries": runner.activity.as_list(),
+        "page_url": _current_page_url(),
+    }
+
+
+def _current_page_url() -> str:
+    """The live page URL, best-effort. Never let a status read fail on it."""
+    try:
+        ctx = session._context
+        if ctx is None or not ctx.pages:
+            return ""
+        return ctx.pages[0].url
+    except Exception:
+        return ""
 
 
 @app.get("/api/challenge", dependencies=[Depends(require_token)])
@@ -203,13 +247,74 @@ async def create_task(req: TaskRequest) -> dict[str, Any]:
 
 
 @app.post("/api/tasks/{task_id}/retry", dependencies=[Depends(require_token)])
-async def retry_task(task_id: str) -> dict[str, Any]:
-    """Re-queue a task. Intended for use after a human has cleared a block."""
+async def retry_task(task_id: str, req: RetryRequest | None = None) -> dict[str, Any]:
+    """Re-queue a task. Intended for use after a human has cleared a block.
+
+    An optional ``instructions`` field replaces the stored text, so "change what
+    it does and try again" is one call rather than a submit-and-delete.
+    """
     if task_id not in runner.tasks:
         raise HTTPException(status_code=404, detail="no such task")
     if runner.tasks[task_id].status is TaskStatus.RUNNING:
         raise HTTPException(status_code=409, detail="task is still running")
-    return runner.retry(task_id).to_dict()
+    payload = None
+    if req is not None and req.instructions.strip():
+        text = req.instructions.strip()
+        payload = {**runner.tasks[task_id].payload, "task": text, "text": text}
+    return runner.retry(task_id, payload=payload).to_dict()
+
+
+# -- live control while a task runs ----------------------------------------
+
+
+def _running_or_404(task_id: str):
+    task = runner.running(task_id)
+    if task is None:
+        raise HTTPException(status_code=409, detail="that task is not the one running")
+    return task
+
+
+@app.post("/api/tasks/{task_id}/pause", dependencies=[Depends(require_token)])
+async def pause_task(task_id: str) -> dict[str, Any]:
+    """Hold the run at its next checkpoint. The browser stays open."""
+    _running_or_404(task_id)
+    runner.pause()
+    return {"task_id": task_id, "control": runner.control.to_dict()}
+
+
+@app.post("/api/tasks/{task_id}/resume", dependencies=[Depends(require_token)])
+async def resume_task(task_id: str) -> dict[str, Any]:
+    _running_or_404(task_id)
+    runner.resume()
+    return {"task_id": task_id, "control": runner.control.to_dict()}
+
+
+@app.post("/api/tasks/{task_id}/stop", dependencies=[Depends(require_token)])
+async def stop_task(task_id: str) -> dict[str, Any]:
+    """End the run at its next checkpoint. The task is NOT marked blocked:
+    a decision by the operator is not a captcha, and must not page one."""
+    _running_or_404(task_id)
+    runner.control.cancel()
+    with contextlib.suppress(Exception):
+        runner.activity.note("info", "stop requested; ending at the next step")
+    return {"task_id": task_id, "control": runner.control.to_dict()}
+
+
+@app.post("/api/tasks/{task_id}/steer", dependencies=[Depends(require_token)])
+async def steer_task(task_id: str, req: SteerRequest) -> dict[str, Any]:
+    """Replace the instruction for a running task.
+
+    A running plan's step list becomes wrong the moment the instruction changes,
+    so this ends the current attempt at its next checkpoint and the runner
+    re-plans from the new text — see ``TaskRunner._run_plan_recipe``.
+    """
+    task = _running_or_404(task_id)
+    text = req.instructions.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="instructions is empty")
+    runner.control.steer(text)
+    runner.activity.note("info", f"instruction changed to: {text[:200]}")
+    return {"task_id": task.id, "instruction": text, "control": runner.control.to_dict()}
 
 
 # -- login / takeover ------------------------------------------------------

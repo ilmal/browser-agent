@@ -10,9 +10,11 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
+from typing import Any
 
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
+from .activity import Activity
 from .config import Settings
 
 log = logging.getLogger(__name__)
@@ -74,6 +76,12 @@ class BrowserSession:
         self.settings = settings
         self._playwright: Playwright | None = None
         self._context: BrowserContext | None = None
+        # Both live here because the session is the one object every layer
+        # already holds, and there is exactly one per pod. Tasks are serialised
+        # on a single worker, so a session-scoped activity log is the running
+        # task's log; the runner rebinds them per task.
+        self.activity = Activity()
+        self.control: Any | None = None
 
     @property
     def context(self) -> BrowserContext:

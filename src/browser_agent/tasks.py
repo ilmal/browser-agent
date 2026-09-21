@@ -22,11 +22,18 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
 
+from .activity import Activity
 from .browser import BrowserSession
 from .config import Settings
+from .control import Amended, Cancelled, Control
 from .escalation import EscalationRequired, detect_challenge, looks_logged_out
 from .llm import LLMClient
 from .plan_model import PlanRejected, StepFailure
+
+#: How many times one task may be re-planned by an operator amendment before it
+#: is refused. A person steering a run types a few times; a loop means the
+#: instruction itself cannot be planned and should be surfaced, not retried.
+MAX_AMENDMENTS = 5
 
 log = logging.getLogger(__name__)
 
@@ -51,6 +58,9 @@ class Task:
     started_at: float | None = None
     finished_at: float | None = None
     used_agent: bool = False
+    #: Set when the operator has changed the instruction mid-run, so the UI can
+    #: show that the task it is watching is not the one it started.
+    amended_count: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -60,6 +70,7 @@ class Task:
             "detail": self.detail,
             "result": self.result,
             "used_agent": self.used_agent,
+            "amended_count": self.amended_count,
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
@@ -81,6 +92,15 @@ class Recipe(Protocol):
 #: Pseudo-recipe for freeform instructions. It has no deterministic path: the
 #: agent is the implementation.
 AGENT_RECIPE = "agent.task"
+
+#: The planner/executor recipe. Named here rather than imported from the recipe
+#: module so the registry stays the only import-time coupling.
+PLAN_RECIPE = "plan.task"
+
+
+def _task_text(task: Task) -> str:
+    """The instruction as the caller wrote it, whichever field they used."""
+    return str(task.payload.get("task") or task.payload.get("text") or "").strip()
 
 _REGISTRY: dict[str, Recipe] = {}
 
@@ -123,6 +143,13 @@ class TaskRunner:
         self.queue: asyncio.Queue[Task] = asyncio.Queue()
         self.tasks: dict[str, Task] = {}
         self.current: Task | None = None
+        # Live state for whatever is running now: the control set the API acts
+        # on, and the activity log the UI reads. The runner owns them so a task
+        # never fails because a session could not hold them (test doubles and
+        # any minimal session have no such slots); they are mirrored onto the
+        # session, which is how the deeper layers reach them.
+        self.control: Control | None = None
+        self.activity = Activity()
         self._worker: asyncio.Task | None = None
 
     # -- lifecycle ---------------------------------------------------------
@@ -150,10 +177,30 @@ class TaskRunner:
         log.info("queued task %s recipe=%s", task.id, recipe)
         return task
 
-    def retry(self, task_id: str) -> Task:
-        """Re-queue an existing task. Only legal once a human has cleared it."""
+    def retry(self, task_id: str, *, payload: dict[str, Any] | None = None) -> Task:
+        """Re-queue an existing task. Only legal once a human has cleared it.
+
+        ``payload`` overrides the stored one, which is how an edited instruction
+        becomes a real new plan instead of a re-run of the old text.
+        """
         old = self.tasks[task_id]
-        return self.submit(old.recipe, old.payload)
+        return self.submit(old.recipe, payload if payload is not None else old.payload)
+
+    # -- live control ------------------------------------------------------
+
+    def running(self, task_id: str) -> Task | None:
+        """The task with this id iff it is the one currently executing."""
+        if self.current is not None and self.current.id == task_id:
+            return self.current
+        return None
+
+    def pause(self) -> None:
+        if self.control is not None:
+            self.control.pause()
+
+    def resume(self) -> None:
+        if self.control is not None:
+            self.control.resume()
 
     # -- run loop ----------------------------------------------------------
 
@@ -174,6 +221,33 @@ class TaskRunner:
                 self.queue.task_done()
 
     async def _run(self, task: Task) -> None:
+        # A fresh activity log and control set per task: the runner outlives the
+        # task, so without this the UI would show the previous task's steps and
+        # a stale "stopped" flag would cancel the next one at step 0.
+        self.activity.reset()
+        self.control = Control()
+        self._attach(self.activity, self.control)
+        try:
+            await self._run_task(task)
+        finally:
+            self._attach(self.activity, None)
+            self.control = None
+
+    def _attach(self, activity: Activity, control: Control | None) -> None:
+        """Mirror the live state onto the session, best-effort.
+
+        The deeper layers (the plan executor, the agent's step hooks) receive
+        the session and nothing else, so the session is where this has to live.
+        A session that cannot hold it — a test double, a minimal stand-in —
+        must not fail the task for it.
+        """
+        try:
+            self.session.activity = activity
+            self.session.control = control
+        except Exception:
+            log.debug("session cannot hold live-control state", exc_info=True)
+
+    async def _run_task(self, task: Task) -> None:
         recipe = get_recipe(task.recipe)
         task.status = TaskStatus.RUNNING
         task.started_at = time.time()
@@ -185,6 +259,13 @@ class TaskRunner:
         # challenge-stop rule as the fallback path.
         if task.recipe == AGENT_RECIPE:
             await self._run_freeform(task, recipe)
+            return
+
+        # plan.task owns its own navigation and re-planning: an amendment
+        # half-way through a step list must re-plan, not resume a list that no
+        # longer matches the instruction.
+        if task.recipe == PLAN_RECIPE:
+            await self._run_plan_recipe(task, recipe)
             return
 
         page = await self.session.goto(recipe.entry_url)
@@ -200,6 +281,10 @@ class TaskRunner:
             task.result = await recipe.run(self.session, task.payload)
             task.status = TaskStatus.DONE
             task.detail = "recipe succeeded"
+            return
+        except Cancelled:
+            task.status = TaskStatus.FAILED
+            task.detail = "stopped by the operator"
             return
         except EscalationRequired as exc:
             await self._block(task, exc.challenge)
@@ -238,17 +323,37 @@ class TaskRunner:
             agent_url = plan_failure.entry_url or agent_url
             agent_payload = {**task.payload, "goal": plan_failure.goal}
 
+        await self._agent_attempt(task, agent_url, agent_payload, prefix="agent fallback")
+
+    async def _agent_attempt(
+        self, task: Task, url: str, payload: dict[str, Any], *, prefix: str
+    ) -> None:
+        """Run the agent fallback and record the outcome on the task.
+
+        Shared by every path that reaches the agent, so the Cancelled /
+        amendment / challenge handling is identical whichever way it got here.
+        """
         try:
-            task.result = await self._agent_runner(self.session, agent_url, agent_payload)
+            task.result = await self._agent_runner(self.session, url, payload)
             task.used_agent = True
             task.status = TaskStatus.DONE
-            task.detail = "agent fallback succeeded"
+            task.detail = f"{prefix} succeeded"
         except EscalationRequired as exc:
             await self._block(task, exc.challenge)
+        except Cancelled:
+            task.status = TaskStatus.FAILED
+            task.detail = "stopped by the operator"
+            self.activity.note("error", "stopped by the operator")
+        except Amended as exc:
+            task.status = TaskStatus.FAILED
+            task.detail = f"{prefix}: {exc}; re-plan needed"
+            self.activity.note(
+                "info", "instruction changed mid-run; press Retry to re-plan it"
+            )
         except Exception as exc:
             task.status = TaskStatus.FAILED
-            task.detail = f"agent fallback failed: {exc}"
-            log.error("agent fallback failed for %s: %s", task.id, exc)
+            task.detail = f"{prefix} failed: {exc}"
+            log.error("%s failed for %s: %s", prefix, task.id, exc)
 
     async def _run_freeform(self, task: Task, recipe: Recipe) -> None:
         """Run a task that is only an instruction, with no deterministic path."""
@@ -273,16 +378,75 @@ class TaskRunner:
             if challenge is not None:
                 await self._block(task, challenge)
                 return
-            task.result = await self._agent_runner(self.session, url, task.payload)
-            task.used_agent = True
-            task.status = TaskStatus.DONE
-            task.detail = "agent completed the task"
-        except EscalationRequired as exc:
-            await self._block(task, exc.challenge)
+        except Cancelled:
+            task.status = TaskStatus.FAILED
+            task.detail = "stopped by the operator"
+            return
         except Exception as exc:
             task.status = TaskStatus.FAILED
             task.detail = f"agent failed: {exc}"
-            log.error("freeform task %s failed: %s", task.id, exc)
+            log.error("freeform task %s failed to open %s: %s", task.id, url, exc)
+            return
+        await self._agent_attempt(task, url, task.payload, prefix="agent")
+
+    async def _run_plan_recipe(self, task: Task, recipe: Recipe) -> None:
+        """plan.task, with the operator's amendment able to re-plan mid-run.
+
+        An amendment means the instruction changed, which makes the running step
+        list wrong. Re-running the recipe is therefore the correct response, and
+        the planner is called again with the new text — the browser is left
+        where the previous attempt stopped, and the task payload carries the
+        amended instruction so a retry does not silently revert to the original.
+        """
+        for _attempt in range(MAX_AMENDMENTS + 1):
+            try:
+                task.result = await recipe.run(self.session, task.payload)
+                task.status = TaskStatus.DONE
+                task.detail = "plan succeeded"
+                return
+            except Cancelled:
+                task.status = TaskStatus.FAILED
+                task.detail = "stopped by the operator"
+                self.activity.note("error", "stopped by the operator")
+                return
+            except EscalationRequired as exc:
+                await self._block(task, exc.challenge)
+                return
+            except PlanRejected as exc:
+                task.status = TaskStatus.FAILED
+                task.detail = f"plan rejected: {exc}"
+                return
+            except Amended as exc:
+                # The operator's new instruction replaces the task text; the
+                # amended URL, when the agent reported one, becomes the entry.
+                task.amended_count += 1
+                self.activity.note(
+                    "info", f"instruction changed; re-planning ({task.amended_count})"
+                )
+                task.payload = {**task.payload, "task": exc.instruction, "text": exc.instruction}
+                if exc.url and exc.url.startswith("http"):
+                    task.payload["entry_url"] = exc.url
+                self.session.control.amendments.clear()
+                continue
+            except StepFailure as exc:
+                # The plan was fine, the page disagreed. Hand the job to the
+                # agent rather than retrying the broken step blind.
+                return await self._agent_attempt(
+                    task,
+                    exc.entry_url or recipe.entry_url,
+                    {**task.payload, "goal": exc.goal or _task_text(task)},
+                    prefix="agent fallback",
+                )
+            except Exception as exc:
+                log.warning("plan.task failed for %s: %s", task.id, exc)
+                return await self._agent_attempt(
+                    task,
+                    recipe.entry_url,
+                    {**task.payload, "goal": _task_text(task)},
+                    prefix="agent fallback",
+                )
+        task.status = TaskStatus.FAILED
+        task.detail = f"too many amendments ({MAX_AMENDMENTS}) without a plan that ran"
 
     async def _block(self, task: Task, challenge) -> None:
         """Record a blocker and hand it to a human. Never retried automatically."""

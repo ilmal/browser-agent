@@ -38,6 +38,14 @@ class _FakeHistory:
         return "did the thing"
 
 
+class _FakeState:
+    """The slice of browser-use's AgentState the live-view hooks touch."""
+
+    n_steps = 1
+    last_model_output = None
+    last_result: list = []
+
+
 class _FakeAgent:
     """Records how it was run, and can hang to exercise the wall clock."""
 
@@ -47,9 +55,17 @@ class _FakeAgent:
         self.browser = browser
         _FakeAgent.last = self
         self.run_calls: list[int] = []
+        # What the live-view hooks read: browser-use's per-step state.
+        self.state = _FakeState()
 
-    async def run(self, max_steps: int = 500):
+    async def run(self, max_steps: int = 500, on_step_start=None, on_step_end=None):
         self.run_calls.append(max_steps)
+        # The live-view hooks are passed through on every run; the agent calls
+        # them between steps, so mirror that here.
+        if on_step_start is not None:
+            await on_step_start(self)
+        if on_step_end is not None:
+            await on_step_end(self)
         if _FakeAgent.hang:
             await asyncio.sleep(3600)
         return _FakeHistory()

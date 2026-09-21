@@ -91,6 +91,41 @@
   }
   .steps li:last-child { padding-bottom: 0; }
   .err { color: var(--bad); font-size: 12px; margin-top: 6px; }
+
+  /* The live feed: what the run is doing, newest first. */
+  .feed { max-height: 280px; overflow-y: auto; font-size: 12.5px; }
+  .feed .row-item {
+    display: flex; gap: 9px; padding: 5px 0; border-bottom: 1px solid var(--line);
+    align-items: baseline;
+  }
+  .feed .row-item:last-child { border-bottom: 0; }
+  .feed .t { color: var(--dim); font-variant-numeric: tabular-nums; min-width: 52px; }
+  .feed .k {
+    font-size: 10px; text-transform: uppercase; letter-spacing: .06em; min-width: 46px;
+    color: var(--dim);
+  }
+  .feed .k.step  { color: var(--accent); }
+  .feed .k.agent { color: #b58cf0; }
+  .feed .k.gate  { color: var(--warn); }
+  .feed .k.error { color: var(--bad); }
+  .feed .m { flex: 1; overflow-wrap: anywhere; }
+  .feed .empty { color: var(--dim); }
+
+  /* Full-screen live view, opened on task start. */
+  #lightbox { position: fixed; inset: 0; z-index: 50; background: #000;
+    display: flex; flex-direction: column; }
+  #lightbox.hidden { display: none !important; }
+  .lb-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+    background: var(--panel); border-bottom: 1px solid var(--line); }
+  .lb-body { flex: 1; min-height: 0; }
+  .lb-body iframe { width: 100%; height: 100%; border: 0; border-radius: 0; background: #000; }
+  body.lb-open { overflow: hidden; }
+
+  .switch { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--dim); }
+  .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok);
+    animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  .pill.live { color: var(--ok); border-color: #24503f; }
 </style>
 </head>
 <body>
@@ -131,9 +166,39 @@
   </section>
 
   <section id="sec-current" class="hidden">
-    <h2>Running now</h2>
-    <div id="current"></div>
+    <div class="row" style="justify-content:space-between;align-items:flex-start">
+      <div>
+        <h2 id="cur-title">Running now</h2>
+        <div id="current"></div>
+      </div>
+      <div class="row" id="cur-controls"></div>
+    </div>
+    <!-- The live view of the run. Opened the moment a task starts, because
+         "watch it work" is the point, not a separate page to go find. -->
+    <div id="live-wrap" class="hidden"></div>
+    <div class="row" style="margin-top:10px">
+      <label for="steer" style="margin:0">Change what it's doing</label>
+      <span class="muted" id="steer-hint">applies at its next step</span>
+    </div>
+    <div class="row" style="align-items:flex-start;margin-top:6px">
+      <textarea id="steer" style="min-height:52px;flex:1"
+        placeholder="e.g. Actually, search for the company page instead"></textarea>
+      <button id="steer-send">Send</button>
+    </div>
+    <h2 style="margin-top:16px">What it's doing</h2>
+    <p class="sub" id="feed-sub">Step by step, newest first.</p>
+    <div id="feed" class="feed"></div>
   </section>
+
+  <div id="lightbox" class="hidden">
+    <div class="lb-bar">
+      <span class="muted" id="lb-label">Live browser</span>
+      <div class="spacer"></div>
+      <button class="ghost" id="lb-open">Open in new tab</button>
+      <button class="ghost" id="lb-close">Close</button>
+    </div>
+    <div class="lb-body" id="lb-body"></div>
+  </div>
 
   <!-- 2. The browser, as a numbered flow, because the order is the confusing part. -->
   <section id="sec-browser">
@@ -219,6 +284,10 @@ let recipeList = [];
 let filter = "";
 let showAll = false;
 let embedOpen = false;
+let liveOpen = false;      // the live noVNC view is showing
+let liveTaskId = null;     // which task it is showing, so it is not rebuilt per poll
+let lastTaskId = null;     // last task we auto-opened for
+let feed = [];             // newest-first activity for the running task
 
 async function api(path, opts = {}) {
   const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
@@ -332,10 +401,22 @@ function renderRunGate() {
 function renderCurrent() {
   const c = state.current;
   $("sec-current").classList.toggle("hidden", !c);
-  if (!c) return;
+  // The live view belongs to a running task: closing it with no task left would
+  // leave a dead frame on screen.
+  if (!c) { closeLive(); lastTaskId = null; return; }
+  const ctl = c.control || {};
   set("current", `<code>${esc(c.id)}</code> · ` +
     `<span class="status ${esc(c.status)}">${esc(c.status)}</span> · ${esc(c.recipe)} · ` +
-    `<span data-elapsed="${c.started_at ?? ""}">${ago(c.started_at)}</span> ago`);
+    `<span data-elapsed="${c.started_at ?? ""}">${ago(c.started_at)}</span> ago` +
+    (c.amended_count ? ` · <span class="muted">instruction changed ${c.amended_count}×</span>` : "") +
+    (ctl.paused ? ` · <span class="status blocked">paused</span>` : ""));
+  renderCurrent2();
+
+  // Pressing a task opens its live view immediately — no second step to find it.
+  if (lastTaskId !== c.id) {
+    lastTaskId = c.id;
+    openLive({ taskId: c.id, label: c.recipe + " · " + c.id });
+  }
 }
 
 function renderTasks() {
@@ -353,10 +434,11 @@ function renderTasks() {
   set("tasks", shown.length ? shown.map(t => {
     const canRetry = t.status === "blocked" || t.status === "failed";
     const hasResult = t.result && Object.keys(t.result).length;
-    return `<tr>
+    const isCurrent = !!(state.current && state.current.id === t.id);
+    return `<tr${isCurrent ? ' class="is-current"' : ""}>
       <td><span class="status ${esc(t.status)}">${esc(t.status)}</span></td>
       <td><code>${esc(t.recipe)}</code></td>
-      <td>${esc(t.detail)}${hasResult ? `<details data-detail="${esc(t.id)}">
+      <td>${esc(t.detail)}${isCurrent ? ` <span class="live-dot"></span>` : ""}${hasResult ? `<details data-detail="${esc(t.id)}">
         <summary>result</summary><pre>${esc(JSON.stringify(t.result, null, 2))}</pre></details>` : ""}</td>
       <td>${t.used_agent ? "yes" : "—"}</td>
       <td class="muted">${ago(t.created_at)}</td>
@@ -364,6 +446,63 @@ function renderTasks() {
     </tr>`;
   }).join("") : `<tr><td colspan="6"><div class="empty">` +
     (filter ? "Nothing with that status." : "No tasks yet.") + `</div></td></tr>`);
+}
+
+// -- live view -------------------------------------------------------------
+//
+// Opening a task opens the browser view of it, immediately. The iframe is the
+// same noVNC page the "Watch the browser" button uses; it is created once per
+// task and then left alone, because rebuilding it would drop the VNC session
+// and force a reconnect on every poll.
+
+function openLive(opts) {
+  const info = opts || {};
+  if (info.taskId) liveTaskId = info.taskId;
+  $("lb-label").textContent = info.label || "Live browser";
+  if (!liveOpen) {
+    liveOpen = true;
+    document.body.classList.add("lb-open");
+    $("lightbox").classList.remove("hidden");
+    // Mounted on open, not on poll: a reconnect is expensive.
+    $("lb-body").innerHTML =
+      `<iframe src="${esc(browserUrl())}" title="live browser view" allow="clipboard-read; clipboard-write"></iframe>`;
+  }
+  renderCurrent2();
+}
+
+function closeLive() {
+  if (!liveOpen) return;
+  liveOpen = false;
+  document.body.classList.remove("lb-open");
+  $("lightbox").classList.add("hidden");
+  $("lb-body").innerHTML = "";   // tears down the VNC session with it
+  renderCurrent2();
+}
+
+// Re-render just the current-task block, without a state fetch.
+function renderCurrent2() {
+  const c = state && state.current;
+  if (!c) return;
+  const ctl = c.control || {};
+  set("cur-controls",
+    `<button class="ghost" id="c-live">${liveOpen ? "Hide" : "Show"} live view</button>` +
+    (ctl.paused
+      ? `<button class="ghost" id="c-pause">Resume</button>`
+      : `<button class="ghost" id="c-pause">Pause</button>`) +
+    `<button class="ghost" id="c-stop">Stop</button>`);
+}
+
+function renderFeed() {
+  const cur = state && state.current;
+  const live = !!(cur && (cur.status === "running" || cur.status === "queued"));
+  $("feed-sub").innerHTML = live
+    ? `<span class="live-dot" style="display:inline-block"></span> Live — updates every second.`
+    : "The last run's steps, newest first.";
+  set("feed", feed.length ? feed.map(e => `<div class="row-item">
+      <span class="t">${new Date(e.at * 1000).toLocaleTimeString()}</span>
+      <span class="k ${esc(e.kind)}">${esc(e.kind)}</span>
+      <span class="m">${esc(e.text)}</span>
+    </div>`).join("") : `<div class="empty">Nothing yet.</div>`);
 }
 
 function renderScheds() {
@@ -382,7 +521,7 @@ function renderScheds() {
 
 function render() {
   renderPills(); renderBanner(); renderRunGate();
-  renderCurrent(); renderTasks(); renderScheds();
+  renderCurrent(); renderFeed(); renderTasks(); renderScheds();
 }
 
 async function refresh() {
@@ -492,12 +631,63 @@ setInterval(() => {
   });
 }, 1000);
 
+// The activity feed is a separate, faster poll than the state snapshot: the
+// operator watching a run wants its steps as they happen, not every 4 s, and
+// the feed is tiny compared to the state payload.
+async function pollFeed() {
+  if (document.hidden) return;
+  if (!(state && state.current)) { feed = []; renderFeed(); return; }
+  try {
+    const a = await api("/api/activity");
+    // Newest first: the interesting line is always at the top.
+    feed = (a.entries || []).slice().reverse();
+    renderFeed();
+  } catch (e) { /* the state poll already surfaces transport errors */ }
+}
+
 async function poll() {
   // A hidden tab needs no updates and should not spend the pod's attention.
   if (document.hidden) return;
   try { await refresh(); } catch (e) { /* banner already reports it */ }
 }
 setInterval(poll, 4000);
+setInterval(pollFeed, 1200);
+
+// -- live control ----------------------------------------------------------
+
+async function control(taskId, verb, body) {
+  return api(`/api/tasks/${taskId}/${verb}`, {
+    method: "POST",
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+document.addEventListener("click", (ev) => {
+  const id = state && state.current && state.current.id;
+  if (!id) return;
+  if (ev.target.id === "c-pause") {
+    const paused = !!(state.current.control || {}).paused;
+    act(() => control(id, paused ? "resume" : "pause"));
+  }
+  if (ev.target.id === "c-stop") act(() => control(id, "stop"));
+  if (ev.target.id === "c-live") liveOpen ? closeLive() : openLive({});
+  if (ev.target.id === "lb-close") closeLive();
+  if (ev.target.id === "lb-open") window.open(browserUrl(), "_blank", "noopener");
+});
+
+$("steer-send").onclick = () => act(async () => {
+  const id = state.current.id;
+  const text = $("steer").value.trim();
+  if (!text) return;
+  await control(id, "steer", { instructions: text });
+  $("steer").value = "";
+});
+
+// Editing the instruction of a task that has already finished is a retry with
+// new text — the same box, so "change it and go again" needs no second form.
+$("steer").addEventListener("keydown", (ev) => {
+  if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) $("steer-send").click();
+});
 
 refresh();
 </script>

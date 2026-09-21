@@ -106,7 +106,12 @@ spec:
             - { name: SCREEN_HEIGHT, value: "900" }
             # LLM fallback: llm-service, in-cluster. No per-call fees.
             - { name: LLM_BASE_URL, value: "http://llm-service.llm-service.svc.cluster.local:8001/v1" }
-            - { name: LLM_MODEL, value: "glm-4.5v" }
+            # deepseek-v4.1-flash, not glm-4.5v. The vision GLM is zai-ONLY in
+            # llm-service (no twin in Ollama Cloud's catalogue), so it has no
+            # failover: when zai wedged on 2026-09-21 every escalation hung for
+            # the full budget and the UI read "llm: unreachable". This id is on
+            # ollama_cloud and answers in <1s, and it handles image parts.
+            - { name: LLM_MODEL, value: "deepseek-v4.1-flash" }
             - { name: LLM_ENABLED, value: "true" }
             # llm-service authenticates every token-spending call and requires a
             # client id in the body. The source lands in its call log, so it is

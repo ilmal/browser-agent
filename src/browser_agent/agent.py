@@ -15,6 +15,7 @@ import asyncio
 import logging
 from typing import Any, NoReturn
 
+from .activity import activity_of
 from .browser import BrowserSession
 from .config import Settings
 from .escalation import Challenge, ChallengeKind, EscalationRequired, detect_challenge
@@ -101,6 +102,43 @@ def _build_gateway_llm(settings: Settings, ChatOpenAI):
     return client
 
 
+async def _current_url(session: BrowserSession) -> str:
+    """The page URL, or "" — a feed annotation must never fail the run."""
+    try:
+        return (await session.page()).url
+    except Exception:
+        return ""
+
+
+def _record_agent_step(agent: Any, log_: Any) -> None:
+    """Turn one finished agent step into a line a human can read.
+
+    browser-use reports what the model decided and what happened in separate
+    places, so this reads both: ``last_model_output`` carries the model's own
+    next_goal (the useful "why"), and ``last_result`` the outcome.
+    """
+    try:
+        output = agent.state.last_model_output
+        goal = getattr(output, "next_goal", "") or ""
+        results = agent.state.last_result or []
+        actions: list[str] = []
+        for r in results:
+            if getattr(r, "error", None):
+                actions.append(f"failed: {r.error}")
+            elif getattr(r, "extracted_content", None):
+                actions.append(str(r.extracted_content)[:200])
+            elif getattr(r, "is_done", False):
+                actions.append("done")
+            else:
+                actions.append("ok")
+        text = goal or "step"
+        if actions:
+            text += " → " + "; ".join(actions)
+        log_.note("agent", text, step=agent.state.n_steps)
+    except Exception:  # pragma: no cover - defensive; the feed is not load-bearing
+        log.debug("could not record agent step", exc_info=True)
+
+
 def _raise_for_no_result(history: Any, url: str) -> NoReturn:
     """Classify an agent run that produced no result.
 
@@ -154,6 +192,22 @@ def make_agent_runner(settings: Settings):
         await browser.connect()
 
         agent = Agent(task=task_prompt, llm=llm, browser=browser)
+
+        # The live feed and the operator's controls ride on the agent's own step
+        # hooks. browser-use calls on_step_start BEFORE its step try/except
+        # (verified in _execute_step), so an exception raised here unwinds the
+        # whole run rather than being swallowed as a failed step — which is
+        # exactly what a stop or an amendment needs.
+        log_ = activity_of(session)
+        control = getattr(session, "control", None)
+
+        async def on_step_start(a) -> None:
+            if control is not None:
+                await control.checkpoint(await _current_url(session))
+            log_.note("agent", f"step {a.state.n_steps}: thinking")
+
+        async def on_step_end(a) -> None:
+            _record_agent_step(a, log_)
         log.info(
             "agent fallback attaching to %s for %s (max_steps=%d, timeout=%ds)",
             cdp_url,
@@ -168,7 +222,11 @@ def make_agent_runner(settings: Settings):
             # task sits QUEUED behind it forever. The step cap ends the loop;
             # the wall clock is the backstop for a step hung in the browser.
             history = await asyncio.wait_for(
-                agent.run(max_steps=settings.agent_max_steps),
+                agent.run(
+                    max_steps=settings.agent_max_steps,
+                    on_step_start=on_step_start,
+                    on_step_end=on_step_end,
+                ),
                 timeout=settings.agent_timeout_s,
             )
         except asyncio.TimeoutError:

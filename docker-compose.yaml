@@ -35,7 +35,10 @@ services:
       CONTROL_TOKEN: ${CONTROL_TOKEN:-devtoken}
       LLM_ENABLED: ${LLM_ENABLED:-false}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
-      LLM_MODEL: ${LLM_MODEL:-glm-4.5v}
+      # A model with no second leg has no failover: glm-4.5v is zai-only in
+      # llm-service and hangs whenever zai is wedged. deepseek-v4.1-flash is
+      # on ollama_cloud, answers in <1s, and takes image parts.
+      LLM_MODEL: ${LLM_MODEL:-deepseek-v4.1-flash}
       LLM_API_KEY: ${LLM_API_KEY:-}
       # plan.task: planner + Laya gate. Empty LAYA_DECIDE_URL uses the
       # in-process pip backend if laya is installed; the pod points this at

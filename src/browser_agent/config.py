@@ -143,7 +143,15 @@ def load_settings() -> Settings:
         headless=_env("HEADLESS", "false").lower() in {"1", "true", "yes"},
         slow_mo_ms=_env_int("SLOW_MO_MS", 0),
         llm_base_url=_env("LLM_BASE_URL", "http://llm-service.llm-service.svc.cluster.local:8001/v1"),
-        llm_model=_env("LLM_MODEL", "glm-4.5v"),
+        # deepseek-v4.1-flash: the ollama_cloud leg, which is the one vision-
+        # capable model that actually answers (probed 2026-09-21: 200 in 0.79s,
+        # and it describes an image_url part correctly). The previous default,
+        # glm-4.5v, is zai-ONLY — llm-service's explicit_chain_for gives it no
+        # twin, because the ollama_cloud catalogue has no vision GLM — so when
+        # zai wedged (240s budget, 0 content chars) every escalation hung and
+        # the UI showed "llm: unreachable". A model with no second leg has no
+        # failover; pick one on the leg that is up.
+        llm_model=_env("LLM_MODEL", "deepseek-v4.1-flash"),
         llm_enabled=_env("LLM_ENABLED", "true").lower() in {"1", "true", "yes"},
         llm_api_key=_env("LLM_API_KEY"),
         llm_source=_env("LLM_SOURCE", "browser-agent"),
