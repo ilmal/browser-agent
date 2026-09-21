@@ -283,3 +283,31 @@ def test_the_static_setting_is_the_fallback_when_no_proxy_says_otherwise(bot_env
     with TestClient(bot_env.app) as client:
         plain = client.get("/api/whoami", headers={"Authorization": "Bearer test-token"})
         assert plain.json()["url_prefix"] == "/b/from-env"
+
+
+def test_the_served_page_carries_the_prefix(bot_env):
+    """The page must know its prefix BEFORE its first request.
+
+    The UI fetches root-absolute paths ("/api/state"), so behind a roster they
+    resolve against the origin — the hub — and the bot page renders the roster's
+    state while looking healthy. The prefix therefore has to be in the HTML the
+    bot served, not fetched afterwards; there is no request it could fetch.
+    """
+    from fastapi.testclient import TestClient
+
+    with TestClient(bot_env.app) as client:
+        page = client.get("/", headers={
+            "Authorization": "Bearer test-token",
+            "X-Forwarded-Prefix": "/b/linkedin",
+        })
+        assert page.status_code == 200
+        assert '<script>window.BA_PREFIX="/b/linkedin";</script>' in page.text
+        # The marker itself must not survive into the response.
+        assert "<!--PREFIX-->" not in page.text
+
+        # Standalone — the plain deployment — injects empty, not a stray path.
+        plain = client.get("/", headers={"Authorization": "Bearer test-token"})
+        assert '<script>window.BA_PREFIX="";</script>' in plain.text
+
+        # And the page really uses it: every api() call is prefixed.
+        assert "fetch(PREFIX + path" in page.text

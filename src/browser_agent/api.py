@@ -7,6 +7,7 @@ served from here, so there is no separate frontend build to keep in sync.
 from __future__ import annotations
 
 import contextlib
+import json
 import logging
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -415,7 +416,16 @@ _UI = Path(__file__).parent / "ui" / "index.html"
 
 @app.get("/", response_class=HTMLResponse)
 async def ui() -> HTMLResponse:
-    return HTMLResponse(_UI.read_text())
+    # The page is served from the SAME prefix it will talk to, so the prefix has
+    # to be in it before the first request goes out: the UI fetches "/api/state"
+    # root-absolute, and under a roster that resolves against the ORIGIN — the
+    # hub — not this bot. It would then render the roster's state (no profile,
+    # no tasks) while looking perfectly healthy. Handing it the prefix here is
+    # what makes the same file work both standalone and behind /b/<bot>.
+    html = _UI.read_text().replace(
+        "<!--PREFIX-->", f'<script>window.BA_PREFIX={json.dumps(_REACHED_PREFIX.get())};</script>'
+    )
+    return HTMLResponse(html)
 
 
 @app.get("/vnc.html", response_class=HTMLResponse)

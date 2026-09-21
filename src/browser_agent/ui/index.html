@@ -3,6 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<!--PREFIX-->
 <title>browser-agent</title>
 <style>
   :root {
@@ -302,10 +303,16 @@ let liveTaskId = null;     // which task it is showing, so it is not rebuilt per
 let lastTaskId = null;     // last task we auto-opened for
 let feed = [];             // newest-first activity for the running task
 
+// Where this page is mounted. Empty standalone; "/b/<bot>" under a roster,
+// injected by the server that served the page. Every request the UI makes is
+// root-absolute ("/api/state"), so without this they all resolve against the
+// ORIGIN — the roster — and this page quietly shows the roster's state.
+const PREFIX = (window.BA_PREFIX || "").replace(/\/$/, "");
+
 async function api(path, opts = {}) {
   const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
   if (token) headers["Authorization"] = "Bearer " + token;
-  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  const res = await fetch(PREFIX + path, Object.assign({}, opts, { headers }));
   if (res.status === 401) {
     const t = prompt("Control token required:");
     if (t) { token = t; localStorage.setItem("ba_token", t); return api(path, opts); }
