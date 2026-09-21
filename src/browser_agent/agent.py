@@ -77,20 +77,37 @@ def make_agent_runner(settings: Settings):
             payload={k: v for k, v in payload.items() if k not in {"goal", "text"}},
         )
 
+        # Attach to the browser the recipe was already using rather than
+        # launching a second one. Chrome permits a second context on the same
+        # user_data_dir — it simply starts logged out — so a fresh launch would
+        # leave the agent driving a different, unauthenticated browser while the
+        # human watches the real one over noVNC.
+        cdp_url = session.cdp_endpoint
+        if not cdp_url:
+            raise RuntimeError(
+                "no DevTools endpoint for the running browser; the agent must "
+                "attach to the session a human can see"
+            )
+
         llm = ChatOpenAI(
             model=settings.llm_model,
             base_url=settings.llm_base_url,
             api_key="not-required",
         )
-        # Same profile, same display: the human can watch and intervene.
-        browser = Browser(
-            user_data_dir=str(settings.profile_dir),
-            headless=settings.headless,
-        )
+        browser = Browser(cdp_url=cdp_url, is_local=True, headless=settings.headless)
+        await browser.connect()
 
         agent = Agent(task=task_prompt, llm=llm, browser=browser)
-        log.info("agent fallback starting for %s", url)
-        history = await agent.run()
+        log.info("agent fallback attaching to %s for %s", cdp_url, url)
+        try:
+            history = await agent.run()
+        finally:
+            # Detach only. Killing the browser here would close the tab the
+            # recipe owns and take down the human's noVNC view with it.
+            try:
+                await browser.close()
+            except Exception:  # pragma: no cover - best-effort detach
+                log.debug("browser-use detach failed", exc_info=True)
 
         # Check what the agent left on screen before trusting its report: it
         # may have hit a challenge on its last step.

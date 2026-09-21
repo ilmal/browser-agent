@@ -153,6 +153,19 @@ Recipes are thin and will break when a site redesigns. The order of repair:
 3. If a site needs a genuinely different flow, add a new recipe rather than
    growing the existing one.
 
+### Why the agent attaches over CDP
+
+The browser launches with `--remote-debugging-port=0` and writes the chosen
+port into `DevToolsActivePort` inside the profile. The agent reads that file
+and attaches to the **running** browser.
+
+Do not "simplify" this back to giving the agent its own
+`Browser(user_data_dir=...)`. Chrome allows a second context on the same
+profile but starts it **logged out**, so the agent would silently drive a
+different browser than the one over noVNC — the human would watch a login page
+while the agent worked an empty session.
+
+
 ## Security posture
 
 - Repo is **public**. `hooks/pre-commit` blocks profiles, env files and
