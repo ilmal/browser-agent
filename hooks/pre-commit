@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+# Blocks secrets and browser profiles from entering this PUBLIC repo.
+# Enable per clone:  git config core.hooksPath hooks
+set -uo pipefail
+fail=0
+
+# 1. Forbidden paths — browser profiles hold live session cookies.
+paths=$(git diff --cached --name-only --diff-filter=ACM)
+if echo "$paths" | grep -qiE '(^|/)(driver_user|profiles)/|\.env($|\.)|\.(pem|key|p12|pfx)$|(^|/)secrets/'; then
+  echo "BLOCKED: forbidden path staged (browser profile or secret file):"
+  echo "$paths" | grep -iE '(^|/)(driver_user|profiles)/|\.env($|\.)|\.(pem|key|p12|pfx)$|(^|/)secrets/'
+  fail=1
+fi
+
+# 2. Secret-shaped content in staged adds.
+scan=$(git diff --cached -U0 --diff-filter=ACM | grep -E '^\+' | grep -vE '^\+\+\+')
+patterns='AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|ghp_[A-Za-z0-9]{36}|github_pat_[A-Za-z0-9_]{22,}|xox[baprs]-[A-Za-z0-9-]{10,}|sk-[A-Za-z0-9]{20,}|AIza[0-9A-Za-z_-]{35}'
+if echo "$scan" | grep -qE "$patterns"; then
+  echo "BLOCKED: secret-shaped value staged:"
+  echo "$scan" | grep -nE "$patterns" | head -5
+  fail=1
+fi
+
+# 3. Hardcoded credential assignments (not env lookups).
+if echo "$scan" | grep -qE "(password|passwd|secret|api_?key|token|bearer)[\"']?\s*[:=]\s*[\"'][^\"'\$]{8,}[\"']"; then
+  echo "BLOCKED: hardcoded credential assignment staged:"
+  echo "$scan" | grep -nEi "(password|passwd|secret|api_?key|token|bearer)[\"']?\s*[:=]\s*[\"'][^\"'\$]{8,}[\"']" | head -5
+  fail=1
+fi
+
+[ "$fail" -eq 0 ] || { echo; echo "Unstage the above (git restore --staged <path>) and retry."; exit 1; }
+exit 0
