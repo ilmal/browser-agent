@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>bots</title>
+<style>
+  /* Same tokens as ui/index.html. The roster and a bot page are the same app
+     to the operator, so they must not look like two different products. */
+  :root {
+    --bg: #101014; --panel: #17171d; --panel-2: #1e1e26; --line: #2a2a34;
+    --text: #e8e8ee; --dim: #9a9aa8; --accent: #6ea8fe;
+    --ok: #4ec9a0; --warn: #e0b341; --bad: #e06c75;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
+    position: sticky; top: 0; z-index: 10;
+  }
+  header h1 { font-size: 15px; margin: 0 6px 0 0; font-weight: 600; letter-spacing: .2px; }
+  .pill {
+    font-size: 12px; padding: 3px 9px; border-radius: 999px; white-space: nowrap;
+    background: var(--panel-2); color: var(--dim); border: 1px solid var(--line);
+  }
+  .pill.ok { color: var(--ok); border-color: #24503f; }
+  .pill.warn { color: var(--warn); border-color: #55491f; }
+  .pill.bad { color: var(--bad); border-color: #55292d; }
+  .spacer { flex: 1; }
+  /* minmax(0,1fr) is not cargo cult: the roster renders operator-typed names
+     and jobs, and a grid track defaults to min-width:auto, so one unbroken
+     token in a job line would widen the whole page past the viewport. */
+  main {
+    padding: 20px; max-width: 1080px; margin: 0 auto;
+    display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px;
+  }
+  main > * { min-width: 0; }
+  @media (max-width: 720px) { main { padding: 12px; } }
+
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; min-width: 0; }
+  section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 4px; }
+  section .sub { color: var(--dim); font-size: 12px; margin: 0 0 14px; overflow-wrap: anywhere; }
+  .muted { color: var(--dim); font-size: 12px; }
+
+  label { display: block; font-size: 12px; color: var(--dim); margin: 12px 0 4px; }
+  label:first-of-type { margin-top: 0; }
+  input, textarea {
+    width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; font: inherit;
+  }
+  input:focus, textarea:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+  textarea { min-height: 62px; resize: vertical; }
+  button {
+    background: var(--accent); color: #0b0b10; border: 0; border-radius: 7px;
+    padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap;
+  }
+  button.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); font-weight: 500; }
+  button.ghost:hover { color: var(--text); border-color: var(--dim); }
+  button:disabled { opacity: .5; cursor: default; }
+  .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  .row.end { justify-content: flex-end; }
+  .hidden { display: none !important; }
+
+  /* The roster itself. A card per bot, not a table: the important content is
+     a name and a job sentence, neither of which belongs in a column. */
+  .bots { display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px; }
+  .bot {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 14px; min-width: 0; display: flex; flex-direction: column; gap: 10px;
+  }
+  .bot.off { opacity: .6; }
+  .bot .top { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+  .bot .name { font-weight: 600; font-size: 15px; overflow-wrap: anywhere; }
+  .bot .slug { color: var(--dim); font-size: 12px; font-family: ui-monospace, monospace; }
+  .bot .job { font-size: 13px; color: var(--text); overflow-wrap: anywhere; }
+  .bot .notes { font-size: 12px; color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .bot .acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
+  .bot .acts a {
+    text-decoration: none; padding: 7px 12px; border-radius: 7px; font-size: 13px;
+    border: 1px solid var(--line); color: var(--text); background: var(--panel);
+  }
+  .bot .acts a.primary { background: var(--accent); color: #0b0b10; border-color: var(--accent); font-weight: 600; }
+  .bot .acts a:hover { border-color: var(--dim); }
+
+  .empty { color: var(--dim); font-size: 13px; padding: 10px 0; }
+  .alert { border-radius: 9px; padding: 12px 14px; font-size: 13px; margin-bottom: 14px;
+    border: 1px solid var(--warn); background: #2a2413; color: #f0dda0; min-width: 0; overflow-wrap: anywhere; }
+  .alert.bad { border-color: var(--bad); background: #2a1618; color: #f0b8bc; }
+  .alert.ok { border-color: var(--ok); background: #14261f; color: #a8e6cd; }
+  .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; }
+</style>
+</head>
+<body>
+<header>
+  <h1>bots</h1>
+  <span class="pill" id="p-count">…</span>
+  <span class="pill" id="p-up">…</span>
+  <div class="spacer"></div>
+  <button class="ghost" id="refresh">Refresh</button>
+</header>
+
+<main>
+  <div id="banner"></div>
+
+  <section id="sec-bots">
+    <h2>Your bots</h2>
+    <p class="sub">
+      Each bot is its own browser and its own login, so nothing is shared between
+      them. Open one to watch it work, take over for a captcha, or give it a task.
+    </p>
+    <div id="create-wrap" class="hidden">
+      <button class="ghost" id="show-create">+ New bot</button>
+    </div>
+    <div id="create-form" class="hidden" style="margin-bottom:16px">
+      <label for="c-profile">Profile name</label>
+      <input id="c-profile" placeholder="linkedin" autocapitalize="off" autocorrect="off">
+      <div class="muted" style="margin-top:5px">
+        Lowercase letters, digits and dashes. This is the bot's identity and
+        cannot be changed later — it names its Chrome profile and its storage.
+      </div>
+      <label for="c-name">Display name</label>
+      <input id="c-name" placeholder="LinkedIn outreach">
+      <label for="c-job">One job</label>
+      <input id="c-job" placeholder="Post and reply on LinkedIn as me">
+      <div class="muted" style="margin-top:5px">
+        One narrow job beats a general bot. Write it operationally, and end with
+        a limit — "never reply without my approval".
+      </div>
+      <label for="c-notes">Notes (optional)</label>
+      <textarea id="c-notes" placeholder="Which account it signs into, and what to do when it hits a wall."></textarea>
+      <div class="row end" style="margin-top:14px">
+        <span class="muted" id="c-why"></span>
+        <button class="ghost" id="cancel-create">Cancel</button>
+        <button id="do-create">Create bot</button>
+      </div>
+    </div>
+    <div id="bots" class="bots"><div class="empty">Loading…</div></div>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+let token = localStorage.getItem("ba_token") || "";
+let data = null;
+let editing = null;     // profile whose notes are being edited
+
+async function api(path, opts = {}) {
+  const headers = Object.assign({ "Content-Type": "application/json" }, opts.headers || {});
+  if (token) headers["Authorization"] = "Bearer " + token;
+  const res = await fetch(path, Object.assign({}, opts, { headers }));
+  if (res.status === 401) {
+    const t = prompt("Control token required:");
+    if (t) { token = t; localStorage.setItem("ba_token", t); return api(path, opts); }
+    throw new Error("unauthorized");
+  }
+  if (!res.ok) {
+    let msg = (await res.text()).slice(0, 300);
+    try { msg = JSON.parse(msg).detail || msg; } catch (e) {}
+    throw new Error(msg);
+  }
+  return res.json();
+}
+
+const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
+  c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+function set(id, html) {
+  const el = $(id);
+  if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; }
+}
+
+function banner(kind, html) {
+  set("banner", html ? `<div class="alert ${kind}">${html}</div>` : "");
+}
+
+function botCard(b) {
+  // A hidden bot is not a stopped bot: it keeps its schedules, it is just out
+  // of the way. Say that rather than implying it is off.
+  const state = b.reachable
+    ? (b.signed_in ? `<span class="pill ok">signed in</span>` : `<span class="pill warn">not signed in</span>`)
+    : `<span class="pill bad">unreachable</span>`;
+  const url = b.url || `/b/${b.profile}/`;
+  return `<div class="bot ${b.reachable ? "" : "off"}">
+    <div class="top">
+      <span class="name">${esc(b.display_name)}</span>
+      <span class="slug">${esc(b.profile)}</span>
+      <span class="spacer"></span>
+      ${state}
+    </div>
+    ${b.job ? `<div class="job">${esc(b.job)}</div>` : `<div class="job muted">No job set yet.</div>`}
+    ${b.notes ? `<div class="notes">${esc(b.notes)}</div>` : ""}
+    ${b.reachable ? "" : `<div class="muted">${esc(b.error || "pod not responding")}
+       ${b.error === "ConnectError" || b.error === "ConnectTimeout" ? " — the pod may still be starting." : ""}</div>`}
+    <div class="acts">
+      <a class="primary" href="${esc(url)}" target="_blank" rel="noopener">Open</a>
+      <a href="${esc(url)}vnc.html" target="_blank" rel="noopener">Watch live</a>
+      <button class="ghost" data-edit="${esc(b.profile)}">Notes</button>
+    </div>
+    <div class="edit hidden" id="edit-${esc(b.profile)}">
+      <label for="e-job-${esc(b.profile)}">One job</label>
+      <input id="e-job-${esc(b.profile)}" value="${esc(b.job)}">
+      <label for="e-notes-${esc(b.profile)}">Notes</label>
+      <textarea id="e-notes-${esc(b.profile)}">${esc(b.notes)}</textarea>
+      <div class="row end" style="margin-top:8px">
+        <button class="ghost" data-hide="${esc(b.profile)}">Close</button>
+        <button data-save="${esc(b.profile)}">Save</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+function render() {
+  if (!data) return;
+  const bots = data.bots || [];
+  $("p-count").textContent = bots.length + (bots.length === 1 ? " bot" : " bots");
+  const up = bots.filter(b => b.reachable).length;
+  const p = $("p-up");
+  p.textContent = up + " up";
+  p.className = "pill " + (bots.length === 0 ? "" : up === bots.length ? "ok" : up === 0 ? "bad" : "warn");
+
+  $("create-wrap").classList.toggle("hidden", !data.can_create);
+  set("bots", bots.length
+    ? bots.map(botCard).join("")
+    : `<div class="empty">No bots yet. Create one to give it its own browser and login.</div>`);
+}
+
+async function refresh() {
+  try {
+    data = await api("/api/bots");
+    render();
+  } catch (e) {
+    banner("bad", "Could not load the roster: " + esc(e.message));
+  }
+}
+
+document.addEventListener("click", async (ev) => {
+  const t = ev.target;
+  if (t.id === "refresh") { refresh(); return; }
+  if (t.id === "show-create") {
+    $("create-form").classList.remove("hidden"); $("show-create").classList.add("hidden");
+    $("c-profile").focus(); return;
+  }
+  if (t.id === "cancel-create") {
+    $("create-form").classList.add("hidden"); $("show-create").classList.remove("hidden");
+    banner("", ""); return;
+  }
+  if (t.id === "do-create") {
+    const profile = $("c-profile").value.trim().toLowerCase();
+    if (!profile) { $("c-why").textContent = "a profile name is required"; return; }
+    t.disabled = true; $("c-why").textContent = "creating…";
+    try {
+      await api("/api/bots", { method: "POST", body: JSON.stringify({
+        profile, name: $("c-name").value.trim(), job: $("c-job").value.trim(),
+        notes: $("c-notes").value.trim(),
+      })});
+      banner("ok", `<b>${esc(profile)}</b> created. Its pod is starting — sign in once over
+        <a href="/b/${esc(profile)}/vnc.html" target="_blank" rel="noopener">its live view</a>, then it is ready.`);
+      ["c-profile", "c-name", "c-job", "c-notes"].forEach(id => $(id).value = "");
+      $("create-form").classList.add("hidden"); $("show-create").classList.remove("hidden");
+      refresh();
+    } catch (e) {
+      banner("bad", "Could not create the bot: " + esc(e.message));
+    } finally { t.disabled = false; $("c-why").textContent = ""; }
+    return;
+  }
+  if (t.dataset.edit) {
+    $("edit-" + t.dataset.edit).classList.toggle("hidden"); return;
+  }
+  if (t.dataset.hide) {
+    $("edit-" + t.dataset.hide).classList.add("hidden"); return;
+  }
+  if (t.dataset.save) {
+    const p = t.dataset.save;
+    t.disabled = true;
+    try {
+      await api("/api/bots/" + encodeURIComponent(p), { method: "PATCH", body: JSON.stringify({
+        job: $("e-job-" + p).value.trim(), notes: $("e-notes-" + p).value.trim(),
+      })});
+      $("edit-" + p).classList.add("hidden");
+      refresh();
+    } catch (e) { banner("bad", "Could not save: " + esc(e.message)); }
+    finally { t.disabled = false; }
+  }
+});
+
+// Keep the roster honest without hammering the pods: this is a light poll of
+// one cheap endpoint per bot, and it stops entirely when the tab is hidden.
+async function poll() {
+  if (document.hidden) return;
+  await refresh();
+}
+setInterval(poll, 8000);
+refresh();
+</script>
+</body>
+</html>

@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import logging
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -99,6 +100,28 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="browser-agent", lifespan=lifespan)
 
 
+# -- the path this bot is reached under ------------------------------------
+
+# When a roster proxies several bots from one domain, each is mounted at a
+# prefix (/b/<profile>) that nginx strips before forwarding. Routing does not
+# need to know that — every route here is still "/" from the pod's side — but
+# the UI does, because it builds its own live-view URL. The proxy passes the
+# prefix in X-Forwarded-Prefix (the convention uvicorn's --proxy-headers
+# understands) and it takes precedence over the static setting.
+_REACHED_PREFIX = ContextVar("reached_prefix", default="")
+
+
+@app.middleware("http")
+async def _capture_prefix(request: Request, call_next):
+    token = _REACHED_PREFIX.set(
+        request.headers.get("x-forwarded-prefix", "").rstrip("/") or settings.url_prefix
+    )
+    try:
+        return await call_next(request)
+    finally:
+        _REACHED_PREFIX.reset(token)
+
+
 # -- auth ------------------------------------------------------------------
 
 
@@ -152,6 +175,26 @@ async def healthz() -> dict[str, Any]:
     }
 
 
+@app.get("/api/whoami", dependencies=[Depends(require_token)])
+async def whoami() -> dict[str, Any]:
+    """Who this bot is, cheaply.
+
+    Deliberately separate from /api/state: the roster needs one cheap identity
+    line per bot, and /api/state is the expensive one (it probes the model and
+    serialises up to 50 tasks). Nothing here touches the browser, the store or
+    the network, so a roster can poll every bot at once without waking any of
+    them up. It is also the only endpoint that does not require the profile to
+    have been initialised — a roster has to see a bot before it is signed in.
+    """
+    return {
+        "profile": settings.profile,
+        "display_name": settings.display_name,
+        "job": settings.display_job,
+        "profile_initialised": profile_exists(settings),
+        "url_prefix": _REACHED_PREFIX.get(),
+    }
+
+
 @app.get("/api/state", dependencies=[Depends(require_token)])
 async def state() -> dict[str, Any]:
     """Everything the admin UI needs, in one call."""
@@ -185,7 +228,11 @@ async def state() -> dict[str, Any]:
         "tasks": [t.to_dict() for t in tasks],
         "schedules": [s.to_dict() for s in store.all()],
         "queue_depth": runner.queue.qsize(),
-        "takeover_url": "/vnc.html",
+        # Prefixed, so a bot reached under /b/<profile> points at its OWN live
+        # view and not the roster's. Empty prefix (the default) leaves today's
+        # behaviour exactly as it was.
+        "url_prefix": _REACHED_PREFIX.get(),
+        "takeover_url": f"{_REACHED_PREFIX.get()}/vnc.html",
     }
 
 

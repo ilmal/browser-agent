@@ -104,6 +104,13 @@ spec:
             - { name: BROWSER_BASE_URL, value: "" }
             - { name: SCREEN_WIDTH, value: "1440" }
             - { name: SCREEN_HEIGHT, value: "900" }
+            # The agent fallback is bounded, explicitly. Both have the same
+            # value in config.py, but a bound that is only a default is not a
+            # bound: an unbounded run once held the single worker for 466.9s
+            # and left every later task QUEUED. Stated here so a redeploy
+            # cannot silently drop it.
+            - { name: AGENT_MAX_STEPS, value: "25" }
+            - { name: AGENT_TIMEOUT_S, value: "600" }
             # LLM fallback: llm-service, in-cluster. No per-call fees.
             - { name: LLM_BASE_URL, value: "http://llm-service.llm-service.svc.cluster.local:8001/v1" }
             # deepseek-v4.1-flash, not glm-4.5v. The vision GLM is zai-ONLY in

@@ -97,6 +97,17 @@ def main() -> int:
     )
     settings = load_settings()
 
+    # The roster ("hub") is the same image with a different app. It runs no
+    # browser, so it starts no display: Xvfb + x11vnc + websockify per roster
+    # would be three idle processes per hub and one more thing to go wrong.
+    if os.environ.get("ROLE", "").lower() == "hub":
+        import uvicorn
+
+        uvicorn.run(
+            "browser_agent.hub:app", host="0.0.0.0", port=settings.api_port, log_level="info"
+        )
+        return 0
+
     # Import after display setup so Playwright sees a display if it needs one.
     procs = _start_display(settings)
     try:

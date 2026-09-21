@@ -53,6 +53,10 @@ COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /usr/local/bin/uv
 
 COPY pyproject.toml README.md ./
 COPY src ./src
+# The roster's "new bot" runs this rather than reimplementing it, so there is
+# exactly one definition of what a bot is. It is a generator: it writes YAML to
+# stdout and touches nothing, which is why the hub can afford to run it.
+COPY scripts/add-profile.sh ./scripts/add-profile.sh
 
 # `agent` extra adds browser-use. Kept in the image because the fallback is the
 # whole point of the design; it is inert unless a recipe fails. The Laya gate

@@ -334,19 +334,28 @@ function set(id, html) {
   if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; }
 }
 
-// Where the noVNC view lives, as seen from the operator's browser.
+// Where this bot's noVNC view lives, as seen from the operator's browser.
 //
 // BROWSER_BASE_URL is deployment-specific and deliberately empty in the tracked
 // manifest (see k8s/browser-agent.yaml), so it is the one setting an image-only
 // redeploy can silently wipe. Never guess "host:novnc_port" from it: the pod
 // port is not exposed (the reverse proxy serves /vnc.html instead), and that
-// guess is what produced the refused "browser.ilmal.se:6080/vnc.html". The same
-// origin is always right, because whatever proxy the operator reached this page
-// through is the one that serves /vnc.html.
+// guess is what produced the refused "browser.ilmal.se:6080/vnc.html".
+//
+// The origin alone is not enough once a roster proxies several bots from one
+// domain: reached at /b/x/ the origin is the ROSTER, and origin + "/vnc.html"
+// would open the roster's viewer rather than this bot's. url_prefix is the
+// path this bot is mounted at ("/b/x"), sent by the proxy, and it is the only
+// part that differs. Empty prefix = the old one-domain-per-bot behaviour.
 function browserUrl() {
   if (!state) return null;
   if (state.browser_base_url) return state.browser_base_url.replace(/\/$/, "") + "/vnc.html";
-  return location.origin + "/vnc.html";
+  return location.origin + (state.url_prefix || "") + "/vnc.html";
+}
+
+// True when this page is a bot inside a roster rather than the whole app.
+function inRoster() {
+  return !!(state && state.url_prefix);
 }
 
 function renderPills() {
