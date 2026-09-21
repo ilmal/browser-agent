@@ -45,6 +45,23 @@ RATE_LIMIT_PAGE = """<html><body><p>Too many requests. Try again later.</p></bod
 OTP_PAGE = """<html><body><h1>Verify</h1>
 <input autocomplete="one-time-code" name="code"></body></html>"""
 
+# A Cloudflare-style wall: the visible block lives in a cross-origin iframe, so
+# the main frame contains no captcha selector and no captcha text. "{{ORIGIN}}"
+# is substituted with a second hostname (localhost vs 127.0.0.1) so the frame
+# is genuinely cross-origin, as a vendor wall is.
+VENDOR_WALL_PAGE = """<html><body><h1>Just a moment...</h1>
+<iframe src="{{ORIGIN}}/cdn-cgi/challenge-platform/h/b/orchestrate/chl_page/v1"
+        width="400" height="300"></iframe>
+</body></html>"""
+
+# The wall's own document: a spinner, nothing the detector's selectors match.
+VENDOR_WALL_FRAME = """<html><body><div id="spinner">Checking your browser…</div></body></html>"""
+
+# A wall that has not rendered its iframe yet, announced only in the source.
+VENDOR_SCRIPT_PAGE = """<html><body><h1>Loading</h1>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js"></script>
+</body></html>"""
+
 
 def _free_port() -> int:
     with socket.socket() as s:
@@ -61,6 +78,8 @@ def site():
         "/login": LOGIN_PAGE,
         "/ratelimit": RATE_LIMIT_PAGE,
         "/otp": OTP_PAGE,
+        "/vendorwall-frame": VENDOR_WALL_FRAME,
+        "/vendorwall-script": VENDOR_SCRIPT_PAGE,
     }
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -78,6 +97,11 @@ def site():
     port = _free_port()
     server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
+    # Served under two hostnames so a frame can be cross-origin without a
+    # second socket. localhost and 127.0.0.1 are distinct origins.
+    pages["/vendorwall"] = VENDOR_WALL_PAGE.replace(
+        "{{ORIGIN}}", f"http://localhost:{port}"
+    )
     yield f"http://127.0.0.1:{port}"
     server.shutdown()
 
@@ -146,3 +170,32 @@ async def test_require_clear_raises_on_captcha(page, site):
 async def test_require_clear_passes_clean_page(page, site):
     await page.goto(f"{site}/clean", wait_until="domcontentloaded")
     await require_clear(page)  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_detects_wall_in_cross_origin_iframe(page, site):
+    """The vendor wall is invisible to the main frame and must still be caught.
+
+    Regression: detection used to read only the main frame, so a Cloudflare
+    interstitial — served from challenges.cloudflare.com in an out-of-process
+    iframe — reported a clean page and the run continued into the wall.
+    """
+    await page.goto(f"{site}/vendorwall", wait_until="domcontentloaded")
+    # The guard: the main frame really is clean, which is why this was missed.
+    assert await page.locator("div[class*='captcha' i]").count() == 0
+    assert "captcha" not in (await page.inner_text("body")).lower()
+
+    found = await detect_challenge(page)
+    assert found is not None, "a cross-origin challenge frame went undetected"
+    assert found.kind is ChallengeKind.CAPTCHA
+    assert "cloudflare" in found.detail.lower()
+
+
+@pytest.mark.asyncio
+async def test_detects_wall_from_source_before_it_renders(page, site):
+    """A wall announced in the source but not yet rendered is still a stop."""
+    await page.goto(f"{site}/vendorwall-script", wait_until="domcontentloaded")
+    found = await detect_challenge(page)
+    assert found is not None, "a challenge announced in the source went undetected"
+    assert found.kind is ChallengeKind.CAPTCHA
+    assert "source" in found.detail.lower()
