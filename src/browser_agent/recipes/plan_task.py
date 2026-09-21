@@ -1,7 +1,8 @@
 """The plan.task recipe: planner once, deterministic executor, Laya gate.
 
 Payload:
-  task — the freeform instruction (required)
+  task — the freeform instruction (required; ``text`` accepted as an alias,
+  which is what the admin UI's Instructions box sends)
 
 Failure semantics, deliberately uneven:
 
@@ -57,7 +58,10 @@ class PlanTask:
 
     async def run(self, session: BrowserSession, payload: dict[str, Any]) -> dict[str, Any]:
         self._deps()
-        task_text = str(payload.get("task") or "").strip()
+        # The admin UI's Instructions box lands in payload["text"] for every
+        # recipe, so accept it as an alias — a plan.task typed into the normal
+        # form must not fail for field-name reasons (seen live 2026-09-21).
+        task_text = str(payload.get("task") or payload.get("text") or "").strip()
         if not task_text:
             raise PlanRejected("plan.task needs a 'task' in the payload")
 

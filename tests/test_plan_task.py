@@ -311,6 +311,17 @@ async def test_missing_task_text_fails(runner_factory, site):
     assert "plan rejected" in done.detail
 
 
+async def test_ui_text_field_works_as_task_alias(runner_factory, site):
+    """The admin UI's Instructions box sends payload["text"], not ["task"]."""
+    make, site_url = runner_factory
+    planner = FakePlanner(_happy_plan(site_url))
+    runner = make(planner=planner, laya=FakeLaya(), agent_runner=None)
+    task = runner.submit("plan.task", {"text": "fill the form"})
+    done = await _drain(runner, task.id)
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is False
+
+
 async def test_step_failure_briefs_agent_with_original_task(runner_factory, site):
     make, site_url = runner_factory
     plan = {
