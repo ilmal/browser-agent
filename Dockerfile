@@ -54,6 +54,13 @@ RUN NOVNC_VERSION="$(dpkg-query -W -f='${Version}' novnc | cut -d: -f2 | cut -d-
     && printf '{"name":"novnc","version":"%s"}\n' "$NOVNC_VERSION" > /usr/share/novnc/package.json \
     && chmod a+r /usr/share/novnc/package.json
 
+# kubectl, for the roster's "new bot": the hub runs the same add-profile.sh a
+# human would and applies the result. Without it in the image the hub can only
+# report can_create:false, so the multi-bot feature the roster exists for is
+# unreachable in the one place it matters. Static Go binary, so this adds no
+# runtime deps. Version matches the cn1 server (v1.32.13).
+COPY --from=registry.k8s.io/kubectl:v1.32.13 /bin/kubectl /usr/local/bin/kubectl
+
 WORKDIR /app
 
 # uv for a reproducible, cached dependency install.
