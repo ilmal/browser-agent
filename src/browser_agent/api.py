@@ -9,6 +9,7 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -28,6 +29,7 @@ from .tasks import (
     AGENT_RECIPE,
     TaskRunner,
     TaskStatus,
+    get_recipe_or_none,
     list_recipes,
     recipe_reads_instruction,
 )
@@ -435,18 +437,29 @@ def _recipe_reads_payload(name: str) -> bool:
     return recipe_reads_instruction(name)
 
 
-def _last_url(task: Any) -> str:
-    """The URL the previous attempt was working on, as a start point.
+_URL_RE = re.compile(r"https?://[^\s<>\"')]+")
 
-    Better than the recipe's ``entry_url`` when the operator is redirecting the
-    task: it is where the work actually is, so "go to another site" begins from
-    a real page rather than the site that just blocked us.
+
+def _start_url_for(text: str, task: Any) -> str:
+    """Where the redirected agent run should begin.
+
+    Order matters. The operator naming a URL in their message is the strongest
+    signal there is — "go to https://duckduckgo.com instead" is an instruction,
+    not a hint — so it wins. Otherwise fall back to wherever the previous
+    attempt actually was. Without this the agent run failed immediately with
+    "freeform tasks need a start url in the payload", which is a redirect the
+    operator asked for and did not get.
     """
-    for source in (task.result or {}, task.payload, {"detail": task.detail or ""}):
+    for candidate in (text, task.detail or ""):
+        found = _URL_RE.search(candidate or "")
+        if found:
+            return found.group(0).rstrip(".,;")
+    for source in (task.result or {}, task.payload):
         url = source.get("url") if isinstance(source, dict) else None
         if isinstance(url, str) and url.startswith("http"):
             return url
-    return ""
+    entry = getattr(get_recipe_or_none(task.recipe), "entry_url", "") or ""
+    return entry if entry.startswith("http") else ""
 
 
 class SayRequest(BaseModel):
@@ -521,7 +534,15 @@ async def say(task_id: str, req: SayRequest) -> dict[str, Any]:
     # step recipe) is left alone.
     recipe = task.recipe
     if not _recipe_reads_payload(recipe):
-        payload.setdefault("url", _last_url(task))
+        # Assignment, not setdefault: a URL the operator names must beat the one
+        # the previous attempt left in the payload, or "go to <other site>
+        # instead" would be recorded and then quietly ignored. _start_url_for
+        # already carries the fallback chain, so an empty result means there is
+        # genuinely nothing to start from and the agent's own error is the
+        # honest outcome.
+        url = _start_url_for(text, task)
+        if url:
+            payload["url"] = url
         recipe = AGENT_RECIPE
 
     nxt = runner.retry(task.id, payload=payload, recipe=recipe)

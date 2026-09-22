@@ -166,6 +166,12 @@ def get_recipe(name: str) -> Recipe:
     return _REGISTRY[name]
 
 
+def get_recipe_or_none(name: str) -> Recipe | None:
+    """The registered recipe, or None. Never raises for a name we do not have."""
+    _load_library()
+    return _REGISTRY.get(name)
+
+
 def recipe_reads_instruction(name: str) -> bool:
     """Whether ``name`` honours its payload's instruction.
 
