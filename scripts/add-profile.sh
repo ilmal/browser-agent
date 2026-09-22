@@ -150,10 +150,14 @@ spec:
             - { name: LAYA_DECIDE_URL, value: "http://llm-service.llm-service.svc.cluster.local:8001/v1/decide" }
             - { name: LAYA_PICK_ENABLED, value: "false" }
             # The minesweeper tiebreak gates on LAYA_ENABLED, not PICK_ENABLED,
-            # so the game leans on Laya while the plan picker stays off.
-            # Measured in-pod 2026-09-22 (scripts/laya_game_bench.py): solver
-            # top pick safe 17/17, Laya 16/17, agreement 0/17 — Laya is the
-            # weaker guesser, so this floor, not taste, is what keeps it safe.
+            # so the game leans on Laya while the plan picker stays off. The
+            # floor keeps it safe: measured in-pod 2026-09-22
+            # (scripts/laya_game_bench.py) the solver's top pick was safe 17/17
+            # and Laya's 16/17, agreeing 0/17. That 0/17 is the `choice` head's
+            # option bias — the 0.5 wall is the HEAD, not the model
+            # (scripts/laya_pairwise_probe.py: the binary `noul` head clears
+            # 0.55 on 20/24). See the browser-agent skill before converting the
+            # recipe off the choice path.
             - { name: LAYA_GAME_MIN_CONFIDENCE, value: "0.55" }
             - { name: LAYA_MIN_CONFIDENCE, value: "0.75" }
             # 10 = the calibrated choice range (buckets >=11 ship distorted
