@@ -53,9 +53,10 @@ DEFAULT_ENTRY_URL = "https://minesweeper.online/new-game"
 #: A Beginner board needs ~40; 200 is generous headroom, not a target.
 MAX_CLICKS_PER_GAME = 200
 
-#: Ambiguous frontier cells worth asking Laya about. Three keeps the choice
-#: inside the range the gate is calibrated for and keeps the question small.
-_MAX_TIEBREAK_CANDIDATES = 3
+#: Ambiguous frontier cells the noul duel needs. Exactly two, because the
+#: question is binary and the measured framing is the solver's top pick against
+#: its runner-up — a third cell has nothing to contribute to one yes/no.
+_MAX_TIEBREAK_CANDIDATES = 2
 
 
 class Minesweeper:
@@ -209,12 +210,23 @@ class Minesweeper:
     ) -> tuple[Move, bool]:
         """Choose among ambiguous cells; ask Laya only if she is enabled.
 
-        Laya is a *tiebreak*, so the question is deliberately narrow — among a
-        few candidate cells, which is safest — and the answer is only taken
+        Laya is a *tiebreak*, so the question is deliberately narrow — the
+        solver's top pick against its runner-up — and the answer is only taken
         when the gate is confident. Anything else (gate off, unsure, transport
         failure) leaves the solver's own risk ranking in charge. Laya never
         raises and never escalates; a bad call costs a guess, not a game, since
         the fallback is the same heuristic either way.
+
+        The question is a **binary** one, and that is load-bearing, not style.
+        The 3-way ``choice`` head reports the chosen label's own probability,
+        which sits at 0.5, so ``laya_game_min_confidence`` was structurally
+        unreachable through it — measured 2-4/24 cleared under every wording
+        (``scripts/laya_choice_probe.py``). The binary ``noul`` head reports
+        ``max(p, 1-p)``, which clears the same floor as soon as the model is
+        slightly decided: 20/24 on one duel, and whole games at 354/400 against
+        the solver's 349/400 (``scripts/laya_game_sim.py``). Two candidates is
+        the whole shortlist, because one yes/no has nothing to say about a
+        third cell.
         """
         from ..minesweeper_solver import ranked_guesses
 
@@ -233,25 +245,26 @@ class Minesweeper:
         if len(shortlist) <= 1 or not self._laya.enabled:
             return moves[0], False
 
-        lines = [
-            f"row {r + 1}, column {c + 1} (risk about {p:.0%})"
-            for (r, c), p in shortlist
-        ]
+        (r0, c0), _ = shortlist[0]
+        (r1, c1), _ = shortlist[1]
         state = (
             f"{view.board.render()}\n"
             f"Minesweeper, {view.board.rows}x{view.board.cols}, "
             f"{view.board.mines_left} mines unmarked. "
             f"Nothing is provable; one of these cells must be opened."
         )
-        idx, conf = await self._laya.choose(
-            "Which numbered cell is the safest to open next?", lines, state
+        picked, conf = await self._laya.yes_no(
+            f"Is choosing row {r0 + 1}, column {c0 + 1} at least as safe "
+            f"as choosing row {r1 + 1}, column {c1 + 1}?",
+            state,
         )
         threshold = self._settings.laya_game_min_confidence
-        if idx is None or conf < threshold:
+        if picked is None or conf < threshold:
             log_.note("gate", f"game {game_no}: tiebreak inconclusive (conf {conf:.2f})")
             return moves[0], True
 
-        (r, c), p = shortlist[idx]
+        # "yes" keeps the solver's own top pick; "no" takes the runner-up.
+        (r, c), p = shortlist[0] if picked else shortlist[1]
         log_.note("gate",
                   f"game {game_no}: laya chose {r + 1},{c + 1} "
                   f"(conf {conf:.2f}, risk {p:.0%})")

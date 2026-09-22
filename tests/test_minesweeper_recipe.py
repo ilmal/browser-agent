@@ -102,18 +102,23 @@ class RecordingPace:
 
 
 class FakeLaya:
-    """A gate stub: returns a scripted (index, confidence)."""
+    """A gate stub: returns a scripted (answer, confidence) for the noul duel.
 
-    def __init__(self, pick_enabled: bool = True, answer: tuple[int | None, float] = (0, 0.99)):
+    The tiebreak asks a *binary* question — see ``_tiebreak`` for why the head
+    matters — so the stub exposes ``yes_no`` rather than ``choose``, and records
+    the question so a test can assert the framing stayed pairwise.
+    """
+
+    def __init__(self, pick_enabled: bool = True, answer: tuple[bool | None, float] = (True, 0.99)):
         # The tiebreak gates on ``enabled``; ``pick_enabled`` is kept so a test
         # can assert the game does not depend on the plan picker's flag.
         self.enabled = pick_enabled
         self.pick_enabled = pick_enabled
         self.answer = answer
-        self.asked: list[tuple[str, list[str], str]] = []
+        self.asked: list[tuple[str, str]] = []
 
-    async def choose(self, question: str, lines: list[str], state: str):
-        self.asked.append((question, lines, state))
+    async def yes_no(self, question: str, state: str):
+        self.asked.append((question, state))
         return self.answer
 
 
@@ -201,9 +206,10 @@ def test_tiebreak_falls_back_to_the_solver_when_laya_is_off():
 
 
 def test_tiebreak_asks_laya_and_obeys_a_confident_answer():
-    # Laya picks index 1 of the shortlist; the move must be that cell, and the
-    # call must be reported so the activity log can show it happened.
-    laya = FakeLaya(pick_enabled=True, answer=(1, 0.9))
+    # Laya answers "no" — the top pick is not the safer of the two — so the
+    # runner-up is taken, and the call must be reported so the activity log can
+    # show it happened.
+    laya = FakeLaya(pick_enabled=True, answer=(False, 0.9))
     recipe = _recipe(laya)
     blank = _view([["."] * 9 for _ in range(9)])
     from browser_agent.minesweeper_solver import ranked_guesses
@@ -218,14 +224,38 @@ def test_tiebreak_asks_laya_and_obeys_a_confident_answer():
     assert asked is True
     assert (move.row, move.col) == expected
     assert "laya" in move.reason
-    # The question is deliberately narrow and the shortlist small.
-    _q, lines, _state = laya.asked[0]
-    assert len(lines) == _MAX_TIEBREAK_CANDIDATES
+    # The question must stay a *binary* one: the 3-way choice head caps at 0.5
+    # and can never clear the floor, which is the bug this framing avoids. It
+    # names exactly the solver's top two cells, nothing else.
+    question, _state = laya.asked[0]
+    assert "at least as safe" in question
+    assert _MAX_TIEBREAK_CANDIDATES == 2
+    (r0, c0), (r1, c1) = ranked[0][0], ranked[1][0]
+    assert f"row {r0 + 1}, column {c0 + 1}" in question
+    assert f"row {r1 + 1}, column {c1 + 1}" in question
+
+
+def test_tiebreak_keeps_the_solver_pick_on_a_yes():
+    # "yes" means the solver's own top pick is at least as safe — so the move
+    # must be unchanged, and no reranking happens behind Laya's back.
+    laya = FakeLaya(pick_enabled=True, answer=(True, 0.9))
+    recipe = _recipe(laya)
+    blank = _view([["."] * 9 for _ in range(9)])
+    move, asked = asyncio.run(
+        recipe._tiebreak(None, blank, [Move("open", 3, 3, "heuristic")], Activity(), 1)
+    )
+    assert asked is True
+    # The solver's top pick comes from the real ranking, not the stub's move.
+    from browser_agent.minesweeper_solver import ranked_guesses
+
+    ranked = ranked_guesses(blank.board.grid, blank.board.rows, blank.board.cols,
+                            blank.board.mines_left)
+    assert (move.row, move.col) == ranked[0][0]
 
 
 def test_tiebreak_ignores_a_low_confidence_answer():
     # Below the floor the gate must not be obeyed: the solver's own pick stands.
-    laya = FakeLaya(pick_enabled=True, answer=(2, 0.30))
+    laya = FakeLaya(pick_enabled=True, answer=(False, 0.30))
     recipe = _recipe(laya)
     blank = _view([["."] * 9 for _ in range(9)])
     move, asked = asyncio.run(
@@ -250,7 +280,7 @@ def test_tiebreak_ignores_a_missing_answer():
 def test_tiebreak_does_not_ask_when_only_one_candidate_exists():
     # One candidate is not a choice; asking a model to pick one of one wastes a
     # call and can only introduce a wrong answer.
-    laya = FakeLaya(pick_enabled=True, answer=(0, 0.99))
+    laya = FakeLaya(pick_enabled=True, answer=(True, 0.99))
     recipe = _recipe(laya)
     # A single unknown cell surrounded by satisfied numbers proves it, so use a
     # board with exactly one unsettled cell.
