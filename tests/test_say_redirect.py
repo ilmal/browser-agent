@@ -12,6 +12,7 @@ operator's own words beat everything else.
 
 from __future__ import annotations
 
+import asyncio
 import sys
 from pathlib import Path
 
@@ -171,3 +172,240 @@ async def test_a_message_that_names_no_url_resumes_the_last_attempt(api_mod):
     out = await _say(api_mod, task, "carry on")
 
     assert out["task"]["payload"]["url"] == "https://a.example/deep"
+
+
+# -- say() to a run that only exists as a record ---------------------------
+
+
+def _archive(api_mod, *, task_id="old111", thread_id="t-old", attempt=1,
+             recipe="minesweeper.play", payload=None, activity=None,
+             detail="blocked: rate limited", created_at=100.0):
+    """Put one finished attempt in the archive, with no task object for it.
+
+    That is exactly the post-deploy state: the pod was recreated, every
+    in-memory task went with it, and only the record remains.
+    """
+    from browser_agent.tasks import Task, TaskStatus
+
+    t = Task(
+        id=task_id,
+        recipe=recipe,
+        payload=payload if payload is not None else {"url": "https://minesweeper.online/"},
+        thread_id=thread_id,
+        attempt=attempt,
+        status=TaskStatus.BLOCKED,
+        detail=detail,
+        created_at=created_at,
+    )
+    t.activity = activity or []
+    api_mod.runs.save(t)
+    return t
+
+
+@pytest.mark.asyncio
+async def test_a_message_on_an_archived_run_becomes_the_next_attempt(api_mod):
+    """A deploy must not be a dead end for a conversation.
+
+    The operator keeps a bad run so they can study it; being able to answer it
+    afterwards is what makes the study actionable, and after a restart the run
+    exists only here.
+    """
+    from browser_agent.tasks import AGENT_RECIPE
+
+    _archive(api_mod)
+    assert api_mod.runner.tasks.get("old111") is None, "premise: no live task"
+
+    out = await api_mod.say("old111", api_mod.SayRequest(text="go to https://duckduckgo.com"))
+
+    nxt = out["task"]
+    assert out["ran"] is True
+    assert nxt["thread_id"] == "t-old", "the answer left the conversation"
+    assert nxt["attempt"] == 2
+    assert nxt["recipe"] == AGENT_RECIPE, "a deterministic recipe ignores prose"
+    assert nxt["payload"]["url"] == "https://duckduckgo.com"
+    assert nxt["payload"]["goal"] == "go to https://duckduckgo.com"
+
+
+@pytest.mark.asyncio
+async def test_the_archived_brief_carries_the_earlier_failure_forward(api_mod):
+    """An "iterate on it" that does not say what already failed is a re-roll."""
+    _archive(
+        api_mod,
+        activity=[{"at": 1.0, "kind": "error", "text": "clicking #submit timed out"}],
+    )
+    out = await api_mod.say("old111", api_mod.SayRequest(text="try the menu instead"))
+
+    brief = out["task"]["payload"]["history"]
+    assert "attempt 1" in brief
+    assert "rate limited" in brief
+    assert "clicking #submit timed out" in brief
+
+
+@pytest.mark.asyncio
+async def test_a_note_on_an_archived_run_behaves_like_a_note_on_a_live_one(api_mod):
+    """Same meaning either side of a restart — the archive is not a second rule.
+
+    ``kind`` is recorded on the message and does not change what happens, on
+    either path. Pinning that here keeps the two branches from drifting into two
+    definitions of what a message means.
+    """
+    _archive(api_mod)
+    out = await api_mod.say("old111", api_mod.SayRequest(text="saw this too", kind="note"))
+
+    assert out["ran"] is True
+    msgs = api_mod.threads.for_thread("t-old")
+    assert [m.text for m in msgs] == ["saw this too"]
+    assert msgs[0].kind == "note"
+
+
+@pytest.mark.asyncio
+async def test_an_empty_message_is_refused_before_the_archive_is_touched(api_mod):
+    from fastapi import HTTPException
+
+    _archive(api_mod)
+    with pytest.raises(HTTPException) as exc:
+        await api_mod.say("old111", api_mod.SayRequest(text="   "))
+    assert exc.value.status_code == 400
+    assert api_mod.threads.for_thread("t-old") == []
+
+
+@pytest.mark.asyncio
+async def test_an_unknown_id_is_still_a_404(api_mod):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        await api_mod.say("nope", api_mod.SayRequest(text="hello"))
+    assert exc.value.status_code == 404
+
+
+# -- History reads through to the archive ----------------------------------
+
+
+def test_history_shows_saved_runs_after_a_restart(api_mod):
+    """Keep every run is only true on the page if the page can see them.
+
+    A deploy empties the in-memory task list; without this the operator would
+    open the page they kept a run for and find nothing there.
+    """
+    _archive(api_mod, task_id="gone1", thread_id="t-gone", created_at=5.0)
+
+    rows = api_mod._recent_tasks()
+
+    assert [r["id"] for r in rows] == ["gone1"]
+    assert rows[0]["archived"] is True
+    assert rows[0]["status"] == "blocked"
+    assert rows[0]["payload"]["url"] == "https://minesweeper.online/"
+    # Same key the UI already reads off a live task, so one code path serves both.
+    assert rows[0]["reads_instruction"] is False
+
+
+def test_a_live_task_wins_over_its_own_saved_record(api_mod):
+    """The archive row must not shadow the live one: only the live one has a control."""
+    from browser_agent.tasks import Task, TaskStatus
+
+    _archive(api_mod, task_id="both", thread_id="t-both", created_at=5.0)
+    live = Task(recipe="plan.task", payload={"task": "hi"}, id="both",
+                thread_id="t-both", status=TaskStatus.RUNNING, created_at=5.0)
+    api_mod.runner.tasks[live.id] = live
+
+    rows = api_mod._recent_tasks()
+
+    assert [r["id"] for r in rows] == ["both"]
+    assert rows[0]["archived"] is False
+    assert rows[0]["status"] == "running"
+
+
+def test_history_orders_live_and_saved_together_by_age(api_mod):
+    """One list, newest first — two lists would make the operator read twice."""
+    from browser_agent.tasks import Task, TaskStatus
+
+    _archive(api_mod, task_id="old", thread_id="t1", created_at=1.0)
+    live = Task(recipe="plan.task", payload={}, id="new", status=TaskStatus.DONE,
+                created_at=9.0)
+    api_mod.runner.tasks[live.id] = live
+
+    rows = api_mod._recent_tasks()
+
+    assert [r["id"] for r in rows] == ["new", "old"]
+
+
+def test_a_bounded_history_is_still_bounded(api_mod):
+    """The table is a fixed-height view, so the read-through has a cap too."""
+    for i in range(6):
+        _archive(api_mod, task_id=f"a{i}", thread_id=f"t{i}", created_at=float(i))
+
+    rows = api_mod._recent_tasks(limit=3)
+
+    assert [r["id"] for r in rows] == ["a5", "a4", "a3"]
+
+
+@pytest.mark.asyncio
+async def test_the_thread_survives_a_restart_through_the_archive(api_mod):
+    """Opening an old thread after a deploy must show the run, not "no such".
+
+    The History row is drawn from the in-memory tasks, so a restart empties it —
+    but a thread the operator has not finished with has to stay reachable, which
+    is what the archive fallback is for.
+    """
+    _archive(
+        api_mod,
+        activity=[{"at": 1.0, "kind": "gate", "text": "laya: no (conf 0.41)"}],
+    )
+    assert not any(t.thread_id == "t-old" for t in api_mod.runner.tasks.values())
+
+    info = await api_mod.get_thread("t-old")
+
+    assert info["archived"] is True
+    assert [a["task_id"] for a in info["attempts"]] == ["old111"]
+    # The decisions travel with the record, which is the point of archiving:
+    # an evaluation walks these, and re-deriving them at read time is what drifts.
+    assert [d["text"] for d in info["attempts"][0]["decisions"]] == ["laya: no (conf 0.41)"]
+
+
+@pytest.mark.asyncio
+async def test_a_live_thread_is_not_reported_as_archived(api_mod):
+    """In-memory wins when it exists: only a live attempt has a running control."""
+    from browser_agent.tasks import Task, TaskStatus
+
+    _archive(api_mod, task_id="same", thread_id="t-live", created_at=1.0)
+    live = Task(recipe="thread.ok", payload={}, thread_id="t-live",
+                id="same", status=TaskStatus.RUNNING)
+    api_mod.runner.tasks[live.id] = live
+
+    info = await api_mod.get_thread("t-live")
+
+    assert info["archived"] is False
+    assert [a["id"] for a in info["attempts"]] == ["same"]
+
+
+@pytest.mark.asyncio
+async def test_an_empty_thread_is_a_404(api_mod):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        await api_mod.get_thread("never-existed")
+    assert exc.value.status_code == 404
+
+
+def test_the_archive_is_listed_and_readable(api_mod):
+    """The operator's ask: keep them, and be able to go back and evaluate them."""
+    _archive(api_mod, task_id="r1", thread_id="t1", created_at=1.0)
+    _archive(api_mod, task_id="r2", thread_id="t2", created_at=2.0)
+
+    listed = asyncio.run(api_mod.list_runs(limit=50, thread_id=""))
+    assert [r["task_id"] for r in listed["runs"]] == ["r2", "r1"]
+    assert listed["count"] == 2
+    assert listed["enabled"] is True
+
+    one = asyncio.run(api_mod.get_run("r1"))
+    assert one["recipe"] == "minesweeper.play"
+    assert one["payload"]["url"] == "https://minesweeper.online/"
+    assert one["status"] == "blocked"
+
+
+def test_reading_an_archived_run_that_is_not_there_is_a_404(api_mod):
+    from fastapi import HTTPException
+
+    with pytest.raises(HTTPException) as exc:
+        asyncio.run(api_mod.get_run("nope"))
+    assert exc.value.status_code == 404

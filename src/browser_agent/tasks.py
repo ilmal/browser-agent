@@ -259,11 +259,16 @@ class TaskRunner:
         session: BrowserSession,
         *,
         agent_runner: AgentRunner | None = None,
+        runs: Any = None,
     ) -> None:
         self.settings = settings
         self.session = session
         self.llm = LLMClient(settings)
         self._agent_runner = agent_runner
+        # The durable run archive, or None. Optional so a test — and any caller
+        # that only wants the live behaviour — is not forced to build one; a
+        # missing archive costs the record, never the run.
+        self.runs = runs
         self.queue: asyncio.Queue[Task] = asyncio.Queue()
         self.tasks: dict[str, Task] = {}
         self.current: Task | None = None
@@ -356,6 +361,40 @@ class TaskRunner:
             parent_id=old.id,
         )
 
+    def resubmit(
+        self,
+        *,
+        thread_id: str,
+        attempt: int,
+        recipe: str,
+        payload: dict[str, Any],
+        parent_id: str,
+    ) -> Task:
+        """Queue the next attempt in a thread whose earlier attempt is gone.
+
+        ``retry`` needs the old ``Task`` object, and a task object does not
+        survive the pod recreate a deploy performs — but the *record* of it does,
+        and "say what to do differently" is most useful on an old run. So the
+        archive can hand its own fields here and get a real attempt in the same
+        thread. The brief comes from whatever is still in memory for the thread,
+        which after a restart is the archived attempts the caller has already
+        folded into ``payload["history"]``.
+        """
+        brief = self._thread_brief_for(thread_id)
+        base = {**payload, "history": brief} if brief else payload
+        return self.submit(
+            recipe,
+            base,
+            thread_id=thread_id,
+            attempt=attempt + 1,
+            parent_id=parent_id,
+        )
+
+    def _thread_brief_for(self, thread_id: str) -> str:
+        """``_thread_brief`` for a thread named by id rather than by a task."""
+        task = next((t for t in self.tasks.values() if t.thread_id == thread_id), None)
+        return self._thread_brief(task) if task is not None else ""
+
     def _thread_brief(self, task: Task) -> str:
         """What the earlier attempts in this thread tried, and why they stopped.
 
@@ -416,8 +455,20 @@ class TaskRunner:
                 # unrecoverable and the thread could not show what it tried.
                 with contextlib.suppress(Exception):
                     task.activity = self.activity.as_list()
+                # Archive it. After the snapshot, so the record carries the full
+                # feed, and after the status is final, so the record is the
+                # outcome and not a mid-flight guess. Best-effort by design: the
+                # run is already over, and a store failure must not surface as a
+                # task failure.
+                self._archive(task)
                 self.current = None
                 self.queue.task_done()
+
+    def _archive(self, task: Task) -> None:
+        if self.runs is None:
+            return
+        with contextlib.suppress(Exception):
+            self.runs.save(task)
 
     async def _run(self, task: Task) -> None:
         # A fresh activity log and control set per task: the runner outlives the

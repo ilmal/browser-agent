@@ -24,6 +24,7 @@ from .agent import make_agent_runner
 from .browser import BrowserSession, profile_exists
 from .config import Settings, load_settings
 from .escalation import detect_challenge
+from .runstore import RunStore
 from .scheduler import ScheduleStore
 from .tasks import (
     AGENT_RECIPE,
@@ -42,7 +43,12 @@ settings: Settings = load_settings()
 session = BrowserSession(settings)
 store = ScheduleStore(settings.state_db)
 threads = ThreadStore()
-runner = TaskRunner(settings, session, agent_runner=make_agent_runner(settings))
+# Every finished run, on the profile's PVC. Separate from the schedule store and
+# from the in-memory task objects on purpose: the point of the archive is to
+# outlive a deploy, and a task is recreated (and lost) by one.
+runs = RunStore(settings.runs_db, profile=settings.profile)
+runner = TaskRunner(settings, session, agent_runner=make_agent_runner(settings),
+                    runs=runs)
 
 # Shown on a freshly started pod so noVNC opens on a real page instead of a
 # blank X root window. A data URL on purpose: it cannot fail on DNS, on the
@@ -225,10 +231,44 @@ async def whoami() -> dict[str, Any]:
     }
 
 
+def _recent_tasks(limit: int = 50) -> list[dict[str, Any]]:
+    """The History list: this process's tasks, then the archive behind them.
+
+    The in-memory list is authoritative while a task exists — it carries live
+    status and the running control — but it is emptied by every deploy, because
+    a deploy recreates the pod. Since the archive exists precisely to outlive
+    that, the History table reads through to it: otherwise "keep every run so we
+    can evaluate them" would be true of the disk and false of the page.
+
+    An archived row is shaped like a live one so the UI needs no second code
+    path, and is marked ``archived`` so "Read" is offered instead of controls
+    that would 404.
+    """
+    live = sorted(runner.tasks.values(), key=lambda t: t.created_at, reverse=True)
+    out = [{**t.to_dict(), "archived": False} for t in live[:limit]]
+    if len(out) >= limit:
+        return out
+    seen = {t["id"] for t in out}
+    for run in runs.list(limit=limit):
+        if run.task_id in seen:
+            continue
+        d = run.to_dict()
+        d["id"] = d.pop("task_id")
+        # A finished attempt reads no instruction through its recipe, and the
+        # "Talk to it" flow depends on knowing that. Computing it costs nothing.
+        d["reads_instruction"] = recipe_reads_instruction(run.recipe)
+        d["amended_count"] = 0
+        d["archived"] = True
+        out.append(d)
+        if len(out) >= limit:
+            break
+    return sorted(out, key=lambda t: t["created_at"], reverse=True)
+
+
 @app.get("/api/state", dependencies=[Depends(require_token)])
 async def state() -> dict[str, Any]:
     """Everything the admin UI needs, in one call."""
-    tasks = sorted(runner.tasks.values(), key=lambda t: t.created_at, reverse=True)[:50]
+    tasks = _recent_tasks()
     current = runner.current.to_dict() if runner.current else None
     if current is not None and runner.control is not None:
         # Rides on the task because the UI's question is "what is this task
@@ -261,7 +301,7 @@ async def state() -> dict[str, Any]:
         "llm_enabled": runner.llm.enabled,
         "recipes": list_recipes(),
         "current": current,
-        "tasks": [t.to_dict() for t in tasks],
+        "tasks": tasks,
         "schedules": [s.to_dict() for s in store.all()],
         "queue_depth": runner.queue.qsize(),
         # Prefixed, so a bot reached under /b/<profile> points at its OWN live
@@ -471,24 +511,75 @@ class SayRequest(BaseModel):
     kind: str = "instruction"
 
 
+@app.get("/api/runs", dependencies=[Depends(require_token)])
+async def list_runs(limit: int = 50, thread_id: str = "") -> dict[str, Any]:
+    """The durable archive of finished runs, newest first.
+
+    Distinct from ``/api/state``, which lists the *in-memory* tasks of this
+    process and therefore forgets everything on the next deploy. The operator's
+    ask was to keep a run — especially a bad one — so it can be studied later;
+    that requires a record that outlives the process, which lives here.
+
+    ``?thread_id=`` narrows to one line of work, which is how the thread panel
+    reaches runs whose task objects are gone.
+    """
+    rows = runs.list(limit=max(1, min(limit, 500)), thread_id=thread_id)
+    return {
+        "profile": settings.profile,
+        "count": runs.count(),
+        "enabled": runs.enabled,
+        "runs": [r.to_dict() for r in rows],
+    }
+
+
+@app.get("/api/runs/{task_id}", dependencies=[Depends(require_token)])
+async def get_run(task_id: str) -> dict[str, Any]:
+    """One archived run, in full: payload, feed, result, and its decisions.
+
+    The decisions are lifted into their own list because that is what an
+    evaluation walks — every Laya verdict and every agent step, in order, is the
+    record of what the run *chose*, as opposed to what merely happened.
+    """
+    found = runs.get(task_id)
+    if found is None:
+        raise HTTPException(status_code=404, detail="no archived run with that id")
+    return found.to_dict()
+
+
 @app.get("/api/threads/{thread_id}", dependencies=[Depends(require_token)])
 async def get_thread(thread_id: str) -> dict[str, Any]:
     """One thread: every attempt in it, the messages, and the live feed.
 
     The attempts carry their own snapshotted activity, so the panel can show
     what every earlier attempt tried without a second request per attempt.
+
+    A thread whose attempts are no longer in memory — the pod was recreated by a
+    deploy — falls back to the archive, so opening an old thread after a restart
+    shows the run instead of "no such thread". Attempts still in memory win,
+    because only they carry live status and a running attempt's current control.
     """
     members = sorted(
         (t for t in runner.tasks.values() if t.thread_id == thread_id),
         key=lambda t: t.created_at,
     )
     if not members:
-        raise HTTPException(status_code=404, detail="no such thread")
+        archived = sorted(runs.list(limit=200, thread_id=thread_id),
+                          key=lambda r: r.created_at)
+        if not archived:
+            raise HTTPException(status_code=404, detail="no such thread")
+        return {
+            "thread_id": thread_id,
+            "attempts": [r.to_dict() for r in archived],
+            "messages": [m.to_dict() for m in threads.for_thread(thread_id)],
+            "current": None,
+            "archived": True,
+        }
     return {
         "thread_id": thread_id,
         "attempts": [t.to_dict() for t in members],
         "messages": [m.to_dict() for m in threads.for_thread(thread_id)],
         "current": runner.current.to_dict() if runner.current else None,
+        "archived": False,
     }
 
 
@@ -510,7 +601,10 @@ async def say(task_id: str, req: SayRequest) -> dict[str, Any]:
     """
     task = runner.tasks.get(task_id)
     if task is None:
-        raise HTTPException(status_code=404, detail="no such task")
+        # The run outlived the task object — a deploy recreates every pod, and
+        # every in-memory task with it — but the archive still has it, and
+        # talking to a recorded run is the whole reason the archive exists.
+        return await _say_to_archived(task_id, req)
     text = req.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is empty")
@@ -546,6 +640,81 @@ async def say(task_id: str, req: SayRequest) -> dict[str, Any]:
         recipe = AGENT_RECIPE
 
     nxt = runner.retry(task.id, payload=payload, recipe=recipe)
+    return {"task_id": nxt.id, "ran": True, "task": nxt.to_dict()}
+
+
+def _archived_brief(thread_id: str, at: float) -> str:
+    """The same brief ``TaskRunner._thread_brief`` writes, built from records.
+
+    Needed because after a deploy there is no task object to walk, and an
+    "iterate on it" that does not carry the earlier failure forward is just a
+    second identical roll of the dice — the whole reason the brief exists.
+
+    ``at`` is inclusive, matching the live path: ``retry`` briefs the next
+    attempt with the attempt it is replacing, so the run being answered is the
+    one whose failure matters most.
+    """
+    earlier = sorted(
+        (r for r in runs.list(limit=200, thread_id=thread_id) if r.created_at <= at),
+        key=lambda r: r.created_at,
+    )
+    lines: list[str] = []
+    for r in earlier:
+        lines.append(f"- attempt {r.attempt} ({r.recipe}) ended {r.status}: "
+                     f"{r.detail or 'no detail'}")
+        for entry in r.activity[-3:]:
+            lines.append(f"    · {entry.get('text', '')}")
+    if not lines:
+        return ""
+    return (
+        "Earlier attempts at this same task, for context. Do not repeat a "
+        "step that already failed this way:\n" + "\n".join(lines)
+    )
+
+
+async def _say_to_archived(task_id: str, req: SayRequest) -> dict[str, Any]:
+    """``say`` for an attempt that only exists as a record.
+
+    The run archive is what makes an old run studyable; letting the operator also
+    *answer* it is what makes the study actionable, and it is the same endpoint
+    either way so the UI never has to ask which kind of task it is looking at.
+    """
+    run = runs.get(task_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="no such task")
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is empty")
+    if req.kind not in ("instruction", "note"):
+        raise HTTPException(status_code=400, detail="kind must be instruction or note")
+    threads.say(run.thread_id, "operator", req.kind, text)
+
+    # Deliberately the same shape as the live branch above, ``kind`` included: a
+    # note queues an attempt either way. Branching on kind here and not there
+    # would be a second rule about what a message means, differing only by
+    # whether the pod happens to have restarted since the run.
+    payload = {**run.payload, "task": text, "text": text, "goal": text}
+    history = _archived_brief(run.thread_id, run.created_at)
+    if history:
+        payload["history"] = history
+
+    recipe = run.recipe
+    if not _recipe_reads_payload(recipe):
+        # Same rule as a live retry: a deterministic recipe ignores the prose, so
+        # the message becomes an agent run on this thread instead of a re-run of
+        # the identical steps.
+        url = _start_url_for(text, run)
+        if url:
+            payload["url"] = url
+        recipe = AGENT_RECIPE
+
+    nxt = runner.resubmit(
+        thread_id=run.thread_id,
+        attempt=run.attempt,
+        recipe=recipe,
+        payload=payload,
+        parent_id=run.task_id,
+    )
     return {"task_id": nxt.id, "ran": True, "task": nxt.to_dict()}
 
 

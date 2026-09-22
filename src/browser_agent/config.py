@@ -208,6 +208,12 @@ class Settings:
         return self.data_root / "state.db"
 
     @property
+    def runs_db(self) -> Path:
+        """The durable run archive — see ``runstore``. On the data volume, so it
+        survives the pod recreate every deploy performs."""
+        return self.data_root / "runs.db"
+
+    @property
     def artifacts_dir(self) -> Path:
         return self.data_root / "artifacts" / self.profile
 
