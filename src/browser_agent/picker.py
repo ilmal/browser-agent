@@ -32,8 +32,27 @@ log = logging.getLogger(__name__)
 
 _SYSTEM = (
     "You pick which numbered page element to activate to accomplish a goal. "
-    "Answer with ONLY the element number (an integer). No other text."
+    "Answer with ONLY the element number (an integer). No other text.\n"
+    "Rules:\n"
+    "- Pick by exact label match against the goal when one exists; otherwise the "
+    "element whose role and label best name the goal's object.\n"
+    "- Never pick a control whose state already satisfies the goal (a [checked] "
+    "box for an opt-in, a field whose = value already holds the text).\n"
+    "- Prefer the visible primary action (submit/continue/next) for form goals; "
+    "ignore navigation chrome, footer links and social icons unless the goal "
+    "names them."
 )
+
+#: The operation premise, ported from jev-ultrafast's question compiler: each
+#: target question restates the operation, so the model never has to guess
+#: whether it is choosing something to click or something to type into.
+_OP_PREMISE = {
+    "click": "The next action is CLICK: pick the element to click.",
+    "type": (
+        "The next action is TYPE: pick the field to enter text into. The text "
+        "is already decided; never judge the field by what it should contain."
+    ),
+}
 
 _FIRST_INT = re.compile(r"\d+")
 
@@ -49,7 +68,7 @@ class ElementPicker:
         return self.settings.picker_enabled and bool(self.settings.llm_api_key)
 
     async def pick(
-        self, goal: str, state_text: str, lines: list[str]
+        self, goal: str, state_text: str, lines: list[str], *, op: str = "click"
     ) -> tuple[int | None, float]:
         """Return ``(index, confidence)`` for the chosen candidate line.
 
@@ -57,6 +76,8 @@ class ElementPicker:
         answer that is not an in-range element number. Confidence is 1.0 only
         for a cleanly parsed, in-range index; there is no second signal worth
         trusting from a one-token answer, so range validation IS the gate.
+        ``op`` states the operation the element is picked for, which the
+        question restates as its premise.
         """
         if not self.enabled or not lines:
             return None, 0.0
@@ -68,6 +89,7 @@ class ElementPicker:
                 {
                     "role": "user",
                     "content": (
+                        f"{_OP_PREMISE.get(op, _OP_PREMISE['click'])}\n\n"
                         f"Goal: {goal}\n\nPage:\n{state_text}\n\n"
                         f"Elements:\n" + "\n".join(lines) + "\n\nWhich element number?"
                     ),

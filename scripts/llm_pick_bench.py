@@ -25,7 +25,7 @@ from playwright.async_api import async_playwright
 
 from browser_agent.config import load_settings
 from browser_agent.picker import ElementPicker
-from browser_agent.recipes._candidates import extract_candidates
+from browser_agent.recipes._candidates import PICKER_CAP, TYPE_BASE, extract_candidates
 from browser_agent.recipes._plan_exec import state_text as page_state_text
 
 from laya_pick_bench import FIXTURES
@@ -42,9 +42,14 @@ async def main() -> int:
         page = await browser.new_page()
         for fx in FIXTURES:
             await page.set_content(fx.html)
-            _, lines = await extract_candidates(page, fx.base, settings.laya_max_candidates)
+            cands = await extract_candidates(
+                page, fx.base, PICKER_CAP,
+                mode="type" if fx.base == TYPE_BASE else "click",
+            )
+            lines = cands.lines
             idx, _ = await picker.pick(
-                fx.goal, await page_state_text(page, 400), lines
+                fx.goal, await page_state_text(page, 400), lines,
+                op="type" if fx.base == TYPE_BASE else "click",
             )
             if idx is None or not 0 <= idx < len(lines):
                 rows.append((fx.name, "<no pick>", False, True))
@@ -57,15 +62,20 @@ async def main() -> int:
 
     correct = sum(1 for r in rows if r[2])
     no_pick = sum(1 for r in rows if r[1] == "<no pick>")
+    acted = total - no_pick
     total = len(rows)
 
-    print(f"picker: {settings.picker_model} | floor semantics: parse+range only")
+    print(f"picker: {settings.picker_model} | cap {PICKER_CAP} | floor semantics: parse+range only")
     print(f"{'fixture':<18} correct  picked line")
     for name, line, ok, badp in rows:
         flag = "BAD-PARSE" if badp else ""
         print(f"{name:<18} {str(ok):<7} {flag:<9} {line[:70]}")
+    # Selective accuracy (cua-s1's eval framing): of the decisions the picker
+    # actually acted on, how many were right. Coverage = acted/total.
+    selective = correct / acted if acted else 0.0
+    coverage = acted / total if total else 0.0
     print(f"\ntotal {total} | correct {correct} ({correct / total:.0%}) | no-pick {no_pick} "
-          f"| {elapsed / total:.2f}s avg")
+          f"| selective {selective:.0%} | coverage {coverage:.0%} | {elapsed / total:.2f}s avg")
 
     ok = correct == total and no_pick == 0
     print(f"\nverdict: {'PASS — picker may be enabled' if ok else 'FAIL — keep the picker off'}")

@@ -358,6 +358,50 @@ async def test_http_choice_uses_the_chosen_labels_probability(http_settings, fak
     assert body["questions"]["pick"]["criteria"] == {"0": "0. a", "1": "1. b", "2": "2. c"}
 
 
+async def test_http_choice_against_argmax_is_refused(http_settings, fake_http):
+    """A stated choice that contradicts the model's own distribution is a
+    malformed answer (jev-ultrafast's validate_choice): refuse it rather than
+    read its confidence."""
+    fake_http._response = _Resp(
+        data={
+            "answers": {
+                "pick": {"choice": "1", "confidence": 0.9,
+                         "probabilities": {"1": 0.3, "2": 0.7}}
+            }
+        }
+    )
+    gate = LayaGate(http_settings)
+    idx, conf = await gate.choose("which?", ["0. a", "1. b", "2. c"], "state")
+
+    assert idx is None and conf == 0.0
+    assert gate.stats["inconclusive"] == 1
+
+
+async def test_http_choice_out_of_range_probability_is_refused(http_settings, fake_http):
+    fake_http._response = _Resp(
+        data={
+            "answers": {
+                "pick": {"choice": "1", "confidence": 0.9,
+                         "probabilities": {"1": 1.5, "2": -0.1}}
+            }
+        }
+    )
+    gate = LayaGate(http_settings)
+    idx, conf = await gate.choose("which?", ["0. a", "1. b"], "state")
+
+    assert idx is None and conf == 0.0
+    assert gate.stats["inconclusive"] == 1
+
+
+async def test_http_choice_without_probabilities_still_answers(http_settings, fake_http):
+    """Engines that report no distribution fall back to confidence-only
+    semantics; nothing to validate against the argmax."""
+    fake_http._response = _Resp(data={"answers": {"pick": {"choice": "0"}}})
+    gate = LayaGate(http_settings)
+    idx, conf = await gate.choose("which?", ["0. a", "1. b"], "state")
+    assert idx == 0 and conf == 0.0
+
+
 async def test_http_500_is_inconclusive(http_settings, fake_http):
     fake_http._response = _Resp(status_code=503)
     gate = LayaGate(http_settings)

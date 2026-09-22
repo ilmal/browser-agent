@@ -44,6 +44,8 @@ TWINS_PAGE = """<html><body><h1>Twins</h1>
 
 PICKED_PAGE = """<html><body><h1>Picked</h1><p>landed</p></body></html>"""
 
+STUCK_PAGE = """<html><body><h1>Stuck</h1><button>noop</button></body></html>"""
+
 MANY_PAGE = "<html><body><h1>Many</h1>" + "".join(
     f"<button>option {i}</button>" for i in range(30)
 ) + "</body></html>"
@@ -66,6 +68,7 @@ def site():
         "/picked": PICKED_PAGE,
         "/many": MANY_PAGE,
         "/captcha": CAPTCHA_PAGE,
+        "/stuck": STUCK_PAGE,
     }
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -161,10 +164,10 @@ class FakePicker:
 
     def __init__(self, pick: int | None = 0) -> None:
         self._pick = pick
-        self.calls: list[tuple[str, list[str]]] = []
+        self.calls: list[tuple[str, list[str], str]] = []
 
-    async def pick(self, goal: str, state: str, lines: list[str]):
-        self.calls.append((goal, list(lines)))
+    async def pick(self, goal: str, state: str, lines: list[str], *, op: str = "click"):
+        self.calls.append((goal, list(lines), op))
         if self._pick is None:
             return None, 0.0
         return self._pick, 1.0
@@ -428,28 +431,6 @@ async def test_picker_binds_by_index_not_text(runner_factory, site):
     assert "picked?which=2" in done.result["final_url"]
 
 
-async def test_llm_picker_resolves_when_laya_declines(runner_factory, site):
-    make, site_url = runner_factory
-    plan = {
-        "entry_url": f"{site_url}/twins",
-        "steps": [
-            {"action": "click", "goal": "submit the form"},
-            {"action": "extract", "goal": "heading", "selector": "h1"},
-        ],
-    }
-    picker = FakePicker(pick=1)
-    runner = make(planner=FakePlanner(plan), laya=FakeLaya(pick=None), picker=picker)
-    task = runner.submit("plan.task", {"task": "submit"})
-    done = await _drain(runner, task.id)
-
-    assert done.status is TaskStatus.DONE
-    assert done.used_agent is False
-    assert "picked?which=2" in done.result["final_url"]
-    # The picker saw the same numbered lines laya would have.
-    assert len(picker.calls) == 1
-    assert len(picker.calls[0][1]) == 2
-
-
 async def test_picker_decline_too_falls_back_to_agent(runner_factory, site):
     make, site_url = runner_factory
     plan = {
@@ -560,6 +541,114 @@ async def test_unconfirmed_click_falls_back_to_agent(runner_factory, site, yes, 
         agent_runner=agent, planner=FakePlanner(plan), laya=FakeLaya(yes=yes, conf=conf)
     )
     task = runner.submit("plan.task", {"task": "submit"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is True
+    assert agent_calls["n"] == 1
+
+
+async def test_llm_picker_resolves_when_laya_declines(runner_factory, site):
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/twins",
+        "steps": [
+            {"action": "click", "goal": "submit the form"},
+            {"action": "extract", "goal": "heading", "selector": "h1"},
+        ],
+    }
+    picker = FakePicker(pick=1)
+    runner = make(planner=FakePlanner(plan), laya=FakeLaya(pick=None), picker=picker)
+    task = runner.submit("plan.task", {"task": "submit"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is False
+    assert "picked?which=2" in done.result["final_url"]
+    # The picker saw the same numbered lines laya would have.
+    assert len(picker.calls) == 1
+    assert len(picker.calls[0][1]) == 2
+    # The question carried the operation premise (CLICK here).
+    assert picker.calls[0][2] == "click"
+
+
+async def test_pick_is_logged_for_the_flywheel(runner_factory, site, settings):
+    """Every LLM pick lands in DATA_ROOT/picks.jsonl — raw page context, the
+    lines as the model saw them, and the choice. This is the training
+    flywheel's raw material (laya-browser logs the page, not the prompt)."""
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/twins",
+        "steps": [{"action": "click", "goal": "submit the form"}],
+    }
+    picker = FakePicker(pick=1)
+    runner = make(planner=FakePlanner(plan), laya=FakeLaya(pick=None), picker=picker)
+    task = runner.submit("plan.task", {"task": "submit"})
+    done = await _drain(runner, task.id)
+    assert done.status is TaskStatus.DONE
+
+    import json
+
+    log_path = Path(settings.data_root) / "picks.jsonl"
+    rows = [json.loads(line) for line in log_path.read_text().splitlines()]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row["op"] == "click"
+    assert row["goal"] == "submit the form"
+    assert row["chosen"] == 1
+    assert "Submit" in row["chosen_line"]
+    assert len(row["lines"]) == 2
+    assert row["url"].endswith("/twins")
+
+
+async def test_three_no_change_actions_fail_into_the_agent(runner_factory, site):
+    """Three consecutive click/type actions that change nothing mean the plan
+    is grinding on a page that ignores it — fail into the fallback instead of
+    burning the step budget (jev-ultrafast's stuck latch)."""
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/stuck",
+        "steps": [
+            {"action": "click", "goal": "open settings"},
+            {"action": "click", "goal": "open the profile menu"},
+            {"action": "click", "goal": "open the export dialog"},
+        ],
+    }
+    agent_calls = {"n": 0}
+
+    async def agent(session, url, payload):
+        agent_calls["n"] += 1
+        return {"agent": True}
+
+    runner = make(agent_runner=agent, planner=FakePlanner(plan), laya=FakeLaya(pick=0))
+    task = runner.submit("plan.task", {"task": "poke the page"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is True
+    assert agent_calls["n"] == 1
+
+
+async def test_same_action_on_unchanged_page_fails_at_once(runner_factory, site):
+    """Repeating the identical action on the identical page state is a loop,
+    not persistence — caught on the second occurrence (SystemOneHarness's
+    repetition latch)."""
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/stuck",
+        "steps": [
+            {"action": "click", "goal": "open settings"},
+            {"action": "click", "goal": "open settings"},
+        ],
+    }
+    agent_calls = {"n": 0}
+
+    async def agent(session, url, payload):
+        agent_calls["n"] += 1
+        return {"agent": True}
+
+    runner = make(agent_runner=agent, planner=FakePlanner(plan), laya=FakeLaya(pick=0))
+    task = runner.submit("plan.task", {"task": "poke the page"})
     done = await _drain(runner, task.id)
 
     assert done.status is TaskStatus.DONE

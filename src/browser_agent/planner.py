@@ -31,6 +31,9 @@ Rules:
 - Describe targets semantically in "goal" (e.g. "open the invitations manager"); leave
   "selector" null unless you are certain of a stable CSS selector (data-testid, id, aria-label).
 - "type" carries the literal text to enter in "text". "extract" and "wait" REQUIRE "selector".
+- A step that submits a form, sends, deletes, pays, or otherwise commits something
+  irreversible MUST set an explicit "selector" AND a "done_when" — never leave such a
+  step for the picker to guess.
 - End with a step whose done_when proves the overall goal (url_contains or text_contains).
 - Never plan login, captcha, payment, password/email changes, or account creation.
 """

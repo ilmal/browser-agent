@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from typing import Any
 
 import httpx
@@ -160,6 +161,25 @@ class LayaGate:
             return None, 0.0
         self.stats["picks"] += 1
         label = str(ans.get("choice", ""))
+        probs = ans.get("probabilities")
+        if isinstance(probs, dict) and probs:
+            # jev-ultrafast's validate_choice, reduced to what an engine
+            # answer must satisfy before anything executes: every reported
+            # probability finite and in range, and the stated choice IS the
+            # argmax. A choice that contradicts the model's own distribution
+            # is not a low-confidence answer — it is a malformed one, and
+            # reading it anyway would defeat the confidence floor.
+            try:
+                vals = {str(k): float(v) for k, v in probs.items()}
+            except (TypeError, ValueError):
+                self.stats["inconclusive"] += 1
+                return None, 0.0
+            if any(not math.isfinite(v) or not 0.0 <= v <= 1.0 for v in vals.values()):
+                self.stats["inconclusive"] += 1
+                return None, 0.0
+            if label in vals and label != max(vals, key=vals.get):
+                self.stats["inconclusive"] += 1
+                return None, 0.0
         try:
             idx = int(label)
         except ValueError:

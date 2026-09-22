@@ -98,6 +98,14 @@ async def test_request_contract(settings, fake_http):
     assert body["user"] == "browser-agent-picker-test"
     assert "0. <a> 'Home'" in body["messages"][1]["content"]
     assert "Goal: open pricing" in body["messages"][1]["content"]
+    # The question restates the operation (jev's premise rule); click default.
+    assert "The next action is CLICK" in body["messages"][1]["content"]
+
+
+async def test_type_op_switches_the_premise(settings, fake_http):
+    await ElementPicker(settings).pick("g", "s", _LINES, op="type")
+    content = fake_http.instances[0].post_calls[0]["json"]["messages"][1]["content"]
+    assert "The next action is TYPE" in content
 
 
 async def test_disabled_makes_no_call(tmp_path, monkeypatch, fake_http):

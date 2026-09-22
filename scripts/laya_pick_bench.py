@@ -269,7 +269,11 @@ async def main() -> int:
         page = await browser.new_page()
         for fx in FIXTURES:
             await page.set_content(fx.html)
-            _, lines = await extract_candidates(page, fx.base, settings.laya_max_candidates)
+            cands = await extract_candidates(
+                page, fx.base, settings.laya_max_candidates,
+                mode="type" if fx.base == TYPE_BASE else "click",
+            )
+            lines = cands.lines
             idx, conf = await gate.choose(
                 QUESTION, lines, f"Goal: {fx.goal}\n{await page_state_text(page, 400)}"
             )
