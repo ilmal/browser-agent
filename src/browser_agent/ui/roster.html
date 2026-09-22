@@ -61,6 +61,11 @@
   }
   button.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); font-weight: 500; }
   button.ghost:hover { color: var(--text); border-color: var(--dim); }
+  /* Removing a bot is the one action here that cannot be undone from this page,
+     so it is the one action that does not look like the others. */
+  button.ghost.danger { color: var(--bad); border-color: #55292d; }
+  button.ghost.danger:hover { color: #f0b8bc; border-color: var(--bad); }
+  button.danger { background: var(--bad); border-color: var(--bad); color: #1a0e10; }
   button:disabled { opacity: .5; cursor: default; }
   .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   .row.end { justify-content: flex-end; }
@@ -211,6 +216,7 @@ function botCard(b) {
       <a class="primary" href="${esc(url)}" target="_blank" rel="noopener">Open</a>
       <a href="${liveUrl(b.profile)}" target="_blank" rel="noopener">Watch live</a>
       <button class="ghost" data-edit="${esc(b.profile)}">Notes</button>
+      <button class="ghost danger" data-remove="${esc(b.profile)}">Remove</button>
     </div>
     <div class="edit hidden" id="edit-${esc(b.profile)}">
       <label for="e-job-${esc(b.profile)}">One job</label>
@@ -220,6 +226,17 @@ function botCard(b) {
       <div class="row end" style="margin-top:8px">
         <button class="ghost" data-hide="${esc(b.profile)}">Close</button>
         <button data-save="${esc(b.profile)}">Save</button>
+      </div>
+    </div>
+    <div class="edit hidden" id="rm-${esc(b.profile)}">
+      <p class="muted" style="margin:0 0 8px">
+        This takes <b>${esc(b.display_name)}</b> off the roster and stops its pod.
+        Its saved logins stay on disk, so creating a bot with the same profile
+        name brings it back still signed in.
+      </p>
+      <div class="row end">
+        <button class="ghost" data-hide="${esc(b.profile)}">Cancel</button>
+        <button class="danger" data-confirm-remove="${esc(b.profile)}">Remove bot</button>
       </div>
     </div>
   </div>`;
@@ -280,10 +297,28 @@ document.addEventListener("click", async (ev) => {
     return;
   }
   if (t.dataset.edit) {
+    $("rm-" + t.dataset.edit).classList.add("hidden");
     $("edit-" + t.dataset.edit).classList.toggle("hidden"); return;
   }
+  if (t.dataset.remove) {
+    $("edit-" + t.dataset.remove).classList.add("hidden");
+    $("rm-" + t.dataset.remove).classList.toggle("hidden"); return;
+  }
   if (t.dataset.hide) {
-    $("edit-" + t.dataset.hide).classList.add("hidden"); return;
+    $("edit-" + t.dataset.hide).classList.add("hidden");
+    $("rm-" + t.dataset.hide).classList.add("hidden"); return;
+  }
+  if (t.dataset.confirmRemove) {
+    const p = t.dataset.confirmRemove;
+    t.disabled = true;
+    try {
+      await api("/api/bots/" + encodeURIComponent(p), { method: "DELETE" });
+      banner("ok", `<b>${esc(p)}</b> removed from the roster. Its pod is stopping; its saved
+        logins are still on disk.`);
+      refresh();
+    } catch (e) { banner("bad", "Could not remove the bot: " + esc(e.message)); }
+    finally { t.disabled = false; }
+    return;
   }
   if (t.dataset.save) {
     const p = t.dataset.save;

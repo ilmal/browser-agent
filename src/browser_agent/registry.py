@@ -105,6 +105,21 @@ def save(path: Path, reg: Registry) -> None:
     os.replace(tmp, path)   # atomic: a reader sees the old file or the new one
 
 
+def remove(reg: Registry, profile: str) -> Bot | None:
+    """Drop a bot from the roster, returning the entry that was removed.
+
+    The roster is only the *naming* record — a bot's pod, service and storage
+    are the cluster's, and the caller deletes those. Returns None when there
+    was nothing to remove, so the caller can answer 404 rather than reporting
+    a deletion that never happened.
+    """
+    bot = reg.get(profile)
+    if bot is None:
+        return None
+    reg.bots = [b for b in reg.bots if b.profile != profile]
+    return bot
+
+
 def upsert(reg: Registry, profile: str, **fields) -> Bot:
     """Add a bot or update the fields given. Never clears a field by omission,
     so recording a new job cannot wipe the notes."""

@@ -237,6 +237,169 @@ def test_an_invalid_name_is_refused(hub_env):
         assert res.status_code == 400
 
 
+def test_remove_takes_the_bot_out_and_says_which_one(tmp_path: Path):
+    """Removing has to report *what* it removed, so the caller can tell a real
+    deletion from a request for a bot that was never there."""
+    reg = registry.Registry()
+    registry.upsert(reg, "x", name="X poster", job="Post to X")
+    registry.upsert(reg, "linkedin", name="LinkedIn outreach")
+
+    gone = registry.remove(reg, "x")
+    assert gone is not None and gone.name == "X poster"
+    assert [b.profile for b in reg.bots] == ["linkedin"]
+
+    # Nothing left to remove: the caller answers 404 rather than reporting a
+    # deletion that did not happen.
+    assert registry.remove(reg, "x") is None
+    assert registry.remove(reg, "never-existed") is None
+
+
+def test_remove_persists(tmp_path: Path):
+    path = tmp_path / "bots.json"
+    reg = registry.Registry()
+    registry.upsert(reg, "x", job="Post to X")
+    registry.upsert(reg, "linkedin", job="Post and reply")
+    registry.save(path, reg)
+
+    back = registry.load(path)
+    registry.remove(back, "x")
+    registry.save(path, back)
+
+    assert [b.profile for b in registry.load(path).bots] == ["linkedin"]
+
+
+@pytest.fixture
+def fake_cluster(tmp_path: Path, monkeypatch):
+    """A hub whose generator and kubectl are harmless stand-ins.
+
+    The generator records the env it was handed (that is what carries BOT_NAME
+    and BOT_JOB into the pod), and kubectl records the argv of each call so a
+    test can assert what was and was not deleted.
+    """
+    gen = tmp_path / "add-profile.sh"
+    gen.write_text(
+        "#!/bin/sh\n"
+        "printf -- '- { name: BOT_NAME, value: \"%s\" }\\n' \"$BOT_NAME\"\n"
+        "printf -- '- { name: BOT_JOB, value: \"%s\" }\\n' \"$BOT_JOB\"\n"
+        "printf -- '- { name: BROWSER_URL_PREFIX, value: \"/b/%s\" }\\n' \"$1\"\n"
+    )
+    gen.chmod(0o755)
+
+    kubectl = tmp_path / "kubectl"
+    log = tmp_path / "kubectl.log"
+    kubectl.write_text("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$KUBECTL_LOG\"\nexit 0\n")
+    kubectl.chmod(0o755)
+    monkeypatch.setenv("KUBECTL_LOG", str(log))
+
+    return {"gen": gen, "kubectl": kubectl, "log": log}
+
+
+def _hub_with(hub_env, fake_cluster, tmp_path: Path):
+    """Repoint the loaded hub at the stand-ins."""
+    import dataclasses
+
+    hub_env.settings = dataclasses.replace(
+        hub_env.settings,
+        add_profile_script=str(fake_cluster["gen"]),
+        kubectl_bin=str(fake_cluster["kubectl"]),
+    )
+    return hub_env
+
+
+def test_create_passes_the_name_and_job_through_to_the_pod(hub_env, fake_cluster, tmp_path: Path):
+    """The roster's name must be the name the *pod* shows.
+
+    add-profile.sh has always read BOT_NAME/BOT_JOB and written them into the
+    Deployment, but create_bot ran it with no env, so a bot the operator named
+    "LinkedIn outreach" came up calling itself "linkedin" inside its own window.
+    The two names have to be one name.
+    """
+    from fastapi.testclient import TestClient
+
+    hub = _hub_with(hub_env, fake_cluster, tmp_path)
+    with TestClient(hub.app) as client:
+        res = client.post("/api/bots", headers={"Authorization": "Bearer test-token"},
+                          json={"profile": "linkedin", "name": "LinkedIn outreach",
+                                "job": "Post and reply as me: never without approval"})
+        assert res.status_code == 200, res.text
+
+    manifest = (tmp_path / "profile-linkedin.yaml").read_text()
+    assert '- { name: BOT_NAME, value: "LinkedIn outreach" }' in manifest
+    assert '- { name: BOT_JOB, value: "Post and reply as me: never without approval" }' in manifest
+    # And the registry kept the same name, so the roster and the pod agree.
+    assert res.json()["bot"]["display_name"] == "LinkedIn outreach"
+
+
+def test_delete_drops_the_roster_entry_and_spares_the_pvc(hub_env, fake_cluster, tmp_path: Path):
+    """Remove is not "log this bot out".
+
+    The PVC *is* the login, so the default delete must take the pod and leave
+    the storage alone — otherwise removing a card silently signs the bot out of
+    every account it holds.
+    """
+    from fastapi.testclient import TestClient
+
+    hub = _hub_with(hub_env, fake_cluster, tmp_path)
+    reg = hub.registry.Registry()
+    hub.registry.upsert(reg, "x", name="X poster")
+    hub.registry.save(hub.settings.registry_path, reg)
+
+    with TestClient(hub.app) as client:
+        res = client.delete("/api/bots/x", headers={"Authorization": "Bearer test-token"})
+        assert res.status_code == 200, res.text
+        assert res.json()["ok"] is True
+        assert res.json()["purged"] is False
+
+    assert hub.registry.load(hub.settings.registry_path).get("x") is None
+
+    log = fake_cluster["log"].read_text()
+    assert "delete deployment profile-x" in log
+    assert "delete service profile-x" in log
+    assert "delete pvc" not in log
+
+
+def test_delete_purge_also_removes_the_storage(hub_env, fake_cluster, tmp_path: Path):
+    """Purging is the explicit opt-in that does destroy the login."""
+    from fastapi.testclient import TestClient
+
+    hub = _hub_with(hub_env, fake_cluster, tmp_path)
+    reg = hub.registry.Registry()
+    hub.registry.upsert(reg, "x")
+    hub.registry.save(hub.settings.registry_path, reg)
+
+    with TestClient(hub.app) as client:
+        res = client.delete("/api/bots/x?purge=true",
+                            headers={"Authorization": "Bearer test-token"})
+        assert res.status_code == 200, res.text
+        assert res.json()["purged"] is True
+
+    assert "delete pvc profile-x" in fake_cluster["log"].read_text()
+
+
+def test_delete_of_an_unknown_bot_is_404_and_touches_nothing(hub_env, fake_cluster, tmp_path: Path):
+    from fastapi.testclient import TestClient
+
+    hub = _hub_with(hub_env, fake_cluster, tmp_path)
+    with TestClient(hub.app) as client:
+        assert client.delete("/api/bots/nobody").status_code == 401     # token first
+        res = client.delete("/api/bots/nobody", headers={"Authorization": "Bearer test-token"})
+        assert res.status_code == 404
+
+    assert not fake_cluster["log"].exists()
+
+
+def test_the_roster_offers_a_remove_control(hub_env):
+    """The page has to have the affordance the route backs, or the operator can
+    create bots and never get rid of them."""
+    roster = Path(__file__).resolve().parents[1] / "src" / "browser_agent" / "ui" / "roster.html"
+    html = roster.read_text()
+    assert 'data-remove=' in html
+    assert 'data-confirm-remove=' in html
+    assert 'method: "DELETE"' in html
+    # Removing is destructive and irreversible from this page, so it must ask.
+    assert "Remove bot" in html
+
+
 def test_the_bot_page_advertises_the_prefixed_live_view(bot_env):
     """Under a roster the live view is the bot's own, not the roster's.
 

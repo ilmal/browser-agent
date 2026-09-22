@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -160,10 +161,16 @@ async def create_bot(req: CreateBot) -> dict[str, Any]:
         )
 
     manifest = settings.registry_path.parent / f"profile-{req.profile}.yaml"
+    # BOT_NAME/BOT_JOB are what the *pod* renders as its own title — add-profile.sh
+    # reads them and writes them into the Deployment env. Without them the pod
+    # only knows its profile slug, so a bot the operator named "LinkedIn outreach"
+    # shows up inside its own window as "linkedin". Passing them here is what
+    # makes the roster's name and the bot's own name the same name.
+    env = {**os.environ, "BOT_NAME": req.name or "", "BOT_JOB": req.job or ""}
     try:
         out = subprocess.run(
             [settings.add_profile_script, req.profile],
-            capture_output=True, text=True, timeout=30, check=True,
+            capture_output=True, text=True, timeout=30, check=True, env=env,
         )
         manifest.write_text(out.stdout)
         applied = subprocess.run(
@@ -192,6 +199,55 @@ async def patch_bot(profile: str, req: PatchBot) -> dict[str, Any]:
     bot = registry.upsert(reg, profile, **req.model_dump(exclude_none=True))
     registry.save(settings.registry_path, reg)
     return {"ok": True, "bot": bot.to_dict()}
+
+
+@app.delete("/api/bots/{profile}", dependencies=[Depends(require_token)])
+async def delete_bot(profile: str, purge: bool = False) -> dict[str, Any]:
+    """Remove a bot: drop it from the roster, then delete its cluster objects.
+
+    The PVC is kept unless `purge` is set, and that default is deliberate — the
+    PVC *is* the login. Chrome's profile lives there, so deleting it logs the bot
+    out of every account it holds, which is not something a "remove from the
+    list" click should do. Keeping it means a bot removed by mistake comes back
+    still signed in when it is created again under the same name.
+    """
+    if not registry.valid_profile(profile):
+        raise HTTPException(400, "profile must be lowercase letters, digits and dashes")
+
+    reg = registry.load(settings.registry_path)
+    removed = registry.remove(reg, profile)
+    if removed is None:
+        raise HTTPException(404, f"no bot named {profile}")
+
+    # Drop the roster entry first: if kubectl is unavailable, the bot is still
+    # gone from the page, and an orphaned pod is a smaller problem than a card
+    # the operator cannot get rid of.
+    registry.save(settings.registry_path, reg)
+
+    kinds = ["deployment", "service"] + (["pvc"] if purge else [])
+    errors: list[str] = []
+    for kind in kinds:
+        try:
+            done = subprocess.run(
+                [settings.kubectl_bin, "-n", settings.namespace, "delete", kind,
+                 f"profile-{profile}", "--ignore-not-found"],
+                capture_output=True, text=True, timeout=60,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:
+            errors.append(f"{kind}: {exc}")
+            continue
+        if done.returncode != 0:
+            errors.append(f"{kind}: {done.stderr.strip()[:200]}")
+
+    log.info("deleted bot %s (purge=%s)", profile, purge)
+    return {
+        "ok": not errors,
+        "bot": removed.to_dict(),
+        "purged": purge,
+        # A bot that is off the roster but still has cluster objects is a state
+        # worth naming rather than hiding behind ok: true.
+        "errors": errors,
+    }
 
 
 @app.get("/", response_class=HTMLResponse)
