@@ -30,6 +30,7 @@ from .tasks import (
     AGENT_RECIPE,
     TaskRunner,
     TaskStatus,
+    _task_text,
     get_recipe_or_none,
     list_recipes,
     recipe_reads_instruction,
@@ -42,11 +43,13 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 settings: Settings = load_settings()
 session = BrowserSession(settings)
 store = ScheduleStore(settings.state_db)
-threads = ThreadStore()
 # Every finished run, on the profile's PVC. Separate from the schedule store and
 # from the in-memory task objects on purpose: the point of the archive is to
 # outlive a deploy, and a task is recreated (and lost) by one.
 runs = RunStore(settings.runs_db, profile=settings.profile)
+# The conversation is mirrored into that same archive, so the instruction that
+# created an attempt is still there when the attempt is read back.
+threads = ThreadStore(runs)
 runner = TaskRunner(settings, session, agent_runner=make_agent_runner(settings),
                     runs=runs)
 
@@ -385,6 +388,14 @@ async def create_task(req: TaskRequest) -> dict[str, Any]:
         task = runner.submit(req.recipe, req.payload)
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    # The instruction that STARTED the work is part of the conversation, and it
+    # is the one an operator most needs back: "Talk to it" opens on an attempt
+    # whose whole reason for existing was this sentence. Recorded for every
+    # recipe, because a deterministic one is asked for by prose too — the run
+    # just does not read it — and hiding it would make the thread open mid-story.
+    opening = _task_text(task)
+    if opening:
+        threads.say(task.thread_id, "operator", "instruction", opening)
     return task.to_dict()
 
 

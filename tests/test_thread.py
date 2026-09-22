@@ -102,6 +102,68 @@ def test_whitespace_in_a_message_is_collapsed(tmp_path):
     assert msg.text == "line one line two"
 
 
+# -- the durable half ------------------------------------------------------
+
+
+def _archived_thread(tmp_path):
+    """A store wired to a real archive, as the API wires it."""
+    from browser_agent.runstore import RunStore
+
+    return ThreadStore(RunStore(tmp_path / "runs.db", profile="pytest"))
+
+
+def test_a_message_survives_a_restart(tmp_path):
+    """The opening instruction is what makes an attempt legible.
+
+    Attempts outlive the process now, so a message that did not would be the odd
+    one out: after a deploy the operator would open the thread and find a run
+    with no record of what they ever asked for.
+    """
+    store = _archived_thread(tmp_path)
+    store.say("t1", "operator", "instruction", "find me flights under 2000")
+
+    # A fresh store on the same file is a new process reading the same disk.
+    reopened = _archived_thread(tmp_path)
+    got = reopened.for_thread("t1")
+
+    assert [m.text for m in got] == ["find me flights under 2000"]
+    assert got[0].role == "operator"
+    assert got[0].kind == "instruction"
+
+
+def test_a_message_added_after_a_restart_joins_the_earlier_ones(tmp_path):
+    """A thread mid-conversation must read as one conversation, not two."""
+    first = _archived_thread(tmp_path)
+    first.say("t1", "operator", "instruction", "open the site")
+    later = _archived_thread(tmp_path)
+    later.say("t1", "operator", "instruction", "no, the other site")
+
+    got = later.for_thread("t1")
+    assert [m.text for m in got] == ["open the site", "no, the other site"]
+
+
+def test_a_message_on_an_unavailable_archive_still_reaches_memory(tmp_path):
+    """The archive costs the record, never the message: a send must not fail."""
+    from browser_agent.runstore import RunStore
+
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_text("in the way")
+    store = ThreadStore(RunStore(blocker / "runs.db", profile="pytest"))
+
+    store.say("t1", "operator", "instruction", "still works")
+    assert [m.text for m in store.for_thread("t1")] == ["still works"]
+
+
+def test_live_messages_win_over_the_same_saved_row(tmp_path):
+    """Memory is the authority while the process lives; the archive is the floor."""
+    store = _archived_thread(tmp_path)
+    store.say("t1", "operator", "instruction", "hello")
+    saved = store.for_thread("t1")[0]
+    # Same id in both halves must not appear twice.
+    assert len(store.for_thread("t1")) == 1
+    assert saved.id
+
+
 # -- the runner ------------------------------------------------------------
 
 

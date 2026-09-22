@@ -26,8 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from browser_agent import recipes  # noqa: E402,F401  (registers built-ins)
 from browser_agent.config import load_settings  # noqa: E402
-from browser_agent.planner import PlannerClient, PlannerUnavailable  # noqa: E402
 from browser_agent.plan_model import parse_plan  # noqa: E402
+from browser_agent.planner import PlannerClient, PlannerUnavailable  # noqa: E402
 from browser_agent.recipes.plan_task import PlanTask  # noqa: E402
 from browser_agent.tasks import TaskRunner, TaskStatus, register  # noqa: E402
 
@@ -322,6 +322,93 @@ async def test_invalid_plans_fail_visibly(runner_factory, bad_plan, site):
     runner = make(planner=FakePlanner(bad_plan), laya=FakeLaya(), agent_runner=None)
     task = runner.submit("plan.task", {"task": "anything"})
     done = await _drain(runner, task.id)
+    assert done.status is TaskStatus.FAILED
+    assert "plan rejected" in done.detail
+
+
+class RepairPlanner(FakePlanner):
+    """Fails validation once, then answers correctly — a model that can be told.
+
+    The reported failure of 2026-09-22 was exactly this shape: a plan whose 11th
+    step was an ``extract`` with no ``selector``. One bad field is a quality
+    hiccup, and the task had not touched a browser yet.
+    """
+
+    def __init__(self, bad: dict, good: dict) -> None:
+        super().__init__(good)
+        self._bad = bad
+        self._good = good
+        self.answers = 0
+
+    async def plan(self, task: str, *, prompt: str | None = None) -> str:
+        self.calls.append(task)
+        self.prompts.append(prompt)
+        self.answers += 1
+        return json.dumps(self._bad if self.answers == 1 else self._good)
+
+
+async def test_a_plan_that_fails_validation_is_repaired_not_failed(runner_factory, site):
+    """The reported case: one bad step must not end a run before it starts.
+
+    A rejection is a model-quality hiccup, and the validator already names the
+    offending step and field — so a second call is a correction. Failing instead
+    spends nothing and learns nothing, and the operator sees a run that died for
+    a reason no browser was ever involved in.
+    """
+    make, site_url = runner_factory
+    bad = {
+        "entry_url": f"{site_url}/form",
+        "steps": [{"action": "extract", "goal": "read the heading"}],  # no selector
+    }
+    good = {
+        "entry_url": f"{site_url}/form",
+        "steps": [{"action": "extract", "goal": "read the heading", "selector": "h1"}],
+    }
+    planner = RepairPlanner(bad, good)
+    runner = make(planner=planner, laya=FakeLaya(), agent_runner=None)
+    task = runner.submit("plan.task", {"task": "read the heading"})
+    done = await _drain(runner, task.id)
+
+    assert len(planner.calls) == 2, "the planner was not re-asked"
+    assert done.status is TaskStatus.DONE
+    assert "plan rejected" not in done.detail
+    assert done.used_agent is False, "the deterministic path should have carried it"
+
+
+async def test_the_repair_call_is_told_what_was_wrong(runner_factory, site):
+    """A re-roll is not a repair: the retry must carry the validator's error."""
+    make, site_url = runner_factory
+    bad = {"entry_url": f"{site_url}/form", "steps": [{"action": "extract", "goal": "e"}]}
+    good = {
+        "entry_url": f"{site_url}/form",
+        "steps": [{"action": "extract", "goal": "e", "selector": "h1"}],
+    }
+    planner = RepairPlanner(bad, good)
+    runner = make(planner=planner, laya=FakeLaya(), agent_runner=None)
+    task = runner.submit("plan.task", {"task": "read it"})
+    await _drain(runner, task.id)
+
+    retry_prompt = planner.prompts[1] or ""
+    assert "REJECTED" in retry_prompt
+    assert "selector" in retry_prompt, "the field that was missing is not named"
+    assert bad["steps"][0]["goal"] in retry_prompt, "the previous answer is not shown"
+    assert planner.prompts[0] != retry_prompt, "the retry sent the identical prompt"
+
+
+async def test_a_planner_that_repeats_its_mistake_still_fails_visibly(runner_factory, site):
+    """Repair is bounded at one call, and the guard must survive a broken model.
+
+    Without a bound, a planner that always emits the same bad plan would be
+    retried forever; the retry is a correction, not a loop.
+    """
+    make, site_url = runner_factory
+    bad = {"entry_url": f"{site_url}/form", "steps": [{"action": "extract", "goal": "e"}]}
+    planner = RepairPlanner(bad, bad)
+    runner = make(planner=planner, laya=FakeLaya(), agent_runner=None)
+    task = runner.submit("plan.task", {"task": "anything"})
+    done = await _drain(runner, task.id)
+
+    assert len(planner.calls) == 2, "more than one repair attempt"
     assert done.status is TaskStatus.FAILED
     assert "plan rejected" in done.detail
 

@@ -6,9 +6,12 @@ Payload:
 
 Failure semantics, deliberately uneven:
 
-* missing ``task`` / planner output that fails validation →
+* missing ``task``, or planner output that fails validation **twice** →
   :class:`~browser_agent.plan_model.PlanRejected` — a caller or model-quality
   bug the runner turns into FAILED, not into an agent run against garbage.
+  One rejection is *repaired*, not fatal: the planner is re-asked with its own
+  error attached, because a single bad field should not end a task that has not
+  touched a browser yet (see ``_repair``).
 * planner endpoint unreachable → PlannerUnavailable — the runner's normal
   exception path sends the task to the agent fallback (the planner is an
   accelerator, not a gate).
@@ -79,13 +82,43 @@ class PlanTask:
         raw = await self._planner.plan(
             task_text, prompt=cfg("plan.task", "planner_prompt", PROMPT)
         )
-        plan = parse_plan(raw, max_steps=self._settings.planner_max_steps)
+        # Repair before rejecting, not after: a plan that fails ``_check`` on one
+        # step is a model-quality hiccup, and every step it got right is work the
+        # agent fallback will otherwise redo blind. Asking the planner once more
+        # with its own error is where a good planner converges — and it keeps a
+        # single bad field from turning a task into a hard failure before any
+        # browser has been touched. Seen live 2026-09-22: "step 11: extract must
+        # be deterministic — `selector` required" failed the whole run.
+        try:
+            plan = parse_plan(raw, max_steps=self._settings.planner_max_steps)
+        except PlanRejected as exc:
+            repaired = await self._planner.plan(
+                task_text, prompt=_repair_prompt(PROMPT, raw, exc)
+            )
+            plan = parse_plan(repaired, max_steps=self._settings.planner_max_steps)
         log.info(
             "plan for %r: %d step(s), entry %s",
             task_text[:80], len(plan.steps), plan.entry_url,
         )
         return await run_plan(session, plan, task_text, self._settings, self._laya,
                               picker=self._picker)
+
+
+def _repair_prompt(prompt: str, previous: str, exc: PlanRejected) -> str:
+    """The planner prompt, plus why the last answer was unusable.
+
+    Handing the model its own error is the whole point: ``_check`` already names
+    the offending step and the missing field, so a second call is a correction
+    rather than a re-roll. Kept in the system message with the previous answer in
+    the user turn, which is the shape ``_plan_once`` sends.
+    """
+    return (
+        f"{prompt}\n"
+        "Your previous answer was REJECTED by the validator. Fix exactly that "
+        "problem and return the corrected plan as minified JSON.\n"
+        f"Validator error: {exc}\n"
+        f"Previous answer: {previous}"
+    )
 
 
 register_builtin(PlanTask())

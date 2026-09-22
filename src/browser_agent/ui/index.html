@@ -150,20 +150,39 @@
   .feed .k.error { color: var(--bad); }
   .feed .k.operator { color: var(--ok); }
 
-  /* The thread: one attempt after another, with what the operator said between
-     them. Wider gutters than the feed because these are sentences, not steps. */
-  #thread { display: grid; gap: 10px; }
-  #thread .turn { border-left: 2px solid var(--line); padding: 2px 0 2px 12px; min-width: 0; }
-  #thread .turn.operator { border-left-color: var(--ok); }
-  #thread .turn.blocked { border-left-color: var(--warn); }
-  #thread .turn.failed { border-left-color: var(--bad); }
-  #thread .turn.done { border-left-color: var(--ok); }
-  #thread .turn .who {
-    font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--dim);
+  /* The thread: a transcript of turns, not a console. Modelled on the Grok
+     companion chat (see the grok-companions-flow reference): the operator's
+     turns sit right and the bot's sit left, so a conversation is readable as a
+     conversation before you read a word of it. The old left-border version made
+     every turn look like a log line, which is what it had been. */
+  #thread { display: grid; gap: 12px; max-width: 900px; }
+  #thread .turn { min-width: 0; max-width: 82%; }
+  #thread .turn.operator { justify-self: end; text-align: left; }
+  #thread .turn.operator .say {
+    background: var(--accent); color: #0d1220; border-radius: 14px 14px 4px 14px;
+    padding: 8px 12px;
   }
-  #thread .turn .say { overflow-wrap: anywhere; margin-top: 2px; }
+  #thread .turn:not(.operator) { justify-self: start; }
+  #thread .turn:not(.operator) .say {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 14px 14px 14px 4px; padding: 8px 12px;
+  }
+  /* A finished attempt is summarised, not quoted: it is a machine's account of
+     what happened, so it reads as a caption on the turn rather than as speech. */
+  #thread .turn.done .say { border-left: 2px solid var(--ok); }
+  #thread .turn.blocked .say { border-left: 2px solid var(--warn); }
+  #thread .turn.failed .say { border-left: 2px solid var(--bad); }
+  #thread .turn .who {
+    font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--dim); margin-bottom: 3px;
+  }
+  #thread .turn.operator .who { text-align: right; }
+  #thread .turn .say { overflow-wrap: anywhere; }
   #thread .turn pre { margin-top: 6px; max-height: 180px; }
-  #thread form { margin-top: 4px; }
+  #thread details { max-width: 100%; }
+  #thread form { margin-top: 6px; max-width: 900px; }
+  #thread form label { display: block; margin-bottom: 4px; }
+  #thread form textarea { width: 100%; min-height: 64px; resize: vertical; }
   #thread .row { align-items: flex-end; }
   .feed .m { flex: 1; overflow-wrap: anywhere; }
   .feed .empty { color: var(--dim); }
@@ -894,7 +913,7 @@ function renderThread() {
   // keep on these recipes, which is exactly why the message looked ignored.
   const last = threadData.attempts[threadData.attempts.length - 1];
   const deterministic = last && last.reads_instruction === false;
-  $("thread-sub").innerHTML = `Attempts at one piece of work. ` +
+  set("thread-sub", `Attempts at one piece of work. ` +
     (running
       ? `This one is still running — what you type steers it.`
       : deterministic
@@ -902,25 +921,28 @@ function renderThread() {
            so your message becomes an <strong>agent run</strong> on this thread
            instead of a re-run.`
         : `The next thing you type becomes the next attempt, which is told what the
-           earlier ones already tried.`);
+           earlier ones already tried.`));
 
-  const turns = [];
-  const msgs = threadData.messages || [];
-  // Timestamps go through data-elapsed and the local ticker rather than being
-  // baked into the markup: an "ago" string changes every second, which changed
-  // the dedupe signature every second, which rewrote this whole panel every
-  // second. That is what made <details> collapse and killed text selection
-  // while you were reading. Same trick as the current-task card.
+  // Interleave the operator's turns with the attempts, oldest first, so the
+  // panel reads as one conversation. Sorted by time rather than by "messages
+  // that landed before each attempt": attempts and messages can now arrive out
+  // of order (the opening instruction is recorded at submit, the attempt at
+  // finish), and a positional rule silently drops turns when they do.
   const age = (ts) => `<span data-elapsed="${ts}">${ago(ts)}</span> ago`;
-  threadData.attempts.forEach((a, i) => {
-    // Show the operator's messages that landed before this attempt, so the
-    // panel reads as a conversation rather than two unrelated lists.
-    msgs.filter(m => m.at <= a.created_at).forEach(m => {
-      turns.push(`<div class="turn operator">
-        <div class="who">you · ${age(m.at)}</div>
-        <div class="say">${esc(m.text)}</div></div>`);
-    });
-    msgs.splice(0, msgs.filter(m => m.at <= a.created_at).length);
+  const items = [];
+  (threadData.messages || []).forEach(m => items.push({ at: m.at, kind: "msg", m }));
+  (threadData.attempts || []).forEach(a => items.push({ at: a.created_at, kind: "att", a }));
+  items.sort((x, y) => (x.at || 0) - (y.at || 0));
+
+  const turns = items.map(it => {
+    if (it.kind === "msg") {
+      const m = it.m;
+      const mine = m.role === "operator";
+      return `<div class="turn ${mine ? "operator" : "bot"}">
+        <div class="who">${mine ? "you" : esc(m.role)} · ${age(m.at)}</div>
+        <div class="say">${esc(m.text)}</div></div>`;
+    }
+    const a = it.a;
     // Everything, not the last few: the point of keeping a run is to read it
     // afterwards, and "the last 8 lines" is exactly the part that hid the
     // decision that went wrong. Kept inside a collapsed <details> so a long run
@@ -930,34 +952,54 @@ function renderThread() {
         <span class="k ${esc(e.kind)}">${esc(e.kind)}</span> ${esc(e.text)}</div>`).join("");
     const decided = (a.decisions || []).map(d =>
       `<div class="muted"><span class="k ${esc(d.kind)}">${esc(d.kind)}</span> ${esc(d.text)}</div>`).join("");
-    turns.push(`<div class="turn ${esc(a.status)}">
+    return `<div class="turn ${esc(a.status)}">
       <div class="who">attempt ${a.attempt} · <span class="status ${esc(a.status)}">${esc(a.status)}</span> · ${age(a.created_at)}</div>
       <div class="say">${esc(a.detail || "")}</div>
       ${decided ? `<details data-keep="d${esc(a.id)}"><summary>what it decided (${(a.decisions || []).length})</summary>${decided}</details>` : ""}
       ${feed ? `<details data-keep="a${esc(a.id)}"><summary>every step (${(a.activity || []).length})</summary>${feed}</details>` : ""}
       ${a.used_agent ? `<div class="muted">finished via the agent fallback</div>` : ""}
-    </div>`);
+    </div>`;
   });
-  msgs.forEach(m => turns.push(`<div class="turn operator">
-    <div class="who">you · ${age(m.at)}</div>
-    <div class="say">${esc(m.text)}</div></div>`));
 
-  const latest = threadData.attempts[threadData.attempts.length - 1];
-  set("thread", turns.join("") + `<form id="thread-form">
-    <label for="thread-text">${running ? "Steer it" : "Say what to do differently"}</label>
-    <textarea id="thread-text" placeholder="${running
+  // The transcript is its own node, so rewriting it cannot touch what the
+  // operator is typing. The composer is written ONCE, below, and only its
+  // wording ever changes — see setComposer.
+  set("thread", turns.join("") || `<p class="sub">Nothing here yet.</p>`);
+  setComposer(running);
+}
+
+// The composer is built once and then only re-labelled. Re-rendering it with the
+// transcript is what made this page unusable: every poll replaced the textarea,
+// which dropped the draft, the caret and the selection, and the focus() below
+// re-stole the caret every 2 s so nothing could be typed at all.
+function setComposer(running) {
+  if (!$("thread-form")) {
+    $("thread").insertAdjacentHTML("beforeend", `<form id="thread-form">
+      <label for="thread-text" id="thread-label"></label>
+      <textarea id="thread-text"></textarea>
+      <div class="row" style="margin-top:8px">
+        <button id="thread-send" type="button"></button>
+        <span class="spacer"></span>
+        <button class="ghost" id="thread-close" type="button">Close</button>
+      </div>
+      <div class="err hidden" id="thread-err"></div>
+    </form>`);
+    $("thread-send").onclick = sendThread;
+    $("thread-close").onclick = closeThread;
+    $("thread-text").addEventListener("keydown", e => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendThread(); }
+    });
+  }
+  set("thread-label", running ? "Steer it" : "Say what to do differently");
+  set("thread-send", running ? "Send" : "Try again with this");
+  // Placeholder only while empty, so an in-progress draft is never overwritten
+  // by a poll that happened to change the running state.
+  const ta = $("thread-text");
+  if (!ta.value) {
+    ta.placeholder = running
       ? "Change the instruction — it re-plans with this."
-      : "It will try again with this, and be told what the last attempt tried."}"></textarea>
-    <div class="row" style="margin-top:8px">
-      <button id="thread-send" type="button">${running ? "Send" : "Try again with this"}</button>
-      <span class="spacer"></span>
-      <button class="ghost" id="thread-close" type="button">Close</button>
-    </div>
-    <div class="err hidden" id="thread-err"></div>
-  </form>`);
-  $("thread-send").onclick = sendThread;
-  $("thread-close").onclick = closeThread;
-  $("thread-text").focus();
+      : "It will try again with this, and be told what the last attempt tried.";
+  }
 }
 
 async function sendThread() {

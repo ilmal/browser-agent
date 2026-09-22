@@ -409,3 +409,44 @@ def test_reading_an_archived_run_that_is_not_there_is_a_404(api_mod):
     with pytest.raises(HTTPException) as exc:
         asyncio.run(api_mod.get_run("nope"))
     assert exc.value.status_code == 404
+
+
+# -- the instruction that started the work ---------------------------------
+
+
+@pytest.mark.asyncio
+async def test_the_opening_instruction_is_recorded_in_the_thread(api_mod):
+    """The reported gap: the thread opened on an attempt with no visible ask.
+
+    The operator's first sentence is what every later turn is a correction *of*,
+    so a thread that starts mid-story is the one thing the panel cannot explain.
+    """
+    out = await api_mod.create_task(
+        api_mod.TaskRequest(recipe="plan.task", payload={"task": "find flights to Oslo"})
+    )
+    msgs = api_mod.threads.for_thread(out["thread_id"])
+
+    assert [m.text for m in msgs] == ["find flights to Oslo"]
+    assert msgs[0].role == "operator"
+    assert msgs[0].kind == "instruction"
+    assert msgs[0].at <= out["created_at"] + 0.001, "the ask must precede the attempt"
+
+
+@pytest.mark.asyncio
+async def test_a_task_with_no_prose_records_nothing(api_mod):
+    """A bare run has nothing to say; an empty turn would be noise in the feed."""
+    out = await api_mod.create_task(
+        api_mod.TaskRequest(recipe="minesweeper.play", payload={"url": "https://x.example/"})
+    )
+    assert api_mod.threads.for_thread(out["thread_id"]) == []
+
+
+def test_the_recorded_instruction_survives_a_restart(api_mod):
+    """It is written to the archive, so it is readable after the pod is replaced."""
+    out = asyncio.run(api_mod.create_task(
+        # The text field is the admin UI's own field name; it must be recorded
+        # exactly as a `task` would be — the alias is not a second kind of ask.
+        api_mod.TaskRequest(recipe="plan.task", payload={"text": "the alias counts too"})
+    ))
+    rows = api_mod.runs.messages(out["thread_id"])
+    assert [m["text"] for m in rows] == ["the alias counts too"]

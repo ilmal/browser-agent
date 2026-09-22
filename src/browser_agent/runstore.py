@@ -40,6 +40,10 @@ log = logging.getLogger(__name__)
 #: a run row is a few KB, so this is tens of MB at most.
 KEEP_PER_PROFILE = 500
 
+#: Messages kept per thread. Far more than a real conversation needs, and each
+#: is ~1 KB, so this is not what fills the volume.
+KEEP_MESSAGES_PER_THREAD = 500
+
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
     task_id     TEXT PRIMARY KEY,
@@ -60,6 +64,18 @@ CREATE TABLE IF NOT EXISTS runs (
 );
 CREATE INDEX IF NOT EXISTS runs_thread ON runs (thread_id);
 CREATE INDEX IF NOT EXISTS runs_started ON runs (started_at);
+
+CREATE TABLE IF NOT EXISTS messages (
+    id        TEXT PRIMARY KEY,
+    thread_id TEXT NOT NULL,
+    profile   TEXT NOT NULL,
+    at        REAL NOT NULL,
+    role      TEXT NOT NULL,
+    kind      TEXT NOT NULL,
+    text      TEXT NOT NULL,
+    meta      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS messages_thread ON messages (thread_id, at);
 """
 
 
@@ -199,6 +215,67 @@ class RunStore:
                 (self.keep,),
             )
             self._conn.commit()
+
+    # -- the conversation --------------------------------------------------
+
+    def save_message(self, msg: Any) -> bool:
+        """Persist one thread message. Same contract as ``save``: never raises.
+
+        Messages are stored beside the runs rather than in the in-memory
+        ``ThreadStore`` alone, because the operator's first instruction is the
+        thing that makes an attempt legible — and the attempt outlives the
+        process that received it. A message with no stored text would come back
+        as an attempt that appeared from nowhere.
+        """
+        if self._conn is None:
+            return False
+        try:
+            self._conn.execute(
+                "INSERT OR REPLACE INTO messages "
+                "(id, thread_id, profile, at, role, kind, text, meta) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    msg.id,
+                    msg.thread_id,
+                    self.profile,
+                    float(msg.at),
+                    msg.role,
+                    msg.kind,
+                    msg.text,
+                    _dumps(getattr(msg, "meta", {}) or {}),
+                ),
+            )
+            self._conn.commit()
+            return True
+        except Exception:
+            log.warning("could not archive message %s", getattr(msg, "id", "?"),
+                        exc_info=True)
+            return False
+
+    def messages(self, thread_id: str, *, limit: int = KEEP_MESSAGES_PER_THREAD
+                 ) -> list[dict[str, Any]]:
+        """This thread's saved messages, oldest first."""
+        if self._conn is None:
+            return []
+        with contextlib.suppress(Exception):
+            rows = self._conn.execute(
+                "SELECT id, thread_id, at, role, kind, text, meta FROM messages "
+                "WHERE thread_id = ? ORDER BY at ASC LIMIT ?",
+                (thread_id, limit),
+            ).fetchall()
+            return [
+                {
+                    "id": r["id"],
+                    "thread_id": r["thread_id"],
+                    "at": r["at"],
+                    "role": r["role"],
+                    "kind": r["kind"],
+                    "text": r["text"],
+                    "meta": _loads(r["meta"], {}),
+                }
+                for r in rows
+            ]
+        return []
 
     def list(self, *, limit: int = 50, thread_id: str = "") -> list[Run]:
         if self._conn is None:
