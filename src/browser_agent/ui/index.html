@@ -101,6 +101,8 @@
   .alert .row { margin-top: 10px; }
 
   .muted { color: var(--dim); font-size: 12px; }
+  .muted.ok  { color: var(--ok); }
+  .muted.bad { color: var(--bad); }
   .empty { color: var(--dim); font-size: 13px; padding: 6px 0; }
   .hidden { display: none !important; }
   details > summary { cursor: pointer; color: var(--dim); font-size: 12px; }
@@ -269,6 +271,16 @@
       <li>
         <div class="row">
           <button class="ghost" id="toggle-embed">Show the browser on this page</button>
+        </div>
+      </li>
+      <li>
+        <div class="row">
+          <button class="ghost" id="restart-browser">Restart the browser</button>
+          <span class="muted" id="browser-state">checking…</span>
+        </div>
+        <div class="muted" style="margin-top:6px">
+          Closing the window is fine — the next task reopens it. This is for
+          when you want it back <em>now</em>, on a blank page.
         </div>
       </li>
     </ol>
@@ -665,6 +677,20 @@ function renderScheds() {
 function render() {
   renderPills(); renderBanner(); renderRunGate();
   renderCurrent(); renderFeed(); renderTasks(); renderScheds();
+  renderBrowserState(state.browser_running);
+}
+
+// Whether the browser the tasks share is actually up. The point of showing it
+// is that "the browser is gone" used to be indistinguishable from "the task is
+// broken" — the same failure, reported as the wrong thing.
+function renderBrowserState(running, url) {
+  const el = $("browser-state");
+  if (!el) return;
+  if (running === undefined || running === null) { el.textContent = ""; return; }
+  el.textContent = running
+    ? `running${url ? ` — ${url.replace(/^data:.*/, "(blank page)")}` : ""}`
+    : "not running";
+  el.className = running ? "muted ok" : "muted bad";
 }
 
 async function refresh() {
@@ -743,6 +769,23 @@ $("taskUrl").oninput = renderRunGate;
 $("taskUrl").oninput = renderRunGate;
 
 $("open-vnc").onclick = () => window.open(browserUrl(), "_blank", "noopener");
+
+// Closing the window used to leave the bot unable to recover, so this is the
+// button that makes the recovery visible instead of implicit: restart stops the
+// session and starts a fresh one on a blank page, which is what /api/browser/
+// restart does. The label reports what the server says, not what we hoped.
+$("restart-browser").onclick = () => act(async () => {
+  const btn = $("restart-browser");
+  btn.disabled = true;
+  btn.textContent = "Restarting…";
+  try {
+    const out = await api("/api/browser/restart", { method: "POST" });
+    renderBrowserState(out.browser_running, out.url);
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Restart the browser";
+  }
+});
 
 $("send-login").onclick = () => act(async () => {
   await api("/api/login", { method: "POST", body: JSON.stringify({ url: $("loginUrl").value }) });
