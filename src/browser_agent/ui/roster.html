@@ -336,9 +336,19 @@ document.addEventListener("click", async (ev) => {
 
 // Keep the roster honest without hammering the pods: this is a light poll of
 // one cheap endpoint per bot, and it stops entirely when the tab is hidden.
+//
+// A poll that fails is not news. Every request probes each bot live, so a blip
+// is expected, and reporting it would erase whatever the operator was just
+// told — a successful removal reading as "Could not load the roster". Only a
+// first load with nothing on screen speaks up; after that the poll is silent
+// and the next success renders.
 async function poll() {
   if (document.hidden) return;
-  await refresh();
+  if (!data) { await refresh(); return; }
+  try {
+    data = await api("/api/bots");
+    render();
+  } catch (e) {}
 }
 setInterval(poll, 8000);
 refresh();
