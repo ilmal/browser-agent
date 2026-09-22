@@ -1,7 +1,9 @@
 """Environment-driven configuration.
 
-One process = one profile. The profile name and its data directory come from
-the environment so that the same image backs every pod in the deployment.
+One process = one bot. A bot owns several Chrome profiles — the accounts in
+accounts.py — and runs one of them at a time; the bot's own identity and data
+directory come from the environment, so the same image backs every pod in the
+deployment.
 """
 
 from __future__ import annotations
@@ -9,6 +11,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+
+from .accounts import ACCOUNTS_FILE, DEFAULT_ACCOUNT, account_dir
 
 
 def _env(name: str, default: str = "") -> str:
@@ -163,6 +167,14 @@ class Settings:
     # identifier ("x", "linkedin"), while a bot is named for a job.
     bot_name: str = ""
     bot_job: str = ""
+    # Which account of this bot the process starts on. One bot owns several
+    # Chrome user-data-dirs (see accounts.py) and runs exactly one at a time: a
+    # user-data-dir is single-writer, and there is one X display and one x11vnc
+    # per pod, so a second simultaneous identity is not something the display
+    # could even show. Normally empty — the account store's `active` decides,
+    # which is what makes switching an account a restart rather than a
+    # redeploy — and set only to pin a pod to one identity.
+    account: str = ""
     # The path this bot is reached under, when a roster proxies several bots
     # from one domain: "/b/x". Empty in the plain one-domain-per-profile
     # deployment, which is the default. Purely cosmetic — it only affects the
@@ -205,9 +217,44 @@ class Settings:
     add_profile_script: str = ""
 
     @property
-    def profile_dir(self) -> Path:
-        """Persistent Chrome user-data-dir for this profile."""
+    def profile_root(self) -> Path:
+        """This bot's profile volume directory: /profiles/<profile>.
+
+        Holds the account metadata file and one Chrome user-data-dir per
+        account. It is **not** a user-data-dir itself any more, and Chrome must
+        never be pointed at it — that is the whole reason ``profile_dir``
+        reaches one level deeper.
+        """
         return self.profiles_root / self.profile
+
+    @property
+    def accounts_path(self) -> Path:
+        return self.profile_root / ACCOUNTS_FILE
+
+    def profile_dir_for(self, account: str) -> Path:
+        """The Chrome user-data-dir of one named account.
+
+        Everything that launches, attaches to, locks or inspects a browser goes
+        through here, so switching accounts is a change of directory and nothing
+        else — no second code path, and no chance of one caller still reading
+        the pre-accounts layout.
+        """
+        return account_dir(self.profile_root, account)
+
+    @property
+    def profile_dir(self) -> Path:
+        """Persistent Chrome user-data-dir for the *running* account.
+
+        The account named on the environment if the operator pinned one,
+        otherwise ``default`` — which is what every bot migrated from the
+        single-profile layout has, and what keeps a bot that predates accounts
+        working with no redeploy. This is deliberately not the store's
+        ``active``: config is built once at import and the store is mutable, so
+        resolving the store's choice here would freeze it at boot and make a
+        switch silently do nothing. The runner resolves ``active`` explicitly
+        and rebinds the session (see ``BrowserSession.set_account``).
+        """
+        return self.profile_dir_for(self.account or DEFAULT_ACCOUNT)
 
     @property
     def state_db(self) -> Path:
@@ -235,6 +282,9 @@ class Settings:
 def load_settings() -> Settings:
     return Settings(
         profile=_env("AGENT_PROFILE", "default"),
+        # Normally unset: the store's `active` decides, and switching is a
+        # restart, not a redeploy. Set only to pin a pod to one account.
+        account=_env("AGENT_ACCOUNT"),
         bot_name=_env("BOT_NAME"),
         bot_job=_env("BOT_JOB"),
         url_prefix=_env("BROWSER_URL_PREFIX").rstrip("/"),

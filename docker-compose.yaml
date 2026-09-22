@@ -63,7 +63,10 @@ services:
       - ./profiles/x:/profiles/x
       - ./data/x:/data
 
-  # A second identity. Copy this block to add more.
+  # A second *bot* — its own URL, its own job. Copy this block to add more.
+  # (For a second *login* on the bot above, do not copy this: add an account on
+  # that bot's own page. The volume below is mounted at the bot's root, so the
+  # extra Chrome profiles live under ./profiles/x/accounts/ with no edit here.)
   #
   # profile-linkedin:
   #   <<: *common

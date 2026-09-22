@@ -18,6 +18,7 @@ from typing import Any
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 from playwright.sync_api import sync_playwright
 
+from .accounts import DEFAULT_ACCOUNT, signed_in
 from .activity import Activity
 from .config import Settings
 
@@ -160,6 +161,11 @@ class BrowserSession:
         self.settings = settings
         self._playwright: Playwright | None = None
         self._context: BrowserContext | None = None
+        # Which account this session is driving. Held here rather than read from
+        # `settings` because `settings` is frozen and the session outlives a
+        # switch: the operator changes accounts while the pod runs, so the
+        # choice has to live in the object that survives it.
+        self.account = settings.account or DEFAULT_ACCOUNT
         # Both live here because the session is the one object every layer
         # already holds, and there is exactly one per pod. Tasks are serialised
         # on a single worker, so a session-scoped activity log is the running
@@ -174,13 +180,30 @@ class BrowserSession:
         return self._context
 
     @property
+    def profile_dir(self) -> Path:
+        """The Chrome user-data-dir of the account this session is driving."""
+        return self.settings.profile_dir_for(self.account)
+
+    def set_account(self, account: str) -> None:
+        """Point this session at another account. Caller restarts the browser.
+
+        Not a coroutine and deliberately does not touch the browser itself: the
+        switch has to be *serialised against running tasks*, which the caller
+        owns (the API takes the task lock before calling this). Doing it here
+        would let a switch land mid-task and hand a running agent a different
+        profile than the one it started on — the exact corruption the
+        single-writer rule exists to prevent.
+        """
+        self.account = account
+
+    @property
     def cdp_endpoint(self) -> str | None:
         """DevTools HTTP endpoint for this running browser, or None.
 
         A second process (the LLM agent) attaches here so it drives the very
         same browser, cookies, tabs and display the human sees over noVNC.
         """
-        return _read_devtools_endpoint(self.settings.profile_dir, timeout_s=1.0)
+        return _read_devtools_endpoint(self.profile_dir, timeout_s=1.0)
 
     def is_running(self) -> bool:
         """Whether the browser this session launched is still alive.
@@ -211,15 +234,19 @@ class BrowserSession:
             # The window was closed under us (or the browser died). Drop the
             # corpse before relaunching: a persistent context cannot be revived,
             # and leaving it cached would fail every later call.
-            log.warning("browser for profile=%s is gone; restarting", self.settings.profile)
+            log.warning(
+                "browser for profile=%s account=%s is gone; restarting",
+                self.settings.profile,
+                self.account,
+            )
             await self.stop()
 
-        self.settings.profile_dir.mkdir(parents=True, exist_ok=True)
-        _clear_stale_profile_lock(self.settings.profile_dir)
+        self.profile_dir.mkdir(parents=True, exist_ok=True)
+        _clear_stale_profile_lock(self.profile_dir)
         self._playwright = await async_playwright().start()
 
         launch: dict = {
-            "user_data_dir": str(self.settings.profile_dir),
+            "user_data_dir": str(self.profile_dir),
             "headless": self.settings.headless,
             "slow_mo": self.settings.slow_mo_ms,
             "viewport": {
@@ -256,9 +283,10 @@ class BrowserSession:
         self._context = await self._playwright.chromium.launch_persistent_context(**launch)
         self._context.set_default_timeout(30_000)
         log.info(
-            "browser started profile=%s dir=%s",
+            "browser started profile=%s account=%s dir=%s",
             self.settings.profile,
-            self.settings.profile_dir,
+            self.account,
+            self.profile_dir,
         )
         return self._context
 
@@ -281,46 +309,17 @@ class BrowserSession:
         if self._playwright is not None:
             await self._playwright.stop()
             self._playwright = None
-        log.info("browser stopped profile=%s", self.settings.profile)
+        log.info(
+            "browser stopped profile=%s account=%s", self.settings.profile, self.account
+        )
 
 
-def profile_exists(settings: Settings) -> bool:
-    """True when a human has signed in to this profile.
+def profile_exists(settings: Settings, account: str = "") -> bool:
+    """True when a human has signed in to this bot's *running* account.
 
-    Chrome writes the profile directory on its very first launch, so "the
-    directory has files in it" is true of a bot that has never been touched —
-    which is exactly the state the operator needs to be warned about. The
-    roster renders this as its signed-in / not-signed-in pill, so a fresh bot
-    claiming to be signed in is worse than no signal at all.
-
-    The honest test is whether a login left cookies behind: Chrome creates the
-    empty Cookies database on first launch and fills it only when a site sets
-    one. Measured on this deployment — a never-used profile has 0, a signed-in
-    one has 11. The count is read over the file's own SQLite, read-only and
-    with a short timeout, because the browser holds it open while running.
+    The cookie test itself lives in accounts.py beside the other per-account
+    questions; this is the settings-shaped entry point the control plane and
+    the roster already call, kept so callers that hold only `settings` do not
+    have to know about the account store.
     """
-    import sqlite3
-
-    path: Path = settings.profile_dir
-    if not path.is_dir():
-        return False
-    cookies = path / "Default" / "Cookies"
-    if not cookies.is_file():
-        # Pre-Chromium-96 layouts kept it under Default/Network. Checked rather
-        # than assumed so a profile from an older image still reports right.
-        cookies = path / "Default" / "Network" / "Cookies"
-    if not cookies.is_file():
-        return False
-    try:
-        # A locked database is not an error worth raising: it means the
-        # browser is running, and the count is a roster nicety, not a control
-        # path. Fall back to the directory check so a running-but-unknown
-        # profile stays visible rather than flipping to "not signed in".
-        con = sqlite3.connect(f"file:{cookies}?mode=ro", uri=True, timeout=1.0)
-        try:
-            n = con.execute("select count(*) from cookies").fetchone()[0]
-        finally:
-            con.close()
-        return bool(n)
-    except sqlite3.Error:
-        return any(path.iterdir())
+    return signed_in(settings.profile_dir_for(account or settings.account or DEFAULT_ACCOUNT))

@@ -292,6 +292,14 @@
         </div>
       </li>
       <li>
+        <div class="muted" style="margin-bottom:6px">
+          This bot can hold several identities and run one at a time. Only the
+          running one is on screen — a Chrome profile is single-writer, and
+          switching restarts the browser onto the other login.
+        </div>
+        <div id="accounts"></div>
+      </li>
+      <li>
         <div class="row">
           <input id="loginUrl" value="https://x.com/login" aria-label="Login URL">
           <button class="ghost" id="send-login">Go to this page</button>
@@ -716,7 +724,91 @@ function renderScheds() {
 function render() {
   renderPills(); renderBanner(); renderRunGate();
   renderCurrent(); renderFeed(); renderTasks(); renderScheds();
-  renderBrowserState(state.browser_running);
+  renderBrowserState(state.browser_running); renderAccounts();
+}
+
+// The accounts this bot holds, and which one is running. `state.accounts` is
+// read fresh from the pod on every poll (the file is a few lines), so a switch
+// shows here on the next refresh without any local bookkeeping — and a switch
+// made with kubectl exec shows up too.
+function renderAccounts() {
+  const box = $("accounts");
+  if (!box) return;
+  const a = state.accounts;
+  const list = (a && a.accounts) || [];
+  if (!list.length) { box.innerHTML = `<div class="muted">No accounts yet.</div>`; return; }
+
+  const rows = list.map(acc => {
+    const running = acc.active;
+    // Three distinct states, and conflating them is what the old single-profile
+    // pill did wrong: not signed in (needs a human), signed in but idle (fine),
+    // and actually on screen right now.
+    const state_ = !acc.signed_in
+      ? `<span class="pill warn">not signed in</span>`
+      : running
+        ? `<span class="pill ok">running</span>`
+        : `<span class="pill">signed in</span>`;
+    const label = acc.display_label || acc.name;
+    const who = acc.email ? `<span class="muted"> — ${esc(acc.email)}</span>` : "";
+    const act = running
+      ? `<span class="muted">on screen</span>`
+      : `<button class="ghost" data-switch="${esc(acc.name)}">Switch to this</button>`;
+    // Never offered for the running account: the browser holds that directory
+    // open, and the API refuses it. Not rendering the button says so sooner.
+    const del = running || list.length < 2
+      ? ""
+      : `<button class="ghost" data-drop="${esc(acc.name)}" title="Remove this account from the list">Remove</button>`;
+    return `<tr>
+      <td>${esc(label)}${who}</td>
+      <td>${state_}</td>
+      <td class="right">${act} ${del}</td>
+    </tr>`;
+  }).join("");
+
+  // minmax(0,1fr) rather than 1fr: a grid track's automatic minimum is its
+  // content, so a long email in a cell makes the whole table overflow its card
+  // instead of wrapping. This is the same reason it is used elsewhere here.
+  set("accounts", `<table style="display:table;grid-template-columns:minmax(0,1fr) auto auto">
+    <tbody>${rows}</tbody>
+  </table>
+  <div class="row" style="margin-top:8px">
+    <input id="acct-name" placeholder="new-account" aria-label="New account name" style="max-width:180px">
+    <input id="acct-email" placeholder="email (a note, not a login)" aria-label="Account email" style="max-width:240px">
+    <button class="ghost" id="acct-add">Add an account</button>
+  </div>
+  <div class="muted" style="margin-top:6px">
+    Adding one does not switch to it. Use "Go to this page" below on the new
+    account, sign in over the live view, and it keeps that login.
+  </div>`);
+}
+
+async function accountAction(path, body, label) {
+  try {
+    await api(path, { method: body ? "POST" : "DELETE", body: body || undefined });
+  } catch (e) {
+    set("banner", `<div class="alert bad">${esc(label)}: ${esc(e.message)}</div>`);
+    return;
+  }
+  await refresh();
+}
+
+async function switchAccount(name) {
+  // A restart of the browser is the slow part, and the button stays clickable
+  // meanwhile, so say what is happening rather than appearing to ignore it.
+  set("banner", `<div class="alert">Switching to ${esc(name)} — the browser is
+    restarting onto that login.</div>`);
+  await accountAction("/api/accounts/switch", { name }, `Could not switch to ${name}`);
+}
+
+async function removeAccount(name) {
+  const ok = confirm(
+    `Remove "${name}" from this bot?\n\n` +
+    `This only forgets it — the browser profile is kept, so adding the same ` +
+    `name back restores the login.`
+  );
+  if (!ok) return;
+  await accountAction(`/api/accounts/${encodeURIComponent(name)}`, null,
+    `Could not remove ${name}`);
 }
 
 // Whether the browser the tasks share is actually up. The point of showing it
@@ -1069,6 +1161,22 @@ async function control(taskId, verb, body) {
 }
 
 document.addEventListener("click", (ev) => {
+  // The account controls are delegated, not bound: renderAccounts replaces that
+  // whole subtree on every poll, so a bound handler would be destroyed by the
+  // next refresh. Read the target first, before any early return — these exist
+  // with no task running, which is exactly when an operator adds an account.
+  const sw = ev.target.dataset && ev.target.dataset.switch;
+  if (sw) { switchAccount(sw); return; }
+  const drop = ev.target.dataset && ev.target.dataset.drop;
+  if (drop) { removeAccount(drop); return; }
+  if (ev.target.id === "acct-add") {
+    const name = ($("acct-name").value || "").trim().toLowerCase();
+    if (!name) return;
+    const email = ($("acct-email").value || "").trim();
+    accountAction("/api/accounts", { name, email }, `Could not add ${name}`);
+    return;
+  }
+
   const id = state && state.current && state.current.id;
   if (!id) return;
   if (ev.target.id === "c-pause") {

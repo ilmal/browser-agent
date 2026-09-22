@@ -270,11 +270,18 @@ function botCard(b) {
     ? (b.signed_in ? `<span class="pill ok">signed in</span>` : `<span class="pill warn">not signed in</span>`)
     : `<span class="pill bad">unreachable</span>`;
   const url = b.url || `/b/${b.profile}/`;
+  // Which identity is live, when the bot holds more than one. One account is the
+  // ordinary case and needs no badge — saying "default" on every card would be
+  // noise. The count is what tells the operator a bot has others to switch to.
+  const ident = (b.accounts || 0) > 1
+    ? `<span class="pill" title="This bot holds ${b.accounts} identities and runs one at a time.">${esc(b.account_label || b.account || "")}${b.accounts > 1 ? ` · ${b.accounts} accounts` : ""}</span>`
+    : "";
   return `<div class="bot ${b.reachable ? "" : "off"}">
     <div class="top">
       <span class="name">${esc(b.display_name)}</span>
       <span class="slug">${esc(b.profile)}</span>
       <span class="spacer"></span>
+      ${ident}
       ${state}
     </div>
     ${b.job ? `<div class="job">${esc(b.job)}</div>` : `<div class="job muted">No job set yet.</div>`}

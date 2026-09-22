@@ -79,6 +79,50 @@ sharing one between pods corrupts the session. Pods run with
 `strategy: Recreate` and `replicas: 1` for the same reason: a Chrome profile
 is single-writer.
 
+### Several identities per profile (accounts)
+
+A bot can hold **several Chrome profiles** and run one at a time — four logins
+of the same site for one job, say. They live as subdirectories of the bot's own
+PVC:
+
+```
+/profiles/<bot>/accounts/<account>/     <- a Chrome user-data-dir
+/profiles/<bot>/accounts.json           <- which accounts exist, and which is active
+```
+
+One at a time is not a simplification, it is the constraint: a user-data-dir is
+single-writer and there is one X display and one x11vnc per pod, so a second
+identity running simultaneously has nothing to render into. Switching restarts
+the browser onto the other login; the other accounts stay signed in on disk.
+
+Manage them on the bot's own page (Browser → accounts). Adding one does **not**
+switch to it — pick it, sign in over noVNC once, and it keeps that login. A
+*pod* restart comes up on whichever account `accounts.json` says is active, and
+a task binding to the wrong identity is impossible: the runner rebinds under the
+run lock before every task.
+
+Upgrading a bot that predates accounts is automatic: on the first boot of this
+build the legacy contents of `/profiles/<bot>/` (Chrome's files, written
+directly there by the old layout) are moved into `accounts/default/`, so the
+existing login survives as the `default` account. The move happens **before the
+browser is pre-warmed** — launching first would have Chrome create a fresh
+profile in the new location and the move would then merge into it.
+
+```bash
+# over the API, if you would rather not use the UI
+curl -u user:pass -X POST "$BASE/api/accounts?token=$TOKEN" \
+  -H 'Content-Type: application/json' -d '{"name":"work","email":"nils@u1.se"}'
+curl -u user:pass -X POST "$BASE/api/accounts/switch?token=$TOKEN" \
+  -H 'Content-Type: application/json' -d '{"name":"work"}'
+curl -u user:pass -X DELETE "$BASE/api/accounts/work?token=$TOKEN"   # keeps the profile
+curl -u user:pass -X DELETE "$BASE/api/accounts/work?purge=true&token=$TOKEN"  # deletes it
+```
+
+Removing an account forgets the name but keeps the Chrome directory, so adding
+the same name back restores the login. `purge=true` is the destructive half and
+is a logout. The running account cannot be removed, and the last account cannot
+be removed at all — a bot with no account has nothing to launch.
+
 ### Several profiles at once (locally)
 
 ```bash
@@ -108,12 +152,15 @@ dev box.
 
 ### First run for a new profile
 
-A fresh profile has no session, so the first thing it needs is a human:
+A fresh bot has no session, so the first thing it needs is a human:
 
-1. Open the profile's noVNC.
+1. Open the bot's noVNC.
 2. In the admin UI, **Open login page & take over** with that site's login URL.
 3. Sign in — including 2FA — in the noVNC window.
 4. The profile persists on its PVC. Subsequent runs reuse the session.
+
+A bot with more than one account needs this once per account: add the account,
+switch to it, sign in, switch to the next.
 
 ## Scheduling
 
@@ -256,6 +303,14 @@ while the agent worked an empty session.
   secret-shaped values. Enable it in every clone: `git config core.hooksPath hooks`.
 - `profiles/` holds live session cookies. Never commit, never copy between
   machines in a way that ends up in a repo.
+- `accounts.json` records **only** slugs, labels and an operator note — never
+  credentials. It sits beside the Chrome directories on the PVC, and the panel
+  that renders it is HTML from a public repo. A login belongs in the profile,
+  which is where signing in puts it; nothing here should ever need to name one.
+- `accounts.json` records **only** slugs, labels and an operator note — never
+  credentials. It sits next to the Chrome directories on the PVC, and the panel
+  that renders it is a public repo's HTML. A login belongs in the profile, which
+  is where signing in puts it; nothing here should ever need to name one.
 - Egress goes through the residential `office-proxy`. Do not remove the proxy
   env vars — a datacenter IP is the single biggest flag.
 - The agent prompt forbids creating accounts, changing credentials, accepting
