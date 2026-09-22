@@ -131,6 +131,12 @@ spec:
             - { name: LAYA_ENABLED, value: "true" }
             - { name: LAYA_DECIDE_URL, value: "http://llm-service.llm-service.svc.cluster.local:8001/v1/decide" }
             - { name: LAYA_PICK_ENABLED, value: "false" }
+            # The minesweeper tiebreak gates on LAYA_ENABLED, not PICK_ENABLED,
+            # so the game leans on Laya while the plan picker stays off.
+            # Measured in-pod 2026-09-22 (scripts/laya_game_bench.py): solver
+            # top pick safe 17/17, Laya 16/17, agreement 0/17 — Laya is the
+            # weaker guesser, so this floor, not taste, is what keeps it safe.
+            - { name: LAYA_GAME_MIN_CONFIDENCE, value: "0.55" }
             - { name: LAYA_MIN_CONFIDENCE, value: "0.75" }
             # 10 = the calibrated choice range (buckets >=11 ship distorted
             # temperatures) and fits the 512-token budget.

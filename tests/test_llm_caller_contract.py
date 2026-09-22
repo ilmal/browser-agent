@@ -58,6 +58,7 @@ def _settings(**over) -> Settings:
         laya_decide_url="",
         laya_pick_enabled=True,
         laya_min_confidence=0.75,
+        laya_game_min_confidence=0.55,
         laya_max_candidates=20,
         laya_pick_retries=1,
         api_port=8000,

@@ -122,7 +122,10 @@ def test_broken_load_disables_both_roles_once(settings, caplog):
     assert gate.enabled is False
     assert gate.pick_enabled is False
     assert gate.summary["state"] == "broken"
-    # The yes_no went through predict (inconclusive); choose refused at the door.
+    # ``choose`` refuses on ``enabled`` (broken), NOT on ``pick_enabled``: the
+    # flag governs the plan picker, and the minesweeper tiebreak calls choose
+    # with the flag off. Both refusals look the same from here, which is why
+    # test_choose_ignores_the_plan_pick_flag pins the distinction.
     assert gate.stats["inconclusive"] == 1
 
 
@@ -161,6 +164,42 @@ def test_settings_disable_both_roles(settings, monkeypatch):
 
     assert gate.enabled is False
     assert gate.pick_enabled is False
+
+
+def test_choose_ignores_the_plan_pick_flag(settings, monkeypatch):
+    """The flag is the plan picker's policy, not the gate's.
+
+    Turning PICK off must not blind the minesweeper tiebreak, which shares this
+    method but has a different risk profile. The plan picker still refuses —
+    it checks the flag itself — so this pins that the *method* is willing.
+    """
+    monkeypatch.setenv("LAYA_PICK_ENABLED", "false")
+    agent = FakeAgent()
+    gate = LayaGate(load_settings())
+    gate._load = lambda: agent  # type: ignore[method-assign]
+
+    assert gate.pick_enabled is False  # the plan picker's gate is still shut
+    idx, conf = _run(gate.choose("which?", ["0. a", "1. b"], "s"))
+    assert idx == 1 and conf > 0.0  # …but the tiebreak can still ask
+
+    # And the plan picker honours the flag: with no selector and the flag off,
+    # it refuses before ever reaching ``choose``.
+    import asyncio
+
+    from browser_agent.recipes._plan_exec import StepFailure, resolve_target
+    from browser_agent.plan_model import Step
+
+    monkeypatch.setattr(
+        LayaGate, "choose",
+        lambda *a, **k: pytest.fail("plan picker asked with the flag off"),
+    )
+    step = Step(action="click", goal="press the thing", selector=None)
+    try:
+        asyncio.run(resolve_target(None, step, gate, load_settings(), base="body"))
+    except StepFailure as exc:
+        assert "no picker is enabled" in str(exc)
+    else:
+        pytest.fail("plan picker resolved a target with the flag off")
 
 
 # -- HTTP backend (LAYA_DECIDE_URL set — the prod shape) ---------------------

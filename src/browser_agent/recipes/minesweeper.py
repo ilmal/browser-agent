@@ -196,7 +196,11 @@ class Minesweeper:
         # Only the cells nearest the frontier are ambiguous in any interesting
         # way; the rest are board-density fill and all rank the same.
         shortlist = ranked[:_MAX_TIEBREAK_CANDIDATES]
-        if len(shortlist) <= 1 or not self._laya.pick_enabled:
+        # Gate on ``enabled``, not ``pick_enabled``: the latter protects the
+        # *plan* picker, where a wrong pick clicks the wrong element. Here a
+        # wrong guess costs one life in a game the solver can still win, so the
+        # game is allowed to use the gate while the plan picker stays off.
+        if len(shortlist) <= 1 or not self._laya.enabled:
             return moves[0], False
 
         lines = [
@@ -212,7 +216,7 @@ class Minesweeper:
         idx, conf = await self._laya.choose(
             "Which numbered cell is the safest to open next?", lines, state
         )
-        threshold = self._settings.laya_min_confidence
+        threshold = self._settings.laya_game_min_confidence
         if idx is None or conf < threshold:
             log_.note("gate", f"game {game_no}: tiebreak inconclusive (conf {conf:.2f})")
             return moves[0], True

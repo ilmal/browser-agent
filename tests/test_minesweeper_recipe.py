@@ -105,6 +105,9 @@ class FakeLaya:
     """A gate stub: returns a scripted (index, confidence)."""
 
     def __init__(self, pick_enabled: bool = True, answer: tuple[int | None, float] = (0, 0.99)):
+        # The tiebreak gates on ``enabled``; ``pick_enabled`` is kept so a test
+        # can assert the game does not depend on the plan picker's flag.
+        self.enabled = pick_enabled
         self.pick_enabled = pick_enabled
         self.answer = answer
         self.asked: list[tuple[str, list[str], str]] = []
@@ -116,6 +119,9 @@ class FakeLaya:
 
 class StubSettings:
     laya_min_confidence = 0.75
+    #: The game's own floor — lower than the picker's, because a wrong
+    #: minesweeper guess costs one life, not the whole task.
+    laya_game_min_confidence = 0.55
 
 
 def _recipe(laya: FakeLaya | None = None) -> Minesweeper:

@@ -109,6 +109,14 @@ class Settings:
     laya_decide_url: str
     laya_pick_enabled: bool
     laya_min_confidence: float
+    #: Confidence floor for the minesweeper tiebreak, deliberately separate
+    #: from ``laya_min_confidence``. The two roles differ in what a wrong
+    #: answer costs: a wrong *pick* clicks the wrong element and is
+    #: unrecoverable, whereas a wrong minesweeper guess costs one life in a
+    #: game the solver can still win. Reusing the picker's floor left the
+    #: tiebreak silent (the engine's choice confidences rarely reach 0.75),
+    #: so this starts lower and is tuned from measurement, not taste.
+    laya_game_min_confidence: float
     laya_max_candidates: int
     laya_pick_retries: int
 
@@ -231,6 +239,7 @@ def load_settings() -> Settings:
         laya_decide_url=_env("LAYA_DECIDE_URL"),
         laya_pick_enabled=_env("LAYA_PICK_ENABLED", "true").lower() in {"1", "true", "yes"},
         laya_min_confidence=_env_float("LAYA_MIN_CONFIDENCE", 0.75),
+        laya_game_min_confidence=_env_float("LAYA_GAME_MIN_CONFIDENCE", 0.55),
         # 10, not more: laya warns that confidence for choice buckets >=11 is
         # uncalibrated (its checkpoint ships clamp-distorted temperatures
         # there), and 10 options fit the 512-token budget beside the page

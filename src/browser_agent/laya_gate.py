@@ -130,8 +130,16 @@ class LayaGate:
     async def choose(
         self, question: str, lines: list[str], state_text: str
     ) -> tuple[int | None, float]:
-        """Pick one of the numbered candidate lines. ``(None, 0.0)`` = no pick."""
-        if not self.pick_enabled or not lines:
+        """Pick one of the numbered candidate lines. ``(None, 0.0)`` = no pick.
+
+        This does **not** consult ``pick_enabled``: that flag governs the
+        *plan* picker, whose wrong answer clicks the wrong element. A caller
+        with a different risk profile (the minesweeper tiebreak, where a wrong
+        guess costs one life in a game the solver can still win) decides for
+        itself. Callers that want the flag honour it — ``_plan_exec`` checks it
+        before asking, and its own test pins that refusal.
+        """
+        if not self.enabled or not lines:
             return None, 0.0
         out = await self._predict(
             state_text,
