@@ -20,6 +20,8 @@ import asyncio
 import hashlib
 import json
 import logging
+import random
+import re
 import time
 import uuid
 from pathlib import Path
@@ -44,6 +46,30 @@ from ._candidates import (
 from ._helpers import require_clear
 
 log = logging.getLogger(__name__)
+
+#: Risk tiers (trycua/cua's confirmation policy, tightened to what can do
+#: damage from here): words naming money, destruction or outbound publication.
+#: A click/type whose wording hits this and which carries NO done_when is
+#: refused before it acts — the planner was told to attach proof to exactly
+#: these steps, so a risky step without proof is a plan defect, and the
+#: remedy is the agent fallback, not an unverified destructive action.
+#: Deliberately excludes "submit"/"confirm" (every form's happy path says
+#: them) — this gate is for irreversible, not for routine.
+_RISKY_RE = re.compile(
+    r"\b(pay|payment|paying|checkout|purchase|purchasing|buy|buying|order"
+    r"|delete|deleting|remove|removing|transfer|password"
+    r"|send|sending|post|posting|publish|publishing)\b",
+    re.IGNORECASE,
+)
+
+
+def _is_risky_unproven(step: Step) -> bool:
+    if step.done_when is not None:
+        return False
+    haystack = " ".join(
+        part for part in (step.goal, step.selector, step.text) if part
+    )
+    return bool(_RISKY_RE.search(haystack))
 
 
 async def state_text(page: Page, limit: int = 900) -> str:
@@ -173,6 +199,11 @@ def _log_pick(settings: Settings, row: dict) -> None:
         log.debug("pick log unavailable (%s)", exc)
 
 
+def _line_body(line: str) -> str:
+    """The line minus its leading number — the element's description."""
+    return re.sub(r"^\d+\.\s*", "", line)
+
+
 async def resolve_target(
     page: Page,
     step: Step,
@@ -226,6 +257,32 @@ async def resolve_target(
                 return cands.locator.nth(cands.binds[idx])
         if picker is not None and picker.enabled:
             idx, conf = await picker.pick(step.goal or "", state, cands.lines, op=mode)
+            verified: bool | None = None
+            if idx is not None and settings.picker_verify and len(cands.lines) > 1:
+                # Agree-by-two: ask again with the order shuffled. A first
+                # answer that survives re-asking in a different position is
+                # evidence about the ELEMENT; one that flips with the order
+                # was position bias. The second ask failing (transport) does
+                # not discard the first — only a disagreement does.
+                order = list(range(len(cands.lines)))
+                random.shuffle(order)
+                idx2, _ = await picker.pick(
+                    step.goal or "",
+                    state,
+                    [cands.lines[k] for k in order],
+                    op=mode,
+                )
+                if idx2 is not None:
+                    verified = _line_body(cands.lines[idx]) == _line_body(
+                        cands.lines[order[idx2]]
+                    )
+                    if not verified:
+                        log.warning(
+                            "picker verify disagreed (%r vs %r); declining the pick",
+                            _line_body(cands.lines[idx]),
+                            _line_body(cands.lines[order[idx2]]),
+                        )
+                        idx = None
             if idx is not None:
                 if not await _fresh(cands, idx):
                     log.warning("picked element went stale; re-enumerating")
@@ -242,6 +299,7 @@ async def resolve_target(
                         "chosen": idx,
                         "chosen_line": cands.lines[idx],
                         "conf": conf,
+                        "verified": verified,
                         "model": settings.picker_model,
                     },
                 )
@@ -315,6 +373,7 @@ async def run_plan(
     page = await session.goto(plan.entry_url)
     extracts: dict[str, str] = {}
     executed = 0
+    mutated = False
     # Stuck-loop latches (ported from jev-ultrafast / SystemOneHarness):
     # consecutive click/type actions that change nothing, and the same action
     # on the same page state twice, both mean the plan is grinding — fail into
@@ -343,6 +402,13 @@ async def run_plan(
                     plan.entry_url,
                 )
             seen.add(key)
+        if step.action in {"click", "type"} and _is_risky_unproven(step):
+            raise StepFailure(
+                f"step {i} ({desc}): risky action without a done_when proof",
+                task_text,
+                plan.entry_url,
+            )
+        t0 = time.monotonic()
         try:
             outcome = await exec_step(page, step, laya, settings, extracts, picker=picker)
         except StepFailure as exc:
@@ -352,7 +418,13 @@ async def run_plan(
             log_.note("error", f"step {i + 1} failed: {exc}")
             raise StepFailure(f"step {i} ({desc}): {exc}", task_text, plan.entry_url) from exc
         log.info("plan step %d ok: %s", i, outcome)
-        log_.note("step", f"step {i + 1} ok: {outcome}", step=i + 1)
+        log_.note(
+            "step",
+            f"step {i + 1} ok ({time.monotonic() - t0:.1f}s): {outcome}",
+            step=i + 1,
+        )
+        if mutates:
+            mutated = True
         if mutates and fp_before is not None:
             fp_after = await _fingerprint(page)
             no_change = no_change + 1 if fp_after == fp_before else 0
@@ -379,6 +451,26 @@ async def run_plan(
                     plan.entry_url,
                 )
         executed += 1
+
+    # Finish-insist (SystemOneHarness's completion rule): per-step proof says
+    # every step worked; one more question says the OVERALL task is done. A
+    # confident no means the plan technically succeeded and did not finish the
+    # job — the agent fallback gets the original task with the page already
+    # where the plan left it, which is exactly the repair position. Unsure
+    # never punishes: the per-step gates already passed.
+    if mutated and laya.enabled:
+        verdict, conf = await laya.yes_no(
+            f"Does the page now satisfy the overall task '{task_text}'?",
+            await state_text(page),
+        )
+        label = "yes" if verdict else "no" if verdict is not None else "unsure"
+        log_.note("gate", f"final check: {label} (conf {conf:.2f})")
+        if verdict is False and conf >= settings.laya_min_confidence:
+            raise StepFailure(
+                "plan ran to its end but the page does not satisfy the task yet",
+                task_text,
+                plan.entry_url,
+            )
 
     return {
         "plan": plan.model_dump(),

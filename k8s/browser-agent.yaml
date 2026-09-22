@@ -209,6 +209,9 @@ spec:
             - { name: PICKER_ENABLED, value: "true" }
             - { name: PICKER_MODEL, value: "deepseek-v4.1-flash" }
             - { name: PICKER_CLIENT_ID, value: "browser-agent-picker" }
+            # Agree-by-two on multi-candidate picks: the pick is re-asked in
+            # shuffled order and must agree with itself before it is bound.
+            - { name: PICKER_VERIFY, value: "true" }
             # LLM_API_KEY comes from the Secret (envFrom below), which is the
             # name llm-service's own manifests already use for it.
             #

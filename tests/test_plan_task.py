@@ -53,6 +53,15 @@ MANY_PAGE = "<html><body><h1>Many</h1>" + "".join(
 CAPTCHA_PAGE = """<html><body><h1>Verify</h1>
 <img src="/captcha.png" class="captcha-image"></body></html>"""
 
+SAVE_PAGE = """<html><body><h1>Save</h1>
+<button onclick="location='/picked?which=cancel'">Cancel</button>
+<button onclick="location='/picked?which=save'">Save</button>
+</body></html>"""
+
+ONE_PAGE = """<html><body><h1>One</h1>
+<button onclick="location='/picked?which=one'">Only</button>
+</body></html>"""
+
 
 def _free_port() -> int:
     with socket.socket() as s:
@@ -69,6 +78,8 @@ def site():
         "/many": MANY_PAGE,
         "/captcha": CAPTCHA_PAGE,
         "/stuck": STUCK_PAGE,
+        "/save": SAVE_PAGE,
+        "/one": ONE_PAGE,
     }
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -652,8 +663,8 @@ async def test_llm_picker_resolves_when_laya_declines(runner_factory, site):
     assert done.status is TaskStatus.DONE
     assert done.used_agent is False
     assert "picked?which=2" in done.result["final_url"]
-    # The picker saw the same numbered lines laya would have.
-    assert len(picker.calls) == 1
+    # Two identical "Submit" labels: one ask, plus the shuffled verify re-ask.
+    assert len(picker.calls) == 2
     assert len(picker.calls[0][1]) == 2
     # The question carried the operation premise (CLICK here).
     assert picker.calls[0][2] == "click"
@@ -741,6 +752,251 @@ async def test_same_action_on_unchanged_page_fails_at_once(runner_factory, site)
     assert done.status is TaskStatus.DONE
     assert done.used_agent is True
     assert agent_calls["n"] == 1
+
+
+class ContentPicker(FakePicker):
+    """Answers by content on every ask — the faithful-picker control."""
+
+    def __init__(self, word: str) -> None:
+        super().__init__(pick=None)
+        self._word = word
+
+    async def pick(self, goal: str, state: str, lines: list[str], *, op: str = "click"):
+        self.calls.append((goal, list(lines), op))
+        for i, line in enumerate(lines):
+            if self._word in line:
+                return i, 1.0
+        return None, 0.0
+
+
+class BiasedPicker(ContentPicker):
+    """A position-biased model: the first ask of each round always answers 0,
+    later asks answer by content — exactly the failure mode agree-by-two
+    exists for, and one the retry loop can wash out."""
+
+    async def pick(self, goal: str, state: str, lines: list[str], *, op: str = "click"):
+        self.calls.append((goal, list(lines), op))
+        if len(self.calls) % 2 == 1:
+            return 0, 1.0
+        return await super().pick(goal, state, lines, op=op)
+
+
+class FlipFlopper(FakePicker):
+    """Never stable: alternates between two elements by content, so every
+    verify pair disagrees no matter how the order was shuffled."""
+
+    def __init__(self) -> None:
+        super().__init__(pick=None)
+        self._n = 0
+
+    async def pick(self, goal: str, state: str, lines: list[str], *, op: str = "click"):
+        self.calls.append((goal, list(lines), op))
+        self._n += 1
+        word = "Cancel" if self._n % 2 == 1 else "Save"
+        for i, line in enumerate(lines):
+            if word in line:
+                return i, 1.0
+        return None, 0.0
+
+
+async def test_picker_verify_reasks_and_binds_the_agreed_element(runner_factory, site):
+    """A multi-candidate pick is asked twice (second time in shuffled order)
+    and only a pick both asks agree on is bound."""
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/save",
+        "steps": [
+            {"action": "click", "goal": "save the changes"},
+            {"action": "extract", "goal": "heading", "selector": "h1"},
+        ],
+    }
+    picker = ContentPicker("Save")
+    runner = make(planner=FakePlanner(plan), laya=FakeLaya(pick=None), picker=picker)
+    task = runner.submit("plan.task", {"task": "save"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is False
+    assert len(picker.calls) == 2, "the verify re-ask never happened"
+    assert "picked?which=save" in done.result["final_url"]
+
+
+async def test_picker_verify_washes_out_a_first_ask_bias(runner_factory, site):
+    """A model biased on its first ask but honest on re-asks ends bound to the
+    element its answers agree on — the retry loop + verify correct it."""
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/save",
+        "steps": [
+            {"action": "click", "goal": "save the changes"},
+            {"action": "extract", "goal": "heading", "selector": "h1"},
+        ],
+    }
+    picker = BiasedPicker("Save")
+    runner = make(planner=FakePlanner(plan), laya=FakeLaya(pick=None), picker=picker)
+    task = runner.submit("plan.task", {"task": "save"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is False
+    assert "picked?which=save" in done.result["final_url"]
+    assert len(picker.calls) >= 2
+
+
+async def test_picker_verify_declines_a_never_stable_model(runner_factory, site):
+    """Answers that flip between elements on every ask never agree — the pick
+    is declined into the agent fallback, nothing is clicked."""
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/save",
+        "steps": [{"action": "click", "goal": "save the changes"}],
+    }
+    agent_calls = {"n": 0}
+
+    async def agent(session, url, payload):
+        agent_calls["n"] += 1
+        return {"agent": True}
+
+    runner = make(
+        agent_runner=agent,
+        planner=FakePlanner(plan),
+        laya=FakeLaya(pick=None),
+        picker=FlipFlopper(),
+    )
+    task = runner.submit("plan.task", {"task": "save"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is True
+    assert agent_calls["n"] == 1
+
+
+async def test_picker_verify_skipped_for_single_candidate(runner_factory, site):
+    """One candidate cannot be a position error — no second ask."""
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/one",
+        "steps": [
+            {"action": "click", "goal": "press the only button"},
+            {"action": "extract", "goal": "heading", "selector": "h1"},
+        ],
+    }
+    picker = ContentPicker("Only")
+    runner = make(planner=FakePlanner(plan), laya=FakeLaya(pick=None), picker=picker)
+    task = runner.submit("plan.task", {"task": "go"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is False
+    assert len(picker.calls) == 1
+    assert "picked?which=one" in done.result["final_url"]
+
+
+async def test_risky_step_without_done_when_is_refused_to_the_agent(runner_factory, site):
+    """A click whose wording names something irreversible and which carries no
+    done_when is refused BEFORE it acts (cua's risk tiers) — the fallback gets
+    the original task, the page untouched by that step."""
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/form",
+        "steps": [{"action": "click", "goal": "delete the account", "selector": "#go"}],
+    }
+    agent_calls = {"n": 0}
+
+    async def agent(session, url, payload):
+        agent_calls["n"] += 1
+        return {"agent": True}
+
+    runner = make(agent_runner=agent, planner=FakePlanner(plan), laya=FakeLaya())
+    task = runner.submit("plan.task", {"task": "clean up"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is True
+    assert agent_calls["n"] == 1
+
+
+async def test_risky_step_with_done_when_runs(runner_factory, site):
+    """Proof attached → the same wording executes deterministically."""
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/form",
+        "steps": [
+            {
+                "action": "click",
+                "goal": "delete the account",
+                "selector": "#go",
+                "done_when": {"text_contains": "submitted"},
+            }
+        ],
+    }
+    runner = make(planner=FakePlanner(plan), laya=FakeLaya())
+    task = runner.submit("plan.task", {"task": "clean up"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is False
+
+
+async def test_final_gate_confident_no_falls_back_to_agent(runner_factory, site):
+    """Finish-insist: every step passed its own gates, but the gate says the
+    OVERALL task is not satisfied — fail into the fallback with the page where
+    the plan left it, instead of reporting a false done."""
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/form",
+        "steps": [
+            {
+                "action": "click",
+                "goal": "submit the form",
+                "selector": "#go",
+                "done_when": {"text_contains": "submitted"},
+            }
+        ],
+    }
+    agent_calls = {"n": 0}
+
+    async def agent(session, url, payload):
+        agent_calls["n"] += 1
+        return {"agent": True}
+
+    runner = make(
+        agent_runner=agent,
+        planner=FakePlanner(plan),
+        laya=FakeLaya(yes=False, conf=0.95),
+    )
+    task = runner.submit("plan.task", {"task": "submit the form"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is True
+    assert agent_calls["n"] == 1
+
+
+async def test_final_gate_unsure_never_punishes(runner_factory, site):
+    """An inconclusive final check must not fail a plan whose steps all proved
+    themselves — unsure advances."""
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/form",
+        "steps": [
+            {
+                "action": "click",
+                "goal": "submit the form",
+                "selector": "#go",
+                "done_when": {"text_contains": "submitted"},
+            }
+        ],
+    }
+    runner = make(
+        planner=FakePlanner(plan),
+        laya=FakeLaya(yes=None, conf=0.95),
+    )
+    task = runner.submit("plan.task", {"task": "submit the form"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is False
 
 
 # -- pure model/validation tests (no browser) -------------------------------
