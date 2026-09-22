@@ -788,3 +788,213 @@ def test_publishing_projects_the_whole_directory(hub_env, tmp_path: Path, monkey
     # And it is applied to this namespace, not the default one.
     applied = [c for c in seen if c[-2:] == ["-f", "-"]]
     assert applied and "browser-agent" in applied[0]
+
+
+# -- the bot's retry conversation ------------------------------------------
+#
+# /say is the endpoint that makes a retry a conversation. Two things matter and
+# both are easy to get wrong: that "talk to it" does the right thing in *both*
+# states, and that the message is recorded even when the task is mid-run (a
+# steer that leaves no trace makes the thread disagree with the History).
+#
+# Which branch /say takes must not depend on whether a real browser happened to
+# be fast enough to start the task first, so these tests stop the runner's
+# worker and set the state they mean. The behaviour under test is the dispatch,
+# not the scheduler.
+
+
+def _idle(bot_env):
+    """Stop the worker so a submitted task stays queued instead of running."""
+    worker = bot_env.runner._worker
+    if worker is not None:
+        worker.cancel()
+    bot_env.runner._worker = None
+
+
+def test_say_queues_the_next_attempt_for_a_finished_task(bot_env):
+    from fastapi.testclient import TestClient
+
+    with TestClient(bot_env.app) as client:
+        headers = {"Authorization": "Bearer test-token"}
+        _idle(bot_env)
+        made = client.post("/api/tasks", json={"recipe": "agent.task", "payload": {}},
+                           headers=headers).json()
+        assert made["status"] == "queued"
+
+        res = client.post(f"/api/tasks/{made['id']}/say",
+                          json={"text": "use the other button instead"}, headers=headers)
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["ran"] is True
+        assert body["task"]["id"] != made["id"]
+
+        thread = client.get(f"/api/threads/{made['thread_id']}", headers=headers).json()
+        assert [m["text"] for m in thread["messages"]] == ["use the other button instead"]
+        assert len(thread["attempts"]) == 2
+        assert [a["attempt"] for a in thread["attempts"]] == [1, 2]
+
+
+def test_say_steers_a_running_task_instead_of_queuing(bot_env):
+    from fastapi.testclient import TestClient
+
+    with TestClient(bot_env.app) as client:
+        headers = {"Authorization": "Bearer test-token"}
+        _idle(bot_env)
+        made = client.post("/api/tasks", json={"recipe": "agent.task", "payload": {}},
+                           headers=headers).json()
+        task = bot_env.runner.tasks[made["id"]]
+        # Pretend it is mid-run, which is the state the operator is in when they
+        # want to correct a task rather than replace it.
+        from browser_agent.control import Control
+        from browser_agent.tasks import TaskStatus
+
+        bot_env.runner.current = task
+        bot_env.runner.control = Control()
+        task.status = TaskStatus.RUNNING
+
+        res = client.post(f"/api/tasks/{made['id']}/say",
+                          json={"text": "stop, use the other menu"}, headers=headers)
+        assert res.status_code == 200, res.text
+        body = res.json()
+        assert body["ran"] is False
+        assert "task" not in body
+        assert body["control"]["amendment"] == "stop, use the other menu"
+        # Still one attempt: steering does not mint a second one.
+        assert len(bot_env.runner.tasks) == 1
+
+
+def test_say_records_a_mid_run_steer_in_the_thread(bot_env):
+    """A steer that leaves no trace makes the thread disagree with the History."""
+    from fastapi.testclient import TestClient
+
+    with TestClient(bot_env.app) as client:
+        headers = {"Authorization": "Bearer test-token"}
+        _idle(bot_env)
+        made = client.post("/api/tasks", json={"recipe": "agent.task", "payload": {}},
+                           headers=headers).json()
+        task = bot_env.runner.tasks[made["id"]]
+        from browser_agent.control import Control
+        from browser_agent.tasks import TaskStatus
+
+        bot_env.runner.current = task
+        bot_env.runner.control = Control()
+        task.status = TaskStatus.RUNNING
+
+        client.post(f"/api/tasks/{made['id']}/say", json={"text": "try the search box"},
+                    headers=headers)
+        thread = client.get(f"/api/threads/{made['thread_id']}", headers=headers).json()
+        assert [m["text"] for m in thread["messages"]] == ["try the search box"]
+        assert thread["messages"][0]["kind"] == "instruction"
+
+
+def test_say_stamps_the_instruction_into_goal_too(bot_env):
+    """The bug this closes: agent.py reads ``goal`` FIRST, so text-only lands
+    nowhere and the operator's new instruction silently does nothing."""
+    from fastapi.testclient import TestClient
+
+    with TestClient(bot_env.app) as client:
+        headers = {"Authorization": "Bearer test-token"}
+        _idle(bot_env)
+        made = client.post("/api/tasks", json={"recipe": "agent.task", "payload": {}},
+                           headers=headers).json()
+        nxt = client.post(f"/api/tasks/{made['id']}/say",
+                          json={"text": "do it the other way"}, headers=headers).json()["task"]
+        assert nxt["payload"]["goal"] == "do it the other way"
+        assert nxt["payload"]["task"] == "do it the other way"
+
+
+def test_say_refuses_an_empty_message_and_a_bad_kind(bot_env):
+    from fastapi.testclient import TestClient
+
+    with TestClient(bot_env.app) as client:
+        headers = {"Authorization": "Bearer test-token"}
+        _idle(bot_env)
+        made = client.post("/api/tasks", json={"recipe": "agent.task", "payload": {}},
+                           headers=headers).json()
+        assert client.post(f"/api/tasks/{made['id']}/say", json={"text": "   "},
+                           headers=headers).status_code == 400
+        assert client.post(f"/api/tasks/{made['id']}/say",
+                           json={"text": "hi", "kind": "config"}, headers=headers).status_code == 400
+
+
+def test_say_on_an_unknown_task_is_404(bot_env):
+    from fastapi.testclient import TestClient
+
+    with TestClient(bot_env.app) as client:
+        res = client.post("/api/tasks/nope/say", json={"text": "hi"},
+                          headers={"Authorization": "Bearer test-token"})
+        assert res.status_code == 404
+
+
+def test_a_thread_reports_its_attempts_and_messages(bot_env):
+    from fastapi.testclient import TestClient
+
+    with TestClient(bot_env.app) as client:
+        headers = {"Authorization": "Bearer test-token"}
+        _idle(bot_env)
+        made = client.post("/api/tasks", json={"recipe": "agent.task", "payload": {}},
+                           headers=headers).json()
+        thread = client.get(f"/api/threads/{made['thread_id']}", headers=headers).json()
+        assert thread["thread_id"] == made["thread_id"]
+        assert [a["id"] for a in thread["attempts"]] == [made["id"]]
+        assert thread["messages"] == []
+        assert client.get("/api/threads/nope", headers=headers).status_code == 404
+
+
+def test_activity_can_read_a_finished_attempts_feed(bot_env):
+    """Without this the panel could show the live run and nothing else."""
+    from fastapi.testclient import TestClient
+
+    with TestClient(bot_env.app) as client:
+        headers = {"Authorization": "Bearer test-token"}
+        _idle(bot_env)
+        made = client.post("/api/tasks", json={"recipe": "agent.task", "payload": {}},
+                           headers=headers).json()
+        res = client.get(f"/api/activity?task_id={made['id']}", headers=headers)
+        assert res.status_code == 200
+        assert res.json()["entries"] == []
+        assert res.json()["task_id"] == made["id"]
+        assert client.get("/api/activity?task_id=nope", headers=headers).status_code == 404
+
+
+def test_the_retry_endpoint_stamps_goal_as_well(bot_env):
+    from fastapi.testclient import TestClient
+
+    with TestClient(bot_env.app) as client:
+        headers = {"Authorization": "Bearer test-token"}
+        _idle(bot_env)
+        made = client.post("/api/tasks", json={"recipe": "agent.task", "payload": {}},
+                           headers=headers).json()
+        nxt = client.post(f"/api/tasks/{made['id']}/retry",
+                          json={"instructions": "try the menu"}, headers=headers).json()
+        assert nxt["payload"]["goal"] == "try the menu"
+        assert nxt["thread_id"] == made["thread_id"]
+        assert nxt["attempt"] == 2
+
+
+def test_a_retry_records_the_instruction_in_the_thread(bot_env):
+    from fastapi.testclient import TestClient
+
+    with TestClient(bot_env.app) as client:
+        headers = {"Authorization": "Bearer test-token"}
+        _idle(bot_env)
+        made = client.post("/api/tasks", json={"recipe": "agent.task", "payload": {}},
+                           headers=headers).json()
+        client.post(f"/api/tasks/{made['id']}/retry",
+                    json={"instructions": "try the menu"}, headers=headers)
+        thread = client.get(f"/api/threads/{made['thread_id']}", headers=headers).json()
+        assert [m["text"] for m in thread["messages"]] == ["try the menu"]
+
+
+def test_the_thread_box_cannot_reload_the_page(bot_env):
+    """A <button> inside a <form> submits it by default, so the page navigated
+    and the operator lost what they typed. Every button in that panel that is
+    not the form's own submit must say type="button"."""
+    import re
+
+    page = (Path(__file__).resolve().parents[1] / "src" / "browser_agent" / "ui"
+            / "index.html").read_text()
+    form = re.search(r'<form id="thread-form">.*?</form>', page, re.S)
+    assert form, "the thread panel must render its form"
+    for tag in re.findall(r"<button[^>]*>", form.group(0)):
+        assert 'type="button"' in tag, f"a thread button would submit the form: {tag}"

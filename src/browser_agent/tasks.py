@@ -14,6 +14,7 @@ nothing like a human.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import time
 import uuid
@@ -61,11 +62,31 @@ class Task:
     #: Set when the operator has changed the instruction mid-run, so the UI can
     #: show that the task it is watching is not the one it started.
     amended_count: int = 0
+    #: The line of work this attempt belongs to. A first submit is its own
+    #: thread; a steer or a steer-then-retry stays in it, which is what turns
+    #: "one block, then the retries" into a single conversation instead of a
+    #: stack of unrelated History rows.
+    thread_id: str = ""
+    #: 1 for the first attempt, +1 per follow-up.
+    attempt: int = 1
+    parent_id: str | None = None
+    #: The activity log, snapshotted when the attempt ends. ``_run`` resets the
+    #: live log per task, so without this a finished attempt's feed is gone and
+    #: the thread has nothing to show for what it actually tried.
+    activity: list[dict[str, Any]] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        if not self.thread_id:
+            self.thread_id = self.id
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "id": self.id,
             "recipe": self.recipe,
+            # Carried so the thread can show what each attempt was actually
+            # asked to do — an attempt's instruction is the one thing the
+            # operator needs in order to tell two attempts apart.
+            "payload": self.payload,
             "status": self.status.value,
             "detail": self.detail,
             "result": self.result,
@@ -74,6 +95,10 @@ class Task:
             "created_at": self.created_at,
             "started_at": self.started_at,
             "finished_at": self.finished_at,
+            "thread_id": self.thread_id,
+            "attempt": self.attempt,
+            "parent_id": self.parent_id,
+            "activity": self.activity,
         }
 
 
@@ -238,22 +263,79 @@ class TaskRunner:
 
     # -- submission --------------------------------------------------------
 
-    def submit(self, recipe: str, payload: dict[str, Any]) -> Task:
+    def submit(
+        self,
+        recipe: str,
+        payload: dict[str, Any],
+        *,
+        thread_id: str = "",
+        attempt: int = 1,
+        parent_id: str | None = None,
+    ) -> Task:
         get_recipe(recipe)  # fail fast on an unknown recipe
-        task = Task(recipe=recipe, payload=payload)
+        task = Task(
+            recipe=recipe,
+            payload=payload,
+            thread_id=thread_id,
+            attempt=attempt,
+            parent_id=parent_id,
+        )
         self.tasks[task.id] = task
         self.queue.put_nowait(task)
-        log.info("queued task %s recipe=%s", task.id, recipe)
+        log.info(
+            "queued task %s recipe=%s thread=%s attempt=%d",
+            task.id, recipe, task.thread_id, task.attempt,
+        )
         return task
 
     def retry(self, task_id: str, *, payload: dict[str, Any] | None = None) -> Task:
-        """Re-queue an existing task. Only legal once a human has cleared it.
+        """Re-queue an existing task as the next attempt in its thread.
 
-        ``payload`` overrides the stored one, which is how an edited instruction
-        becomes a real new plan instead of a re-run of the old text.
+        Only legal once a human has cleared it. ``payload`` overrides the stored
+        one, which is how an edited instruction becomes a real new plan instead
+        of a re-run of the old text.
+
+        The new attempt inherits the thread so the conversation is one row in
+        the History, and is briefed with what the earlier attempts tried — an
+        "iterate on it" that does not carry the prior failure forward is just a
+        second identical roll of the dice.
         """
         old = self.tasks[task_id]
-        return self.submit(old.recipe, payload if payload is not None else old.payload)
+        brief = self._thread_brief(old)
+        base = payload if payload is not None else old.payload
+        if brief:
+            base = {**base, "history": brief}
+        return self.submit(
+            old.recipe,
+            base,
+            thread_id=old.thread_id,
+            attempt=old.attempt + 1,
+            parent_id=old.id,
+        )
+
+    def _thread_brief(self, task: Task) -> str:
+        """What the earlier attempts in this thread tried, and why they stopped.
+
+        Short on purpose: it is prepended to a prompt whose budget the actual
+        instruction needs. The recipe, status and detail carry the signal; the
+        last few feed lines say where it got stuck.
+        """
+        earlier = sorted(
+            (t for t in self.tasks.values() if t.thread_id == task.thread_id),
+            key=lambda t: t.created_at,
+        )
+        lines: list[str] = []
+        for t in earlier:
+            lines.append(f"- attempt {t.attempt} ({t.recipe}) ended {t.status.value}: "
+                         f"{t.detail or 'no detail'}")
+            for entry in t.activity[-3:]:
+                lines.append(f"    · {entry.get('text', '')}")
+        if not lines:
+            return ""
+        return (
+            "Earlier attempts at this same task, for context. Do not repeat a "
+            "step that already failed this way:\n" + "\n".join(lines)
+        )
 
     # -- live control ------------------------------------------------------
 
@@ -286,6 +368,11 @@ class TaskRunner:
                 log.exception("task %s crashed", task.id)
             finally:
                 task.finished_at = time.time()
+                # Snapshot BEFORE the next task resets the live log: `_run`
+                # clears it, so a finished attempt's feed would otherwise be
+                # unrecoverable and the thread could not show what it tried.
+                with contextlib.suppress(Exception):
+                    task.activity = self.activity.as_list()
                 self.current = None
                 self.queue.task_done()
 

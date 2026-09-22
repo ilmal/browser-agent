@@ -80,7 +80,7 @@ class StoredRecipe:
         return result
 
 
-def load_stored_recipes() -> None:
+def load_stored_recipes() -> list[str]:
     """Read the library and install what it holds. Never raises.
 
     Called from ``tasks.get_recipe``/``list_recipes`` (so an edit lands without
@@ -102,3 +102,4 @@ def load_stored_recipes() -> None:
     # removed from the registry.
     for stale in tasks.stored_recipe_names() - set(specs):
         tasks.forget_recipe(stale)
+    return sorted(specs)

@@ -17,8 +17,10 @@ from typing import Any
 
 #: Kinds the UI styles differently. "step" is a deterministic plan step,
 #: "agent" an LLM fallback step, "gate" a Laya verdict, "error" a failure the
-#: operator may need to act on.
-KINDS = ("info", "step", "agent", "gate", "error")
+#: operator may need to act on, "operator" something the person typed —
+#: mirrored into the feed so a steer is visible at the moment it lands, not
+#: only in the thread panel.
+KINDS = ("info", "step", "agent", "gate", "error", "operator")
 
 
 @dataclass

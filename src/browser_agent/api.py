@@ -25,6 +25,7 @@ from .config import Settings, load_settings
 from .escalation import detect_challenge
 from .scheduler import ScheduleStore
 from .tasks import TaskRunner, TaskStatus, list_recipes
+from .threads import ThreadStore
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -32,6 +33,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 settings: Settings = load_settings()
 session = BrowserSession(settings)
 store = ScheduleStore(settings.state_db)
+threads = ThreadStore(settings.state_db)
 runner = TaskRunner(settings, session, agent_runner=make_agent_runner(settings))
 
 # Shown on a freshly started pod so noVNC opens on a real page instead of a
@@ -82,6 +84,20 @@ async def lifespan(app: FastAPI):
             await page.goto(_IDLE_PAGE)
     except Exception:
         log.exception("browser pre-warm failed; the desktop may be empty until a task runs")
+
+    # Read the recipe library once at boot so a freshly started pod serves the
+    # operator's recipes on its first request. Later reads are lazy (the store
+    # caches on the directory mtime), but kubelet's sync of a ConfigMap edit is
+    # not instant, so this is also what makes a pod that just mounted the
+    # projection agree with the hub.
+    try:
+        from .recipes.stored import load_stored_recipes
+
+        installed = load_stored_recipes()
+        if installed:
+            log.info("recipe library: %s", ", ".join(installed))
+    except Exception:
+        log.exception("could not read the recipe library at boot")
 
     runner.start()
     loop = asyncio.create_task(_schedule_loop())
@@ -238,13 +254,32 @@ async def state() -> dict[str, Any]:
 
 
 @app.get("/api/activity", dependencies=[Depends(require_token)])
-async def activity() -> dict[str, Any]:
+async def activity(task_id: str = "") -> dict[str, Any]:
     """What the running task is doing, step by step.
 
     Separate from /api/state because it changes far faster: the state poll is
     about the pod, this is about the run, and the operator watching a task wants
     the second one second-by-second.
+
+    ``?task_id=`` reads a *finished* attempt's feed from the snapshot the runner
+    takes when the attempt ends. Without it the thread panel could show the live
+    run and nothing else, which is precisely the state the operator complained
+    about — "one block, then the retries", with no record of what was tried.
     """
+    if task_id:
+        task = runner.tasks.get(task_id)
+        if task is None:
+            raise HTTPException(status_code=404, detail="no such task")
+        live = task.id == (runner.current.id if runner.current else None)
+        return {
+            "task_id": task.id,
+            "status": task.status.value,
+            "control": runner.control.to_dict() if live and runner.control else None,
+            "detail": task.detail,
+            "entries": runner.activity.as_list() if live else task.activity,
+            "page_url": _current_page_url() if live else "",
+        }
+
     current = runner.current
     return {
         "task_id": current.id if current else None,
@@ -308,7 +343,11 @@ async def retry_task(task_id: str, req: RetryRequest | None = None) -> dict[str,
     payload = None
     if req is not None and req.instructions.strip():
         text = req.instructions.strip()
-        payload = {**runner.tasks[task_id].payload, "task": text, "text": text}
+        # ``goal`` too: the agent reads it FIRST (agent.py), so setting only
+        # task/text would let a stale goal silently win and the operator's new
+        # instruction would look ignored.
+        payload = {**runner.tasks[task_id].payload, "task": text, "text": text, "goal": text}
+        threads.say(runner.tasks[task_id].thread_id, "operator", "instruction", text)
     return runner.retry(task_id, payload=payload).to_dict()
 
 
@@ -361,8 +400,78 @@ async def steer_task(task_id: str, req: SteerRequest) -> dict[str, Any]:
     if not text:
         raise HTTPException(status_code=400, detail="instructions is empty")
     runner.control.steer(text)
-    runner.activity.note("info", f"instruction changed to: {text[:200]}")
+    threads.say(task.thread_id, "operator", "instruction", text)
+    runner.activity.note("operator", f"you: {text[:200]}")
     return {"task_id": task.id, "instruction": text, "control": runner.control.to_dict()}
+
+
+# -- the retry conversation ------------------------------------------------
+
+
+class SayRequest(BaseModel):
+    text: str
+    #: "instruction" changes the wording for the next attempt; "note" only
+    #: records it in the thread. Parameters and config edits go through their
+    #: own endpoints so the shared-library blast radius is stated once, in the
+    #: confirm the operator actually reads.
+    kind: str = "instruction"
+
+
+@app.get("/api/threads/{thread_id}", dependencies=[Depends(require_token)])
+async def get_thread(thread_id: str) -> dict[str, Any]:
+    """One thread: every attempt in it, the messages, and the live feed.
+
+    The attempts carry their own snapshotted activity, so the panel can show
+    what every earlier attempt tried without a second request per attempt.
+    """
+    members = sorted(
+        (t for t in runner.tasks.values() if t.thread_id == thread_id),
+        key=lambda t: t.created_at,
+    )
+    if not members:
+        raise HTTPException(status_code=404, detail="no such thread")
+    return {
+        "thread_id": thread_id,
+        "attempts": [t.to_dict() for t in members],
+        "messages": [m.to_dict() for m in threads.for_thread(thread_id)],
+        "current": runner.current.to_dict() if runner.current else None,
+    }
+
+
+@app.post("/api/tasks/{task_id}/say", dependencies=[Depends(require_token)])
+async def say(task_id: str, req: SayRequest) -> dict[str, Any]:
+    """Say something to a task, whether it is running or finished.
+
+    The operator's ask was a retry that is a conversation rather than a
+    dead-end button, and the whole difficulty is that "talk to it" means two
+    different things depending on when you type:
+
+    * **still running** — steer it in place, exactly like /steer. The browser is
+      where the attempt left it, which is what makes a mid-run correction cheap.
+    * **finished** — the message becomes the next attempt's instruction, in the
+      same thread, briefed with what the earlier attempts tried.
+
+    One endpoint rather than two, because the operator should not have to know
+    which state the task is in before they can say what they mean.
+    """
+    task = runner.tasks.get(task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="no such task")
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is empty")
+    if req.kind not in ("instruction", "note"):
+        raise HTTPException(status_code=400, detail="kind must be instruction or note")
+    threads.say(task.thread_id, "operator", req.kind, text)
+
+    if task.status is TaskStatus.RUNNING:
+        runner.control.steer(text)
+        runner.activity.note("operator", f"you: {text[:200]}")
+        return {"task_id": task.id, "ran": False, "control": runner.control.to_dict()}
+
+    payload = {**task.payload, "task": text, "text": text, "goal": text}
+    nxt = runner.retry(task.id, payload=payload)
+    return {"task_id": nxt.id, "ran": True, "task": nxt.to_dict()}
 
 
 # -- login / takeover ------------------------------------------------------
