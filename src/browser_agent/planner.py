@@ -63,30 +63,34 @@ class PlannerClient:
             "Authorization": f"Bearer {self.settings.llm_api_key}",
         }
 
-    async def plan(self, task: str) -> str:
+    async def plan(self, task: str, *, prompt: str | None = None) -> str:
         """One planner call, retried once on transport failure.
+
+        ``prompt`` overrides the system message, which is how ``plan.task``'s
+        operator-editable ``planner_prompt`` reaches the model. Omitted, the
+        module literal is used, so every existing caller is unchanged.
 
         Raises PlannerUnavailable after the retry also fails — the caller
         falls back to the agent, as designed.
         """
         try:
-            return await self._plan_once(task)
+            return await self._plan_once(task, prompt=prompt)
         except PlannerUnavailable as exc:
             # An llm-service roll (deploy/restart) leaves a pod that accepts
             # the connection but never answers; seen in prod 2026-09-21, where
             # the transient skipped the whole fast path for the task. One
             # bounded retry costs at most one extra timeout, then falls back.
             log.warning("planner call failed (%s); retrying once", exc)
-            return await self._plan_once(task)
+            return await self._plan_once(task, prompt=prompt)
 
-    async def _plan_once(self, task: str) -> str:
+    async def _plan_once(self, task: str, *, prompt: str | None = None) -> str:
         if not self.enabled:
             raise PlannerUnavailable("planner is not configured (LLM_ENABLED or LLM_API_KEY)")
 
         payload = {
             "model": self.settings.planner_model,
             "messages": [
-                {"role": "system", "content": PROMPT},
+                {"role": "system", "content": prompt or PROMPT},
                 {"role": "user", "content": task},
             ],
             "temperature": 0,

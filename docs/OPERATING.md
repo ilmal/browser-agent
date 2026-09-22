@@ -177,11 +177,41 @@ Recipes are thin and will break when a site redesigns. The order of repair:
 1. The agent fallback usually still completes the task, so a broken recipe is
    not an outage — check whether tasks are landing `done` with
    `used_agent: true`.
-2. To fix the recipe: run locally with `HEADLESS=false`, watch the browser,
-   and update the selector list. Prefer `data-testid` and `aria-label`
+2. **A moved selector is no longer a deploy.** Open the roster, find the recipe,
+   press **Edit**, and correct the selector. The library is shared, so the fix
+   applies to every bot; the next run anywhere picks it up (the pod's mount
+   syncs within about a minute). Prefer `data-testid` and `aria-label`
    selectors over class names.
-3. If a site needs a genuinely different flow, add a new recipe rather than
-   growing the existing one.
+3. To watch it against the real page while editing, run locally with
+   `HEADLESS=false`.
+4. If a site needs a genuinely different flow, compose a new recipe from steps
+   on the roster rather than growing the existing one.
+
+### The recipe library
+
+Recipes live in one shared directory — a ConfigMap in the cluster, mounted
+read-only into every bot — and the roster is its only editor:
+
+* `_overrides.json` — per-recipe config (selectors, URLs, pacing, the planner
+  prompt). An override replaces one value; everything else keeps its built-in
+  default. **Revert** clears it.
+* `<name>.json` — a composed recipe: a saved step list, validated by the same
+  schema the planner emits and run by the same executor.
+
+Three things worth knowing before editing:
+
+* **It is library-wide.** One edit changes that recipe for every bot. The
+  editor says so; there is no per-bot override.
+* **A running task keeps the recipe it started with.** The steps are already
+  materialised for that attempt, so an edit lands on the *next* run.
+* **Publishing is a deployment fact.** The hub writes the ConfigMap only when
+  `RECIPES_PUBLISH` is set (it is, in the cluster). A hub without it stores the
+  edit and reports that no pod can see it yet, rather than implying it is live.
+
+The ConfigMap is deliberately **not** declared in `k8s/browser-agent.yaml`: an
+`apply` of that file would otherwise reset the operator's recipes to whatever
+the manifest says. It is mounted `optional: true`, so a cluster that never
+created it behaves exactly as it did before recipes were editable.
 
 ### Why the agent attaches over CDP
 

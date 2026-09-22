@@ -25,6 +25,32 @@ spec:
     requests:
       storage: 2Gi
 ---
+# Schedules and artifacts. Its own small claim, not an emptyDir: an emptyDir is
+# destroyed on every pod recreate, and a pod is recreated on every deploy — so
+# every schedule an operator set was being silently dropped, while the volume's
+# comment claimed it shared the profile volume (it did not).
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-x
+  namespace: browser-agent
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
+# NOTE: the recipe library (`browser-agent-recipes`) is deliberately NOT declared
+# here. Every `kubectl apply` of this file would then reset the operator's
+# recipes to whatever the manifest says — a deploy silently reverting an edit.
+# It is created once, out of band, and only ever written through the hub's API:
+#
+#   kubectl -n browser-agent create configmap browser-agent-recipes
+#
+# It is mounted `optional: true`, so a cluster without it runs exactly as this
+# code did before recipes were editable.
+---
 # NOTE: no Secret here. The control-plane token and the llm-service key are
 # created out of band and never committed — this repo is public:
 #
@@ -96,6 +122,9 @@ spec:
             - { name: AGENT_PROFILE, value: x }
             - { name: PROFILES_ROOT, value: /profiles }
             - { name: DATA_ROOT, value: /data }
+            # The operator's recipe library, as the hub writes it. Stated
+            # explicitly so the mount and the code cannot drift apart.
+            - { name: RECIPES_DIR, value: /recipes }
             - { name: NOVNC_PORT, value: "6080" }
             # Set to the public base URL when the pod is reached through a
             # reverse proxy, so the UI links it instead of a pod port. Left
@@ -192,6 +221,12 @@ spec:
           volumeMounts:
             - { name: profile, mountPath: /profiles }
             - { name: data, mountPath: /data }
+            # The operator's recipe library, read-only: the hub is its only
+            # writer. Mounted as a whole directory, never with subPath — a
+            # subPath mount never receives an update, so an edit would not reach
+            # a running pod. This is what makes a recipe change no longer a
+            # code deploy.
+            - { name: recipes, mountPath: /recipes, readOnly: true }
           readinessProbe:
             httpGet: { path: /healthz, port: api }
             initialDelaySeconds: 5
@@ -203,10 +238,14 @@ spec:
       volumes:
         - name: profile
           persistentVolumeClaim: { claimName: profile-x }
-        # Schedules + artifacts. Small, and losing it is not a disaster, so it
-        # shares the profile volume rather than getting its own claim.
         - name: data
-          emptyDir: { sizeLimit: 256Mi }
+          persistentVolumeClaim: { claimName: data-x }
+        # Optional on purpose: a cluster that never created the ConfigMap must
+        # still boot, with the built-in recipes as they were written in Python.
+        - name: recipes
+          configMap:
+            name: browser-agent-recipes
+            optional: true
 ---
 apiVersion: v1
 kind: Service

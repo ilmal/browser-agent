@@ -112,9 +112,13 @@ class FakePlanner:
         self._plan = plan
         self._fail = fail
         self.calls: list[str] = []
+        #: The system prompt each call was made with, so a test can assert the
+        #: operator's ``planner_prompt`` override reached the model.
+        self.prompts: list[str | None] = []
 
-    async def plan(self, task: str) -> str:
+    async def plan(self, task: str, *, prompt: str | None = None) -> str:
         self.calls.append(task)
+        self.prompts.append(prompt)
         if self._fail:
             raise PlannerUnavailable("planner down")
         return json.dumps(self._plan)
@@ -273,8 +277,9 @@ async def test_fenced_planner_output_is_accepted(runner_factory, site):
     assert "```" in wrapped  # the chatty-model case under test
 
     class FencedPlanner(FakePlanner):
-        async def plan(self, task: str) -> str:
+        async def plan(self, task: str, *, prompt: str | None = None) -> str:
             self.calls.append(task)
+            self.prompts.append(prompt)
             return wrapped
 
     runner = make(planner=FencedPlanner(plan_dict), laya=FakeLaya())

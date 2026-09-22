@@ -98,6 +98,57 @@
   .alert.bad { border-color: var(--bad); background: #2a1618; color: #f0b8bc; }
   .alert.ok { border-color: var(--ok); background: #14261f; color: #a8e6cd; }
   .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok); display: inline-block; }
+
+  /* ---- recipe library ---- */
+  /* A dialog, not a fourth card in the column: a recipe's editable surface is a
+     dozen fields and one of them is a 40-line prompt, so rendered inline it
+     would push the bot list off the first screen — and the bot list is what the
+     operator came for. */
+  .modal { position: fixed; inset: 0; background: rgba(6,6,10,.62); z-index: 40;
+    display: flex; align-items: flex-start; justify-content: center; padding: 4vh 16px; overflow: auto; }
+  .sheet { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 18px; width: 100%; max-width: 720px; min-width: 0; }
+  .sheet .row.head { margin-bottom: 4px; }
+  .sheet .row.head .name { font-weight: 600; font-size: 15px; font-family: ui-monospace, monospace; }
+
+  .rl { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
+  .rc { background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px;
+    padding: 12px; display: flex; flex-direction: column; gap: 7px; min-width: 0; }
+  .rc .nm { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; min-width: 0; }
+  .rc .nm code { font-size: 13px; overflow-wrap: anywhere; }
+  .rc .desc { font-size: 12px; color: var(--dim); overflow-wrap: anywhere; }
+  .rc .acts { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
+  .rc .acts button { padding: 6px 11px; font-size: 12px; }
+  /* An override is a divergence from what shipped, and one bad override breaks
+     the recipe for EVERY bot — so it is marked, not just quietly applied. */
+  .pill.over { color: var(--warn); border-color: #55491f; }
+  .pill.stored { color: var(--accent); border-color: #2a3d5c; }
+
+  .fields { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; margin-top: 6px; }
+  .field { border-top: 1px solid var(--line); padding: 10px 0 4px; min-width: 0; }
+  .field .head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+  .field .key { font-size: 12px; font-family: ui-monospace, monospace; color: var(--text); }
+  .field .def { font-size: 11px; color: var(--dim); overflow-wrap: anywhere; }
+  .field input, .field textarea { margin-top: 5px; font-family: ui-monospace, monospace; font-size: 12px; }
+  /* Every field in a built-in has a working default, so "go back to it" must be
+     possible — otherwise the first edit is one-way. */
+  .field button.reset { margin-top: 5px; padding: 4px 9px; font-size: 11px; }
+
+  /* The step composer. Four columns because a step IS four things; they wrap to
+     one column on a phone. */
+  .step { display: grid; grid-template-columns: 104px minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) 30px;
+    gap: 7px; align-items: start; margin-bottom: 7px; min-width: 0; }
+  .step select { width: 100%; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 7px; padding: 8px 6px; font: inherit; font-size: 12px; }
+  .step input { margin: 0; }
+  .step .kill { background: transparent; border: 1px solid var(--line); color: var(--dim);
+    border-radius: 7px; padding: 8px 0; font-size: 14px; line-height: 1; }
+  .step .kill:hover { color: var(--bad); border-color: #55292d; }
+  @media (max-width: 700px) {
+    .step { grid-template-columns: minmax(0,1fr); }
+    .step .kill { padding: 6px; }
+  }
+  .hint { font-size: 11px; color: var(--dim); margin: 6px 0 0; overflow-wrap: anywhere; }
 </style>
 </head>
 <body>
@@ -146,7 +197,25 @@
     </div>
     <div id="bots" class="bots"><div class="empty">Loading…</div></div>
   </section>
+
+  <section id="sec-recipes">
+    <h2>Recipe library</h2>
+    <p class="sub">
+      What your bots can be asked to do. <b>This library is shared by every bot</b> —
+      editing a recipe changes it everywhere, and a run already under way keeps the
+      recipe it started with. A recipe with no overrides runs exactly as shipped.
+    </p>
+    <div id="recipe-err"></div>
+    <div class="row" style="margin-bottom:12px">
+      <button class="ghost" id="new-recipe">+ New recipe</button>
+    </div>
+    <div id="recipes" class="rl"><div class="empty">Loading…</div></div>
+  </section>
 </main>
+
+<div id="dialog" class="modal hidden"></div>
+
+<div id="dialog" class="modal hidden"></div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -332,7 +401,302 @@ document.addEventListener("click", async (ev) => {
     } catch (e) { banner("bad", "Could not save: " + esc(e.message)); }
     finally { t.disabled = false; }
   }
+
+  // ---- recipe library ----
+  if (t.id === "new-recipe") { openComposer(); return; }
+  if (t.id === "add-step") { $("steps").insertAdjacentHTML("beforeend", stepRow()); return; }
+  if (t.dataset.kill) {
+    const row = t.closest(".step");
+    // Never remove the last one: an empty composer looks broken rather than
+    // "add a step", and the operator just deleted the thing they were editing.
+    if ($("steps").querySelectorAll(".step").length > 1) row.remove();
+    return;
+  }
+  if (t.dataset.close) { closeDialog(); return; }
+  if (t.dataset.open) {
+    const r = lib && lib.recipes.find(x => x.name === t.dataset.open);
+    if (!r) return;
+    // A composed recipe is edited by restating its steps; a built-in by setting
+    // overrides against its existing config. Two editors, because they are
+    // genuinely two different things.
+    if (r.origin === "stored") openComposer(r);
+    else openBuiltin(r);
+    return;
+  }
+  if (t.dataset.saveConfig) {
+    const name = t.dataset.saveConfig;
+    const values = collectConfig(name);
+    if (!Object.keys(values).length) {
+      $("dlg-why").textContent = "nothing changed";
+      return;
+    }
+    t.disabled = true; $("dlg-why").textContent = "saving…";
+    try {
+      const res = await api("/api/recipes/" + encodeURIComponent(name) + "/config",
+        { method: "PUT", body: JSON.stringify({ values }) });
+      closeDialog();
+      await loadLibrary();
+      showPublishNote(res);
+    } catch (e) { $("dlg-why").textContent = e.message; }
+    finally { t.disabled = false; }
+    return;
+  }
+  if (t.dataset.saveSteps) {
+    const spec = draftRecipe();
+    if (!spec.name) { $("c-err").innerHTML = `<div class="alert bad">A name is required.</div>`; return; }
+    if (!spec.steps.length) { $("c-err").innerHTML = `<div class="alert bad">Add at least one step.</div>`; return; }
+    t.disabled = true;
+    // Validated on the server first so the operator sees the real reason — the
+    // same check the pod will run, rather than a second guess at it here.
+    try {
+      const check = await api("/api/recipes/validate", { method: "POST", body: JSON.stringify(spec) });
+      if (!check.ok) {
+        $("c-err").innerHTML = `<div class="alert bad">${esc(check.error)}</div>`;
+        return;
+      }
+      const res = await api("/api/recipes", { method: "POST", body: JSON.stringify(spec) });
+      closeDialog();
+      await loadLibrary();
+      showPublishNote(res);
+    } catch (e) {
+      $("c-err").innerHTML = `<div class="alert bad">${esc(e.message)}</div>`;
+    } finally { t.disabled = false; }
+    return;
+  }
+  if (t.dataset.drop) {
+    const name = t.dataset.drop;
+    const ok = confirm(
+      `Revert "${name}"?\n\n` +
+      (lib && lib.recipes.find(x => x.name === name)?.origin === "stored"
+        ? "The recipe is removed from the library. Every bot stops offering it."
+        : "Its edits are cleared and it goes back to exactly how it shipped.") +
+      "\n\nThis affects every bot."
+    );
+    if (!ok) return;
+    t.disabled = true;
+    try {
+      const res = await api("/api/recipes/" + encodeURIComponent(name), { method: "DELETE" });
+      closeDialog();
+      await loadLibrary();
+      showPublishNote(res);
+    } catch (e) { banner("bad", "Could not revert: " + esc(e.message)); }
+    finally { t.disabled = false; }
+    return;
+  }
 });
+
+// ---- recipe library ----------------------------------------------------------
+
+let lib = null;          // GET /api/recipes, cached so render is synchronous
+const draft = {};        // field key -> the value the operator typed in the sheet
+
+function originPill(r) {
+  if (r.origin === "stored") return `<span class="pill stored">composed</span>`;
+  if (Object.keys(r.overrides || {}).length) return `<span class="pill over">edited</span>`;
+  return `<span class="pill">as shipped</span>`;
+}
+
+function recipeCard(r) {
+  // Two kinds of thing are editable: a composed recipe (its steps) and a
+  // built-in with exposed config. agent.task is neither — it is the freeform
+  // path and takes its only input from the task — so it says so rather than
+  // opening an empty sheet.
+  const composed = r.origin === "stored";
+  const editable = composed || r.overridable.length > 0;
+  return `<div class="rc">
+    <div class="nm"><code>${esc(r.name)}</code>${originPill(r)}</div>
+    <div class="desc">${esc(r.description)}</div>
+    <div class="acts">
+      ${editable
+        ? `<button class="ghost" data-open="${esc(r.name)}">Edit</button>`
+        : `<span class="muted">not configurable — its input is the task itself</span>`}
+      ${composed || Object.keys(r.overrides || {}).length
+        ? `<button class="ghost danger" data-drop="${esc(r.name)}">Revert</button>` : ""}
+    </div>
+  </div>`;
+}
+
+function renderLibrary() {
+  if (!lib) return;
+  $("recipe-err").innerHTML = (lib.errors || []).length
+    ? `<div class="alert bad">These files could not be loaded and are being skipped:
+        ${esc(lib.errors.join("; "))}</div>`
+    : "";
+  set("recipes", lib.recipes.length
+    ? lib.recipes.map(recipeCard).join("")
+    : `<div class="empty">No recipes.</div>`);
+}
+
+async function loadLibrary() {
+  lib = await api("/api/recipes");
+  renderLibrary();
+}
+
+// One editable field per overridable key. The default is shown, not assumed:
+// an operator overriding a selector needs to see what it was.
+function fieldHtml(recipe, key) {
+  const r = lib.recipes.find(x => x.name === recipe) || {};
+  const value = draft[recipe + "\u0000" + key];
+  const shown = value !== undefined ? value : (r.overrides || {})[key];
+  const def = (r.defaults || {})[key];
+  const isList = Array.isArray(def) || (shown !== undefined && Array.isArray(shown));
+  const id = `f-${recipe}-${key}`.replace(/[^A-Za-z0-9-]/g, "_");
+  const hint = def === undefined ? "" :
+    `<div class="def">default: <code>${esc(JSON.stringify(def)).slice(0, 200)}</code></div>`;
+  const input = isList
+    ? `<textarea id="${esc(id)}" data-field="${esc(recipe)}" data-key="${esc(key)}"
+         placeholder="one selector per line">${esc((shown || []).join("\n"))}</textarea>`
+    : `<input id="${esc(id)}" data-field="${esc(recipe)}" data-key="${esc(key)}"
+         value="${esc(typeof shown === "string" ? shown : (shown ?? ""))}">`;
+  return `<div class="field">
+    <div class="head"><span class="key">${esc(key)}</span></div>
+    ${hint}${input}
+  </div>`;
+}
+
+function openBuiltin(r) {
+  const changed = Object.keys(r.overrides || {});
+  $("dialog").innerHTML = `<div class="sheet">
+    <div class="row head">
+      <span class="name">${esc(r.name)}</span>
+      <span class="spacer"></span>${originPill(r)}
+    </div>
+    <p class="sub">${esc(r.description)}</p>
+    <div class="alert">Changing this recipe changes it for <b>every bot</b>, and
+      the next run of it anywhere picks it up. Runs already going are unaffected.</div>
+    <div class="fields">${r.overridable.map(k => fieldHtml(r.name, k)).join("")}</div>
+    <div class="row end" style="margin-top:16px">
+      <span class="muted" id="dlg-why"></span>
+      <button class="ghost" data-close="1">Cancel</button>
+      ${changed.length ? `<button class="ghost danger" data-drop="${esc(r.name)}">Revert all</button>` : ""}
+      <button data-save-config="${esc(r.name)}">Save</button>
+    </div>
+  </div>`;
+  $("dialog").classList.remove("hidden");
+}
+
+// The step composer. Actions are the five the executor knows and nothing else —
+// this is a config surface, not a scripting language.
+//
+// `done_when` is not offered here, but a step loaded from the library may carry
+// one — so it is held in a data attribute and carried back out untouched. An
+// edit to the goal must not quietly delete the step's proof of success.
+function stepRow(action = "click", goal = "", selector = "", text = "", doneWhen = null) {
+  const opts = lib.actions.map(a =>
+    `<option${a === action ? " selected" : ""}>${esc(a)}</option>`).join("");
+  const held = doneWhen ? ` data-done="${esc(JSON.stringify(doneWhen))}"` : "";
+  return `<div class="step"${held}>
+    <select data-saction>${opts}</select>
+    <input data-sgoal placeholder="what this step is for" value="${esc(goal)}">
+    <input data-ssel placeholder="CSS selector" value="${esc(selector)}">
+    <input data-stext placeholder="text / URL" value="${esc(text)}">
+    <button class="kill" data-kill="1" title="remove this step">&times;</button>
+  </div>`;
+}
+
+function openComposer(existing) {
+  const isNew = !existing;
+  const steps = isNew ? [{ action: "navigate", goal: "open the site", selector: "", text: "" }]
+                      : existing.steps;
+  $("dialog").innerHTML = `<div class="sheet">
+    <div class="row head"><span class="name">${isNew ? "New recipe" : esc(existing.name)}</span></div>
+    <p class="sub">A recipe made of steps. Each step names a selector, so this runs
+      the same way every time — no model guessing at the page.</p>
+    <label for="r-name">Name</label>
+    <input id="r-name" placeholder="my-scrape" autocapitalize="off" autocorrect="off"
+      ${isNew ? "" : "disabled"} value="${isNew ? "" : esc(existing.name)}">
+    <div class="hint">lowercase letters, digits, dashes and dots. This is how you and
+      your bots refer to it${isNew ? ", so it cannot be changed later" : " — the name is fixed"}.</div>
+    <label for="r-desc">What it does</label>
+    <input id="r-desc" placeholder="Search example.com and read the result titles"
+      value="${isNew ? "" : esc(existing.description)}">
+    <label for="r-url">Start URL</label>
+    <input id="r-url" placeholder="https://example.com" value="${isNew ? "" : esc(existing.entry_url)}">
+    <label>Steps</label>
+    <div id="steps"></div>
+    <div class="row"><button class="ghost" id="add-step">+ Add step</button></div>
+    <div class="hint">click and type need a selector. extract and wait read the page;
+      navigate goes to a URL given as the text.</div>
+    <div id="c-err"></div>
+    <div class="row end" style="margin-top:16px">
+      <button class="ghost" data-close="1">Cancel</button>
+      <button data-save-steps="1">Save recipe</button>
+    </div>
+  </div>`;
+  $("steps").innerHTML = steps.map(s =>
+    stepRow(s.action, s.goal || "", s.selector || "", s.text || "", s.done_when)).join("");
+  $("dialog").classList.remove("hidden");
+  if (isNew) $("r-name").focus();
+}
+
+function closeDialog() {
+  $("dialog").classList.add("hidden");
+  $("dialog").innerHTML = "";
+}
+
+// What the operator typed, gathered into the shape the API wants. A textarea is
+// a list of selectors, one per line — an input is a plain value.
+function collectConfig(recipe) {
+  const values = {};
+  for (const el of $("dialog").querySelectorAll("[data-field]")) {
+    if (el.dataset.field !== recipe) continue;
+    const key = el.dataset.key;
+    const r = lib.recipes.find(x => x.name === recipe) || {};
+    const def = (r.defaults || {})[key];
+    const raw = el.value;
+    if (Array.isArray(def) || key.startsWith("selectors.")) {
+      values[key] = raw.split("\n").map(s => s.trim()).filter(Boolean);
+    } else if (typeof def === "number" || key.startsWith("pace.") || key === "max_chars"
+               || key === "max_clicks") {
+      const n = parseInt(raw, 10);
+      if (!raw.trim() || isNaN(n)) continue;      // blank means "leave it alone"
+      values[key] = n;
+    } else if (raw.trim()) {
+      values[key] = raw.trim();
+    }
+  }
+  return values;
+}
+
+function collectSteps() {
+  const out = [];
+  for (const el of $("steps").querySelectorAll(".step")) {
+    const step = {
+      action: el.querySelector("[data-saction]").value,
+      goal: (el.querySelector("[data-sgoal]").value || "").trim(),
+      selector: (el.querySelector("[data-ssel]").value || "").trim() || null,
+      text: (el.querySelector("[data-stext]").value || "").trim() || null,
+    };
+    if (el.dataset.done) {
+      try { step.done_when = JSON.parse(el.dataset.done); } catch (e) {}
+    }
+    out.push(step);
+  }
+  return out;
+}
+
+function draftRecipe() {
+  // `.value` on a disabled input still reads back what is in it, which is what
+  // makes editing an existing recipe work without a second code path: its name
+  // is shown, fixed, and carried through unchanged.
+  return {
+    name: ($("r-name").value || "").trim().toLowerCase(),
+    description: ($("r-desc").value || "").trim(),
+    entry_url: ($("r-url").value || "").trim(),
+    steps: collectSteps().filter(s => s.action),
+  };
+}
+
+function showPublishNote(res) {
+  // A write is stored either way; `published` is whether the pods can see it yet.
+  // Saying nothing here would imply the edit is live everywhere, which is the
+  // one thing the operator must not be misled about.
+  if (res && res.published === false && res.publish_error) {
+    banner("warn", `Saved. It is not visible to your bots yet: ${esc(res.publish_error)}`);
+  } else {
+    banner("ok", "Saved. Every bot picks it up on its next run.");
+  }
+}
 
 // Keep the roster honest without hammering the pods: this is a light poll of
 // one cheap endpoint per bot, and it stops entirely when the tab is hidden.
@@ -352,6 +716,9 @@ async function poll() {
 }
 setInterval(poll, 8000);
 refresh();
+// The library does not poll: it changes when the operator changes it, and a
+// 8-second re-render would fight the editor as they type.
+loadLibrary().catch(e => set("recipes", `<div class="empty">${esc(e.message)}</div>`));
 </script>
 </body>
 </html>

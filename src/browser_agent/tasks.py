@@ -104,23 +104,92 @@ def _task_text(task: Task) -> str:
 
 _REGISTRY: dict[str, Recipe] = {}
 
+#: Names registered by importing the built-in recipe modules, in registration
+#: order. Everything else in the registry came from the operator's library, and
+#: the split is what gives ``list_recipes`` an honest ``origin``.
+_BUILTIN_NAMES: set[str] = set()
+
+#: Names this process installed *from* the operator's library. Tracked rather
+#: than inferred as "every name that is not a built-in": a recipe registered
+#: directly through ``register()`` — a test double, an embedding caller — is
+#: nobody's to forget, and inferring would delete it on the next library read.
+_STORED_NAMES: set[str] = set()
+
 
 def register(recipe: Recipe) -> Recipe:
     _REGISTRY[recipe.name] = recipe
     return recipe
 
 
+def register_builtin(recipe: Recipe) -> Recipe:
+    _BUILTIN_NAMES.add(recipe.name)
+    return register(recipe)
+
+
 def get_recipe(name: str) -> Recipe:
+    _load_library()
     if name not in _REGISTRY:
         raise KeyError(f"unknown recipe {name!r}; have {sorted(_REGISTRY)}")
     return _REGISTRY[name]
 
 
 def list_recipes() -> list[dict[str, str]]:
+    _load_library()
     return [
-        {"name": r.name, "description": r.description, "entry_url": r.entry_url}
+        {
+            "name": r.name,
+            "description": r.description,
+            "entry_url": r.entry_url,
+            "origin": "stored" if r.name in _STORED_NAMES else "builtin",
+        }
         for r in _REGISTRY.values()
     ]
+
+
+def _load_library() -> None:
+    """Install the operator's recipes into this registry, once per change.
+
+    Imported here rather than at module scope on purpose: ``recipes.stored`` and
+    ``recipe_store`` both import *this* module, so a top-level import would be a
+    cycle. The library's own loader is idempotent and swallows a malformed file,
+    which matters because this runs under a request and, at boot, under the
+    process that serves the control plane.
+    """
+    try:
+        from .recipes.stored import load_stored_recipes
+
+        load_stored_recipes()
+    except Exception:  # a broken library must never cost us the registry
+        log.exception("could not load the recipe library")
+
+
+def install_stored(spec: dict) -> Recipe:
+    """Register (or refresh) one stored recipe from an already-validated spec."""
+    from .recipes.stored import StoredRecipe
+
+    existing = _REGISTRY.get(spec["name"])
+    if isinstance(existing, StoredRecipe):
+        existing.replace(spec)
+        _STORED_NAMES.add(spec["name"])
+        return existing
+    recipe = StoredRecipe(spec)
+    _REGISTRY[recipe.name] = recipe
+    _STORED_NAMES.add(recipe.name)
+    return recipe
+
+
+def stored_recipe_names() -> set[str]:
+    """Names this process installed from the operator's library."""
+    return set(_STORED_NAMES)
+
+
+def forget_recipe(name: str) -> bool:
+    """Drop a stored recipe, so deleting it from the library takes effect."""
+    if name not in _STORED_NAMES or name not in _REGISTRY:
+        return False
+    _STORED_NAMES.discard(name)
+    del _REGISTRY[name]
+    return True
 
 
 AgentRunner = Callable[[BrowserSession, str, dict[str, Any]], Awaitable[dict[str, Any]]]

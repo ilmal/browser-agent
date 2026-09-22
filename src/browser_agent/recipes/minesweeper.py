@@ -36,13 +36,18 @@ from ..minesweeper_dom import (
     start_beginner,
 )
 from ..minesweeper_solver import Move
-from ..tasks import register
+from ..tasks import register_builtin
+from ._config import cfg
 
 log = logging.getLogger(__name__)
 
 #: Boards to play before returning. One game proves the loop; more than a
 #: couple is exactly the interaction volume the site bans for.
 DEFAULT_GAMES = 1
+
+#: The board's URL. Overridable because minesweeper.online moves its entry path
+#: between game modes, and a moved URL must not be a code deploy.
+DEFAULT_ENTRY_URL = "https://minesweeper.online/new-game"
 
 #: A ceiling on clicks per game, so a solver bug cannot turn into a click storm.
 #: A Beginner board needs ~40; 200 is generous headroom, not a target.
@@ -56,7 +61,6 @@ _MAX_TIEBREAK_CANDIDATES = 3
 class Minesweeper:
     name = "minesweeper.play"
     description = "Play a full Beginner game of minesweeper.online to a win, solver-driven."
-    entry_url = "https://minesweeper.online/new-game"
 
     def __init__(self, laya: LayaGate | None = None, settings: Any = None,
                  pace: Pace | None = None) -> None:
@@ -64,11 +68,32 @@ class Minesweeper:
         # Constructed lazily-but-once, like plan.task: importing the module must
         # not build a model client, but a run should reuse one gate.
         self._laya = laya if laya is not None else LayaGate(self._settings)
-        self._pace = pace if pace is not None else Pace()
+        self._base_pace = pace if pace is not None else Pace()
+
+    @property
+    def entry_url(self) -> str:
+        return cfg("minesweeper.play", "entry_url", DEFAULT_ENTRY_URL)
+
+    @property
+    def _pace(self) -> Pace:
+        """The pacing, with the operator's overrides applied over the defaults.
+
+        The gap is what the site's ban heuristics actually look at, so it is the
+        one lever worth exposing — and with nothing overridden it is the exact
+        ``Pace`` the recipe has always used.
+        """
+        return Pace(
+            min_ms=cfg("minesweeper.play", "pace.min_ms", self._base_pace.min_ms),
+            max_ms=cfg("minesweeper.play", "pace.max_ms", self._base_pace.max_ms),
+            hover_ms=self._base_pace.hover_ms,
+            jitter_px=self._base_pace.jitter_px,
+            move_steps=self._base_pace.move_steps,
+        )
 
     async def run(self, session: BrowserSession, payload: dict[str, Any]) -> dict[str, Any]:
         games = int(payload.get("games") or DEFAULT_GAMES)
         games = max(1, min(games, 3))
+        max_clicks = cfg("minesweeper.play", "max_clicks", MAX_CLICKS_PER_GAME)
         log_ = activity_of(session)
 
         page = await session.page()
@@ -76,7 +101,7 @@ class Minesweeper:
 
         for game_no in range(1, games + 1):
             log_.note("info", f"game {game_no}/{games}: starting a Beginner board")
-            view = await start_beginner(page)
+            view = await start_beginner(page, url=self.entry_url)
 
             if view.blocked:
                 # The IP block is app-side and arrives after boot. Retrying is
@@ -93,7 +118,7 @@ class Minesweeper:
                     f"browser's user agent and the egress"
                 )
 
-            results.append(await self._play_game(page, view, log_, game_no))
+            results.append(await self._play_game(page, view, log_, game_no, max_clicks))
 
             if results[-1]["outcome"] == "lost":
                 # A loss is a legitimate outcome, but playing on after one
@@ -105,7 +130,8 @@ class Minesweeper:
         return {"games": results, "wins": wins}
 
     async def _play_game(
-        self, page: Any, view: GameView, log_: Any, game_no: int
+        self, page: Any, view: GameView, log_: Any, game_no: int,
+        max_clicks: int = MAX_CLICKS_PER_GAME,
     ) -> dict[str, Any]:
         clicks = 0
         guesses = 0
@@ -115,7 +141,7 @@ class Minesweeper:
         # losing, so it is played without ceremony.
         first_press = True
 
-        while clicks < MAX_CLICKS_PER_GAME:
+        while clicks < max_clicks:
             if view.won:
                 log_.note("step", f"game {game_no}: won in {clicks} clicks")
                 return {"outcome": "won", "clicks": clicks, "guesses": guesses,
@@ -161,7 +187,7 @@ class Minesweeper:
             # solver's model if the read is interrupted.
             ordered = sorted(moves, key=lambda m: 0 if m.kind == "flag" else 1)
             for move in ordered:
-                if clicks >= MAX_CLICKS_PER_GAME:
+                if clicks >= max_clicks:
                     break
                 await click_cell(page, move.row, move.col,
                                  pace=self._pace, flag=move.kind == "flag")
@@ -228,4 +254,4 @@ class Minesweeper:
         return Move("open", r, c, f"laya tiebreak (conf {conf:.2f})"), True
 
 
-register(Minesweeper())
+register_builtin(Minesweeper())

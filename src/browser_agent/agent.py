@@ -30,7 +30,7 @@ Goal: {goal}
 Starting page: {url}
 
 Context: {payload}
-
+{history}
 Rules you must follow:
 - If you see a captcha, an SMS/email code prompt, an "unusual activity" or
   "verify it's you" warning, or you are asked to confirm your identity, STOP
@@ -164,10 +164,18 @@ def make_agent_runner(settings: Settings):
         Agent, Browser, ChatOpenAI = _load_browser_use()
 
         goal = payload.get("goal") or payload.get("text") or "Complete the task"
+        # The runner's thread briefing, when this is a retry: what the earlier
+        # attempts tried and why they stopped. Its own section, and out of the
+        # generic dump — a repr of the raw list would be worse than useless.
+        history = str(payload.get("history") or "").strip()
         task_prompt = _TASK_TEMPLATE.format(
             goal=goal,
             url=url,
-            payload={k: v for k, v in payload.items() if k not in {"goal", "text"}},
+            history=f"\n{history}\n" if history else "",
+            payload={
+                k: v for k, v in payload.items()
+                if k not in {"goal", "text", "history", "entry_url"}
+            },
         )
 
         # Attach to the browser the recipe was already using rather than

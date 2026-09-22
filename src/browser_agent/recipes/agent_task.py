@@ -15,7 +15,7 @@ from __future__ import annotations
 from typing import Any
 
 from ..browser import BrowserSession
-from ..tasks import AGENT_RECIPE, register
+from ..tasks import AGENT_RECIPE, register_builtin
 
 
 class AgentTask:
@@ -32,4 +32,4 @@ class AgentTask:
         raise RuntimeError("agent.task must be routed by the runner, not run directly")
 
 
-register(AgentTask())
+register_builtin(AgentTask())

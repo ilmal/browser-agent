@@ -9,6 +9,7 @@ those looks fine on the page and is wrong in a way only the operator notices.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import sys
 from pathlib import Path
@@ -148,12 +149,16 @@ def hub_env(tmp_path: Path, monkeypatch):
     monkeypatch.setenv("PROFILES_ROOT", str(tmp_path / "profiles"))
     monkeypatch.setenv("CONTROL_TOKEN", "test-token")
     monkeypatch.setenv("BOT_PROBE_TIMEOUT_S", "0.2")
+    # The recipe library the hub writes for every bot to read. A fresh one per
+    # test, so an edit in one test cannot be seen by the next.
+    monkeypatch.setenv("RECIPES_DIR", str(tmp_path / "recipes"))
 
     import importlib
 
-    from browser_agent import config, hub
+    from browser_agent import config, hub, recipe_store
 
     importlib.reload(config)
+    importlib.reload(recipe_store)
     importlib.reload(hub)
     return hub
 
@@ -525,3 +530,261 @@ def test_the_live_view_url_tells_novnc_where_its_socket_is(bot_env):
     assert "path=b/${esc(profile)}/websockify" in html
     # No bare vnc.html links left on the roster: those are the ones that hang.
     assert 'href="${esc(url)}vnc.html"' not in html
+
+
+# ---- the recipe library -----------------------------------------------------
+#
+# The hub is the library's only writer, and every bot reads what it writes, so
+# the tests that matter are the refusals: a recipe the pods could not run must
+# never reach the ConfigMap. Each of these asserts a 400 with the reason, not
+# just a status code.
+
+_STEP_RECIPE = {
+    "name": "my-scrape",
+    "description": "Search and read the results",
+    "entry_url": "https://example.com",
+    "steps": [
+        {"action": "navigate", "goal": "open the site", "text": "https://example.com"},
+        {"action": "click", "goal": "run the search", "selector": "button.go"},
+    ],
+}
+
+
+def _hub_token() -> dict[str, str]:
+    return {"Authorization": "Bearer test-token"}
+
+
+def test_the_library_lists_every_recipe_with_its_origin(hub_env):
+    from fastapi.testclient import TestClient
+
+    with TestClient(hub_env.app) as client:
+        body = client.get("/api/recipes", headers=_hub_token()).json()
+
+    names = {r["name"]: r for r in body["recipes"]}
+    assert {"x.post", "plan.task", "agent.task"} <= set(names)
+    assert names["x.post"]["origin"] == "builtin"
+    assert names["x.post"]["overridable"]
+    assert names["agent.task"]["overridable"] == []
+    # The editor needs the vocabulary the pods will accept.
+    assert body["actions"] == ["navigate", "click", "type", "extract", "wait"]
+    assert body["errors"] == []
+
+
+def test_a_recipe_is_validated_before_it_is_stored(hub_env, tmp_path):
+    from fastapi.testclient import TestClient
+
+    with TestClient(hub_env.app) as client:
+        assert client.post(
+            "/api/recipes/validate", json=_STEP_RECIPE, headers=_hub_token()
+        ).json()["ok"] is True
+
+        bad = {**_STEP_RECIPE, "steps": [{"action": "click", "goal": "press it"}]}
+        refused = client.post("/api/recipes/validate", json=bad, headers=_hub_token()).json()
+        assert refused["ok"] is False
+        assert "needs a `selector`" in refused["error"]
+
+        # And the same gate is what a save goes through: nothing reached disk.
+        assert client.post("/api/recipes", json=bad, headers=_hub_token()).status_code == 400
+        assert not (tmp_path / "recipes" / "my-scrape.json").exists()
+
+
+def test_a_reserved_name_cannot_be_saved_over(hub_env):
+    from fastapi.testclient import TestClient
+
+    with TestClient(hub_env.app) as client:
+        res = client.post(
+            "/api/recipes", json={**_STEP_RECIPE, "name": "plan.task"}, headers=_hub_token()
+        )
+        assert res.status_code == 400
+        assert "reserved" in res.json()["detail"]
+
+
+def test_saving_and_deleting_a_recipe_round_trips(hub_env, tmp_path):
+    from fastapi.testclient import TestClient
+
+    with TestClient(hub_env.app) as client:
+        assert client.post("/api/recipes", json=_STEP_RECIPE, headers=_hub_token()).status_code == 200
+        assert (tmp_path / "recipes" / "my-scrape.json").is_file()
+
+        listed = {r["name"]: r for r in client.get("/api/recipes", headers=_hub_token()).json()["recipes"]}
+        assert listed["my-scrape"]["origin"] == "stored"
+        assert len(listed["my-scrape"]["steps"]) == 2
+
+        removed = client.request(
+            "DELETE", "/api/recipes/my-scrape", headers=_hub_token()
+        ).json()
+        assert removed["ok"] is True
+        assert removed["removed"] == "my-scrape"
+        assert removed["kind"] == "stored"
+        # No cluster here, so the removal is on the hub and nowhere else — and
+        # the answer says so instead of implying every bot already agrees.
+        assert removed["published"] is False
+        assert removed["publish_error"]
+        assert not (tmp_path / "recipes" / "my-scrape.json").exists()
+
+    # Deleting something that was never there is a 404, not a silent success.
+    with TestClient(hub_env.app) as client:
+        assert client.request(
+            "DELETE", "/api/recipes/my-scrape", headers=_hub_token()
+        ).status_code == 404
+
+
+def test_an_unknown_config_key_is_refused(hub_env, tmp_path):
+    from fastapi.testclient import TestClient
+
+    with TestClient(hub_env.app) as client:
+        res = client.put(
+            "/api/recipes/x.post/config",
+            json={"values": {"no.such.key": 1}},
+            headers=_hub_token(),
+        )
+        assert res.status_code == 400
+        assert "not an overridable key" in res.json()["detail"]
+
+        ok = client.put(
+            "/api/recipes/x.post/config",
+            json={"values": {"selectors.submit": ["button.new"]}},
+            headers=_hub_token(),
+        ).json()
+        assert ok["overrides"] == {"selectors.submit": ["button.new"]}
+
+    # The override lands in the one file every pod mounts.
+    stored = json.loads((tmp_path / "recipes" / "_overrides.json").read_text())
+    assert stored == {"x.post": {"selectors.submit": ["button.new"]}}
+
+
+def test_every_overridable_key_has_a_default_to_show(hub_env):
+    """The editor renders a field per overridable key, with its default beside it.
+
+    An override only means something against a default, so a key with no default
+    is a field the operator cannot reason about — and one the recipe would never
+    consult anyway, since cfg() falls back to a literal in Python. This pins the
+    two lists together: the closed key list and the values read off the modules
+    must not drift apart in either direction.
+    """
+    from fastapi.testclient import TestClient
+
+    with TestClient(hub_env.app) as client:
+        body = client.get("/api/recipes", headers=_hub_token()).json()
+
+    assert body["actions"], "the composer needs the step vocabulary"
+    for r in body["recipes"]:
+        keys = set(r["overridable"])
+        if not keys:
+            # agent.task: the freeform path, whose only input is the task text.
+            assert not r["defaults"], f"{r['name']} exposes no keys but has defaults"
+            continue
+        missing = keys - set(r["defaults"])
+        assert not missing, f"{r['name']} offers {sorted(missing)} with no default to show"
+        extra = set(r["defaults"]) - keys
+        assert not extra, f"{r['name']} has defaults for unofferable keys: {sorted(extra)}"
+        # A default is what the recipe falls back to, so it is never null.
+        assert all(v is not None for v in r["defaults"].values())
+
+
+def test_a_composed_recipe_is_offered_back_for_editing(hub_env, tmp_path):
+    """Composing one and reopening it must show the same steps.
+
+    The composer edits a stored recipe by restating its steps, so the round trip
+    has to be lossless — a step that came back different would be a silent edit
+    the operator never made.
+    """
+    from fastapi.testclient import TestClient
+
+    spec = {
+        "name": "my-scrape",
+        "description": "read the results",
+        "entry_url": "https://example.com",
+        "steps": [
+            {"action": "navigate", "goal": "open it", "text": "https://example.com"},
+            {"action": "extract", "goal": "read them", "selector": ".result",
+             "done_when": {"selector_visible": ".result"}},
+        ],
+    }
+    with TestClient(hub_env.app) as client:
+        assert client.post("/api/recipes", json=spec, headers=_hub_token()).status_code == 200
+        listed = {r["name"]: r for r in client.get("/api/recipes", headers=_hub_token()).json()["recipes"]}
+
+    got = listed["my-scrape"]
+    assert got["origin"] == "stored"
+    steps = got["steps"]
+    assert [(s.get("action"), s.get("goal"), s.get("selector"), s.get("text")) for s in steps] == [
+        ("navigate", "open it", None, "https://example.com"),
+        ("extract", "read them", ".result", None),
+    ], "a step came back changed"
+    # done_when is carried, not dropped: it is the step's proof of success, and
+    # the composer does not offer it, so a round trip is the only thing that can
+    # preserve it. The schema fills its absent options with None; the content is
+    # what matters.
+    assert steps[1]["done_when"]["selector_visible"] == ".result"
+    # A composed recipe is edited as steps, not as config, so it exposes no keys.
+    assert got["overridable"] == []
+
+
+def test_the_library_lives_where_the_pods_mount_it(hub_env, tmp_path: Path):
+    """A hub writing anywhere else is a library no bot can see.
+
+    The same path is the ConfigMap's mount in every pod, so this pins the hub
+    and the manifests to one location.
+    """
+    assert hub_env.settings.recipes_dir == tmp_path / "recipes"
+
+
+def test_a_write_is_not_published_unless_the_cluster_is_configured(hub_env, monkeypatch):
+    """A hub with no cluster must not reach for one.
+
+    Publishing is off unless RECIPES_PUBLISH is set, which is what keeps a hub
+    run from a laptop — or a test — from writing to whatever kubectl happens to
+    be pointed at. The edit is still stored; ``published`` says it is not live.
+    """
+    from fastapi.testclient import TestClient
+
+    assert hub_env.settings.recipes_publish is False
+    with TestClient(hub_env.app) as client:
+        body = client.post("/api/recipes", json=_STEP_RECIPE, headers=_hub_token()).json()
+    assert body["published"] is False
+    # And it says why. "Not live" without a reason is the version of this that
+    # gets debugged for an hour: the operator cannot tell a misconfigured hub
+    # from a missing kubectl from an RBAC gap.
+    assert body["publish_error"]
+
+
+def test_publishing_projects_the_whole_directory(hub_env, tmp_path: Path, monkeypatch):
+    """The ConfigMap's keys are exactly the library's files.
+
+    One command builds it from the directory, so adding and deleting a recipe
+    both land — a hand-maintained key list would drift the moment a file was
+    removed. The hub's own file on disk is what is rendered; nothing is read
+    back from the cluster.
+    """
+    from fastapi.testclient import TestClient
+
+    (tmp_path / "recipes").mkdir(parents=True)
+    (tmp_path / "recipes" / "a.json").write_text("{}")
+    hub_env.settings = dataclasses.replace(hub_env.settings, recipes_publish=True)
+
+    seen: list[list[str]] = []
+
+    class _Done:
+        returncode = 0
+        stdout = "apiVersion: v1\nkind: ConfigMap\n"
+        stderr = ""
+
+    def _run(cmd, **kwargs):
+        seen.append(list(cmd))
+        return _Done()
+
+    monkeypatch.setattr(hub_env.subprocess, "run", _run)
+    monkeypatch.setattr(hub_env, "_which", lambda _b: "/usr/bin/kubectl")
+
+    published, error = hub_env._publish_library()
+
+    assert published is True
+    assert error == ""
+    renders = [c for c in seen if "configmap" in c]
+    assert len(renders) == 1
+    assert f"--from-file={tmp_path / 'recipes'}" in renders[0]
+    assert "browser-agent-recipes" in renders[0]
+    # And it is applied to this namespace, not the default one.
+    applied = [c for c in seen if c[-2:] == ["-f", "-"]]
+    assert applied and "browser-agent" in applied[0]

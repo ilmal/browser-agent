@@ -32,8 +32,9 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from . import registry
+from . import recipe_store, registry
 from .config import load_settings
+from .plan_model import PlanRejected
 
 log = logging.getLogger("browser_agent.hub")
 
@@ -140,6 +141,21 @@ class PatchBot(BaseModel):
     job: str | None = None
     notes: str | None = None
     hidden: bool | None = None
+
+
+class RecipeSpec(BaseModel):
+    """One operator-authored recipe: a saved plan plus an identity."""
+
+    name: str
+    description: str = ""
+    entry_url: str
+    steps: list[dict[str, Any]] = []
+
+
+class ConfigPatch(BaseModel):
+    """Overrides for one built-in recipe, keyed by the names in OVERRIDABLE."""
+
+    values: dict[str, Any] = {}
 
 
 @app.post("/api/bots", dependencies=[Depends(require_token)])
@@ -254,3 +270,205 @@ async def delete_bot(profile: str, purge: bool = False) -> dict[str, Any]:
 async def roster_page() -> HTMLResponse:
     ui = Path(__file__).parent / "ui" / "roster.html"
     return HTMLResponse(ui.read_text())
+
+
+# -- the recipe library ----------------------------------------------------
+#
+# The hub owns it and is its only writer: the library is shared by every bot, so
+# there must be exactly one place an edit lands. A bot pod mounts the same
+# directory read-only, which is what makes an edit reach every profile without
+# a deploy. Same image, same code — only the mount differs.
+
+
+def _library() -> recipe_store.RecipeStore:
+    return recipe_store.store_for(settings)
+
+
+def _publish_library() -> tuple[bool, str]:
+    """Project the library onto the ConfigMap every bot pod mounts.
+
+    The hub holds the library on its own volume and writes it as plain files —
+    one writer, so no races — and this is how that becomes something the pods
+    can read. The ConfigMap is a *projection*, not the source of truth, which is
+    why it carries no committed data in the manifest: an ``apply`` of that file
+    must never be able to reset the operator's recipes.
+
+    ``--from-file`` over the whole directory, so the ConfigMap's keys are exactly
+    the files on disk: add a recipe, remove one, and the next publish matches.
+
+    Returns ``(published, reason)``. A failure is *reported*, never raised: the
+    operator's edit is already safe in the hub's own copy, and a 500 would say
+    the opposite. ``published`` is False whenever the pods cannot yet see the
+    change — including when this hub is not configured to publish at all.
+    """
+    if not settings.recipes_publish:
+        # Off by default on purpose: whether this process may write to a cluster
+        # is a deployment fact, not something a request should assume.
+        return False, "this hub is not configured to publish (RECIPES_PUBLISH)"
+    if not _which(settings.kubectl_bin):
+        return False, "kubectl is not available; the edit is on the hub but no pod can see it yet"
+    directory = settings.recipes_dir
+    if not directory.is_dir():
+        directory.mkdir(parents=True, exist_ok=True)
+
+    build = [
+        settings.kubectl_bin, "-n", settings.namespace, "create", "configmap",
+        settings.recipes_configmap, f"--from-file={directory}", "--dry-run=client",
+        "-o", "yaml",
+    ]
+    try:
+        rendered = subprocess.run(build, capture_output=True, text=True, timeout=30)
+        if rendered.returncode != 0:
+            return False, f"could not render the ConfigMap: {rendered.stderr.strip()[:300]}"
+        # Applied rather than created: `create` fails once the ConfigMap exists,
+        # and applying this rendering replaces the whole data map, which is
+        # exactly right — this directory *is* the library.
+        applied = subprocess.run(
+            [settings.kubectl_bin, "-n", settings.namespace, "apply", "-f", "-"],
+            input=rendered.stdout, capture_output=True, text=True, timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        return False, f"could not publish the library: {exc}"
+    if applied.returncode != 0:
+        return False, f"could not publish the library: {applied.stderr.strip()[:300]}"
+    log.info("published the recipe library to ConfigMap %s", settings.recipes_configmap)
+    return True, ""
+
+
+def _builtin_defaults() -> dict[str, dict[str, Any]]:
+    """The value each overridable key falls back to.
+
+    The editor shows this beside every field, because "override" only means
+    something against a default. Read off the modules rather than restated, so a
+    changed Python literal cannot leave the page describing an old one.
+
+    Best-effort by design: this is display data, and a key that cannot be read
+    costs a blank placeholder — never the endpoint.
+    """
+    from .minesweeper_dom import Pace
+    from .recipes import facebook, linkedin, minesweeper, plan_task, x
+
+    pace = Pace()
+    out: dict[str, dict[str, Any]] = {}
+    for module, recipe in (
+        (x, "x.post"),
+        (facebook, "facebook.page_post"),
+        (linkedin, "linkedin.page_post"),
+        (minesweeper, "minesweeper.play"),
+        (plan_task, "plan.task"),
+    ):
+        defaults: dict[str, Any] = {
+            "entry_url": getattr(module, "DEFAULT_ENTRY_URL", None),
+            "selectors.composer": getattr(module, "DEFAULT_COMPOSER", None),
+            "selectors.textbox": getattr(module, "DEFAULT_TEXTBOX", None),
+            "selectors.submit": getattr(module, "DEFAULT_SUBMIT", None),
+            "max_chars": getattr(module, "DEFAULT_MAX_CHARS", None),
+        }
+        if recipe == "minesweeper.play":
+            defaults["max_clicks"] = getattr(module, "MAX_CLICKS_PER_GAME", None)
+            defaults["pace.min_ms"] = pace.min_ms
+            defaults["pace.max_ms"] = pace.max_ms
+        elif recipe == "plan.task":
+            # Its entry_url default is a bare literal in the recipe, not a
+            # module constant like the others.
+            defaults["entry_url"] = "about:blank"
+            defaults["planner_prompt"] = getattr(module, "PROMPT", None)
+        out[recipe] = {k: v for k, v in defaults.items() if v is not None}
+    return out
+
+
+@app.get("/api/recipes", dependencies=[Depends(require_token)])
+async def list_recipe_config() -> dict[str, Any]:
+    """Every built-in recipe with its overrides, plus every stored recipe.
+
+    Merged into one list because that is what the operator sees: a recipe is a
+    recipe, and whether it is Python or a saved step list is an implementation
+    detail — except where it matters, which is the ``origin`` badge.
+    """
+    from . import recipes  # noqa: F401  (registers the built-ins)
+    from .tasks import list_recipes
+
+    store = _library()
+    overrides = store.all_overrides()
+    stored = store.specs()
+    defaults = _builtin_defaults()
+
+    out = []
+    for r in list_recipes():
+        name = r["name"]
+        out.append({
+            "name": name,
+            "description": r["description"],
+            "entry_url": r["entry_url"],
+            "origin": "stored" if name in stored else r["origin"],
+            "overridable": list(recipe_store.OVERRIDABLE.get(name, ())),
+            "overrides": overrides.get(name, {}),
+            "defaults": defaults.get(name, {}),
+            "steps": stored.get(name, {}).get("steps") if name in stored else None,
+        })
+    return {
+        "recipes": out,
+        "actions": list(recipe_store.STEP_ACTIONS),
+        "overridable": recipe_store.OVERRIDABLE,
+        "errors": store.errors,
+    }
+
+
+@app.post("/api/recipes/validate", dependencies=[Depends(require_token)])
+async def validate_recipe(req: RecipeSpec) -> dict[str, Any]:
+    """Dry-run the validator so the editor can refuse before saving.
+
+    No browser involved: this is exactly the check the loader will run, so a
+    recipe that validates here is one the pod will accept.
+    """
+    try:
+        spec = recipe_store._validate(req.model_dump(), source="edit")
+    except PlanRejected as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True, "spec": spec.spec}
+
+
+@app.post("/api/recipes", dependencies=[Depends(require_token)])
+async def create_recipe(req: RecipeSpec) -> dict[str, Any]:
+    try:
+        spec = recipe_store.save_step_recipe(_library(), req.model_dump())
+    except (recipe_store.RecipeError, PlanRejected) as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "recipe": spec, **_published()}
+
+
+@app.delete("/api/recipes/{name}", dependencies=[Depends(require_token)])
+async def remove_recipe(name: str) -> dict[str, Any]:
+    """Remove a stored recipe, or clear a built-in's overrides.
+
+    Deliberately one verb for both: "un-edit this recipe" is what the operator
+    means either way, and which of the two files changes is not their problem.
+    """
+    try:
+        kind = recipe_store.delete_recipe(_library(), name)
+    except recipe_store.RecipeError as exc:
+        raise HTTPException(404, str(exc)) from exc
+    return {"ok": True, "removed": name, "kind": kind, **_published()}
+
+
+@app.put("/api/recipes/{name}/config", dependencies=[Depends(require_token)])
+async def set_recipe_config(name: str, req: ConfigPatch) -> dict[str, Any]:
+    """Merge config overrides for a built-in recipe."""
+    try:
+        merged = recipe_store.save_overrides(_library(), name, req.values)
+    except recipe_store.RecipeError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    return {"ok": True, "recipe": name, "overrides": merged, **_published()}
+
+
+def _published() -> dict[str, Any]:
+    """Publish the library and report whether the pods can see it yet.
+
+    ``published`` is the honest answer to "did that edit land anywhere a bot can
+    read?" — the file is written either way, so a False here is a projection
+    problem (publishing not configured, kubectl missing, RBAC short) and not a
+    lost edit. It is reported rather than raised: the operator's change is safe
+    on the hub, and a 500 would say otherwise.
+    """
+    published, reason = _publish_library()
+    return {"published": published, "publish_error": reason}

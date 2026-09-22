@@ -16,24 +16,44 @@ from typing import Any
 
 from ..browser import BrowserSession
 from ..escalation import Challenge, ChallengeKind, EscalationRequired, detect_challenge
-from ..tasks import register
+from ..tasks import register_builtin
+from ._config import cfg
 from ._helpers import click_first, require_clear
 
 log = logging.getLogger(__name__)
+
+DEFAULT_ENTRY_URL = "https://www.linkedin.com/feed/"
+DEFAULT_COMPOSER = [
+    "button[aria-label*='Create' i]",
+    "button:has-text('Start a post')",
+    "button[class*='share-box' i]",
+]
+DEFAULT_TEXTBOX = [
+    "div[role='dialog'] div[role='textbox'], div.ql-editor[contenteditable='true']",
+]
+DEFAULT_SUBMIT = [
+    "div[role='dialog'] button:has-text('Post')",
+    "button[class*='share-actions__primary-action']",
+]
+DEFAULT_MAX_CHARS = 3000
 
 
 class LinkedInPagePost:
     name = "linkedin.page_post"
     description = "Post a text update to a LinkedIn Company Page the profile administers."
-    entry_url = "https://www.linkedin.com/feed/"
+
+    @property
+    def entry_url(self) -> str:
+        return cfg("linkedin.page_post", "entry_url", DEFAULT_ENTRY_URL)
 
     async def run(self, session: BrowserSession, payload: dict[str, Any]) -> dict[str, Any]:
         text = (payload.get("text") or "").strip()
         admin_url = (payload.get("admin_url") or "").strip()
         if not text:
             raise ValueError("payload.text is required")
-        if len(text) > 3000:
-            raise ValueError("LinkedIn posts allow 3000 characters")
+        max_chars = cfg("linkedin.page_post", "max_chars", DEFAULT_MAX_CHARS)
+        if len(text) > max_chars:
+            raise ValueError(f"LinkedIn posts allow {max_chars} characters")
         if not admin_url:
             raise ValueError(
                 "payload.admin_url is required, e.g. "
@@ -56,19 +76,14 @@ class LinkedInPagePost:
             )
 
         opened = await click_first(
-            page,
-            [
-                "button[aria-label*='Create' i]",
-                "button:has-text('Start a post')",
-                "button[class*='share-box' i]",
-            ],
+            page, cfg("linkedin.page_post", "selectors.composer", DEFAULT_COMPOSER),
             timeout=12000,
         )
         if not opened:
             raise RuntimeError("could not open the Page composer")
 
         editor = page.locator(
-            "div[role='dialog'] div[role='textbox'], div.ql-editor[contenteditable='true']"
+            cfg("linkedin.page_post", "selectors.textbox", DEFAULT_TEXTBOX)[0]
         ).first
         await editor.wait_for(state="visible", timeout=15000)
         await editor.click()
@@ -77,11 +92,7 @@ class LinkedInPagePost:
         await require_clear(page)
 
         posted = await click_first(
-            page,
-            [
-                "div[role='dialog'] button:has-text('Post')",
-                "button[class*='share-actions__primary-action']",
-            ],
+            page, cfg("linkedin.page_post", "selectors.submit", DEFAULT_SUBMIT),
             timeout=12000,
         )
         if not posted:
@@ -98,4 +109,4 @@ class LinkedInPagePost:
         return {"posted": True, "chars": len(text), "url": page.url}
 
 
-register(LinkedInPagePost())
+register_builtin(LinkedInPagePost())

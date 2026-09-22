@@ -52,6 +52,21 @@ spec:
     requests:
       storage: $STORAGE
 ---
+# Schedules and artifacts. Its own claim, because an emptyDir is destroyed on
+# every pod recreate — and a deploy recreates the pod, so every schedule was
+# being dropped without a word.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: data-$NAME
+  namespace: browser-agent
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 1Gi
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -99,6 +114,9 @@ spec:
             - { name: AGENT_PROFILE, value: $NAME }
             - { name: PROFILES_ROOT, value: /profiles }
             - { name: DATA_ROOT, value: /data }
+            # The shared recipe library, as the hub writes it. Stated
+            # explicitly so the mount and the code cannot drift apart.
+            - { name: RECIPES_DIR, value: /recipes }
             - { name: NOVNC_PORT, value: "6080" }
             # Deployment-specific and kept local, exactly as in the tracked
             # manifest: k8s/local/deploy.sh sets it to the real host. Empty is
@@ -170,6 +188,10 @@ spec:
           volumeMounts:
             - { name: profile, mountPath: /profiles }
             - { name: data, mountPath: /data }
+            # The shared recipe library, read-only. Whole-directory, never
+            # subPath: a subPath mount never receives an update, so an edit
+            # would not reach a running pod.
+            - { name: recipes, mountPath: /recipes, readOnly: true }
           readinessProbe:
             httpGet: { path: /healthz, port: api }
             initialDelaySeconds: 5
@@ -182,7 +204,13 @@ spec:
         - name: profile
           persistentVolumeClaim: { claimName: profile-$NAME }
         - name: data
-          emptyDir: { sizeLimit: 256Mi }
+          persistentVolumeClaim: { claimName: data-$NAME }
+        # Optional: a cluster that never created the ConfigMap still boots, with
+        # the built-in recipes exactly as they were written in Python.
+        - name: recipes
+          configMap:
+            name: browser-agent-recipes
+            optional: true
 ---
 apiVersion: v1
 kind: Service

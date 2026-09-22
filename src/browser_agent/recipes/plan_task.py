@@ -26,8 +26,9 @@ from ..config import load_settings
 from ..laya_gate import LayaGate
 from ..picker import ElementPicker
 from ..plan_model import PlanRejected, parse_plan
-from ..planner import PlannerClient
-from ..tasks import register
+from ..planner import PROMPT, PlannerClient
+from ..tasks import register_builtin
+from ._config import cfg
 from ._plan_exec import run_plan
 
 log = logging.getLogger(__name__)
@@ -39,7 +40,12 @@ class PlanTask:
         "Freeform: an LLM plans once, a deterministic executor runs the steps, "
         "Laya picks elements and confirms."
     )
-    entry_url = "about:blank"
+
+    @property
+    def entry_url(self) -> str:
+        # "about:blank" is the built-in: plan.task plans its own navigation, and
+        # this value is only ever the agent fallback's starting point.
+        return cfg("plan.task", "entry_url", "about:blank")
 
     def __init__(self, planner: PlannerClient | None = None, laya: LayaGate | None = None,
                  settings: Any = None, picker: ElementPicker | None = None) -> None:
@@ -69,7 +75,9 @@ class PlanTask:
         if not task_text:
             raise PlanRejected("plan.task needs a 'task' in the payload")
 
-        raw = await self._planner.plan(task_text)
+        raw = await self._planner.plan(
+            task_text, prompt=cfg("plan.task", "planner_prompt", PROMPT)
+        )
         plan = parse_plan(raw, max_steps=self._settings.planner_max_steps)
         log.info(
             "plan for %r: %d step(s), entry %s",
@@ -79,4 +87,4 @@ class PlanTask:
                               picker=self._picker)
 
 
-register(PlanTask())
+register_builtin(PlanTask())

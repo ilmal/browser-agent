@@ -12,44 +12,61 @@ import logging
 from typing import Any
 
 from ..browser import BrowserSession
-from ..tasks import register
+from ..tasks import register_builtin
+from ._config import cfg
 from ._helpers import click_first, rate_limited, require_clear
 
 log = logging.getLogger(__name__)
+
+#: The built-in literals. Each is the default argument to ``cfg`` below, so the
+#: recipe behaves exactly as it always did until an operator overrides that key
+#: in the recipe library.
+DEFAULT_ENTRY_URL = "https://x.com/home"
+DEFAULT_COMPOSER = [
+    "a[data-testid='SideNav_NewTweet_Button']",
+    "a[href='/compose/post']",
+    "div[role='button'][aria-label*='Post' i]",
+]
+DEFAULT_TEXTBOX = [
+    "div[data-testid='tweetTextarea_0']",
+    "div[role='textbox'][contenteditable='true']",
+    "div[contenteditable='true'][aria-label*='Post' i]",
+]
+DEFAULT_SUBMIT = [
+    "button[data-testid='tweetButton']",
+    "button[data-testid='tweetButtonInline']",
+    "div[role='button'][data-testid='tweetButton']",
+]
+DEFAULT_MAX_CHARS = 280
 
 
 class XPost:
     name = "x.post"
     description = "Post a text update to X as the logged-in account."
-    entry_url = "https://x.com/home"
+
+    @property
+    def entry_url(self) -> str:
+        return cfg("x.post", "entry_url", DEFAULT_ENTRY_URL)
 
     async def run(self, session: BrowserSession, payload: dict[str, Any]) -> dict[str, Any]:
         text = (payload.get("text") or "").strip()
+        max_chars = cfg("x.post", "max_chars", DEFAULT_MAX_CHARS)
         if not text:
             raise ValueError("payload.text is required")
-        if len(text) > 280:
-            raise ValueError(f"text is {len(text)} chars; X allows 280")
+        if len(text) > max_chars:
+            raise ValueError(f"text is {len(text)} chars; X allows {max_chars}")
 
         page = await session.page()
         await require_clear(page)
 
         # Open the composer.
         opened = await click_first(
-            page,
-            [
-                "a[data-testid='SideNav_NewTweet_Button']",
-                "a[href='/compose/post']",
-                "div[role='button'][aria-label*='Post' i]",
-            ],
+            page, cfg("x.post", "selectors.composer", DEFAULT_COMPOSER)
         )
         if not opened:
             raise RuntimeError("could not open the composer")
 
-        editor = [
-            "div[data-testid='tweetTextarea_0']",
-            "div[role='textbox'][contenteditable='true']",
-            "div[contenteditable='true'][aria-label*='Post' i]",
-        ]
+        editor = cfg("x.post", "selectors.textbox", DEFAULT_TEXTBOX)
         # Prefer typing over fill(): the editor is contenteditable and fill()
         # bypasses the input events X listens to for enabling the Post button.
         typed = False
@@ -69,12 +86,7 @@ class XPost:
         await require_clear(page)
 
         posted = await click_first(
-            page,
-            [
-                "button[data-testid='tweetButton']",
-                "button[data-testid='tweetButtonInline']",
-                "div[role='button'][data-testid='tweetButton']",
-            ],
+            page, cfg("x.post", "selectors.submit", DEFAULT_SUBMIT)
         )
         if not posted:
             raise rate_limited("Post button not found or not enabled")
@@ -84,4 +96,4 @@ class XPost:
         return {"posted": True, "chars": len(text), "url": page.url}
 
 
-register(XPost())
+register_builtin(XPost())

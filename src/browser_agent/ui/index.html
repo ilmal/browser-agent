@@ -73,6 +73,19 @@
   tr:last-child td { border-bottom: 0; }
   code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--dim); }
 
+  /* The read-only recipe list. A card per recipe, because the useful content is
+     a name and a sentence — the same reason the roster uses cards. */
+  .rl { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 10px; }
+  .rc { background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px;
+    padding: 11px 12px; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .rc .nm { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; min-width: 0; }
+  .rc .nm code { font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+  .rc .desc { font-size: 12px; color: var(--dim); overflow-wrap: anywhere; }
+  /* A composed recipe is this library's own work, not something that shipped in
+     the image — worth marking, because it is the one kind the operator can
+     rewrite from scratch. */
+  .pill.stored { color: var(--accent); border-color: #2a3d5c; }
+
   .status { font-weight: 600; font-size: 12px; }
   .status.done { color: var(--ok); }
   .status.failed { color: var(--bad); }
@@ -262,6 +275,19 @@
     <div class="row end" style="margin-top:8px">
       <button class="ghost hidden" id="show-all">Show older</button>
     </div>
+  </section>
+
+  <!-- Read-only on purpose. The library is shared by every bot, so there is one
+       editor for it and it lives on the roster — a second editor here would be
+       N ways for N bots to write the one file. -->
+  <section id="sec-recipes">
+    <h2>Recipes</h2>
+    <p class="sub">
+      What this bot can be asked to do. Recipes are shared with your other bots
+      and edited in one place — <a id="roster-link" href="/">the roster</a> —
+      so a change here would be a change everywhere.
+    </p>
+    <div id="recipes" class="rl"></div>
   </section>
 
   <section id="sec-sched">
@@ -596,8 +622,34 @@ async function refresh() {
       el.innerHTML = opts;
       if (keep) el.value = keep;
     }
+    renderRecipes();
   }
   render();
+}
+
+let rosterUrl = null;
+
+function renderRecipes() {
+  const cards = recipeList.map(r => `<div class="rc">
+    <div class="nm"><code>${esc(r.name)}</code>${
+      r.origin === "stored" ? `<span class="pill stored">composed</span>` : ""}</div>
+    <div class="desc">${esc(r.description)}</div>
+  </div>`).join("");
+  set("recipes", cards || `<div class="empty">No recipes.</div>`);
+
+  // Where the roster lives, from the bot's own point of view. Reached at /b/x/
+  // the origin is the ROSTER already, so the link is just "/" — but a bot served
+  // on its own domain (browser_base_url) needs the roster's, and url_prefix is
+  // the path the roster proxies this bot under, so stripping it off the base
+  // gives the roster's own root. Guessing instead is how the bot page produced a
+  // refused link to its own :6080 before; see liveSrc above.
+  if (rosterUrl === null) {
+    const prefix = state.url_prefix || "";
+    const base = (state.browser_base_url || location.origin).replace(/\/$/, "");
+    rosterUrl = prefix && base.endsWith(prefix) ? base.slice(0, -prefix.length) || "/" : "/";
+    const link = $("roster-link");
+    if (link) link.href = rosterUrl;
+  }
 }
 
 // -- actions ---------------------------------------------------------------

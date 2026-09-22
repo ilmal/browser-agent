@@ -211,10 +211,14 @@ async def click_cell(page: Page, row: int, col: int, *, pace: Pace, flag: bool =
     await pace.click(page, cell_selector(row, col), button="right" if flag else "left")
 
 
-async def start_beginner(page: Page, *, timeout_ms: int = 60_000) -> GameView:
+DEFAULT_NEW_GAME_URL = "https://minesweeper.online/new-game"
+
+
+async def start_beginner(
+    page: Page, *, url: str = DEFAULT_NEW_GAME_URL, timeout_ms: int = 60_000
+) -> GameView:
     """Navigate to a fresh Beginner game and wait for its board."""
-    await page.goto("https://minesweeper.online/new-game",
-                    wait_until="domcontentloaded", timeout=timeout_ms)
+    await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
     return await wait_for_board(page)
 
 

@@ -163,6 +163,29 @@ class Settings:
     # URL the bot advertises for its own live view, never how it is routed.
     url_prefix: str = ""
 
+    # The operator's recipe library. One directory, shared by every bot: the hub
+    # writes it and each profile pod reads it — in the cluster, a k8s ConfigMap
+    # mounted as a directory. It carries the built-in recipes' config overrides
+    # and the step-recipes the operator composed, so changing a recipe no longer
+    # means a code deploy. An absent or empty directory leaves every built-in
+    # literal standing, which is the whole behaviour before this existed: a pod
+    # without the mount is exactly as capable as it was.
+    recipes_dir: Path = Path("/recipes")
+
+    #: Hub only: the ConfigMap the library is published to, and which every bot
+    #: pod mounts read-only at ``recipes_dir``. The hub's own ``recipes_dir`` is
+    #: a plain volume — this is the projection step that makes an edit visible to
+    #: every profile. Named here rather than inline so the manifest, the RBAC and
+    #: the code all point at one name.
+    recipes_configmap: str = "browser-agent-recipes"
+
+    #: Hub only, and OFF by default. Publishing the library to the cluster is a
+    #: deployment-specific act — whether this hub has a cluster to publish to,
+    #: and whether it is allowed to — so the real value is set at deploy time
+    #: rather than assumed. A hub run from a laptop, or a test, must never reach
+    #: for someone's cluster because a write endpoint was called.
+    recipes_publish: bool = False
+
     # ---- hub (roster) only. A bot process never reads these. ----
     # The roster lives on a PVC: it must survive a pod restart, and a bot's
     # profile is the wrong place for it (several bots share one roster).
@@ -256,6 +279,9 @@ def load_settings() -> Settings:
         ),
         api_port=_env_int("API_PORT", 8000),
         control_token=_env("CONTROL_TOKEN"),
+        recipes_dir=Path(_env("RECIPES_DIR", "/recipes")),
+        recipes_configmap=_env("RECIPES_CONFIGMAP", "browser-agent-recipes"),
+        recipes_publish=_env("RECIPES_PUBLISH", "false").lower() in {"1", "true", "yes"},
         ops_alert_url=_env("OPS_ALERT_URL"),
         notify_on_escalation=_env("NOTIFY_ON_ESCALATION", "true").lower() in {"1", "true", "yes"},
         browser_proxy=_env("BROWSER_PROXY"),
