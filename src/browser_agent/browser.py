@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import re
+import socket
 import subprocess
 import time
 from pathlib import Path
@@ -49,11 +50,29 @@ def chromium_executable() -> str | None:
     return _browser_exe or None
 
 
+def _port_is_live(port: int, timeout_s: float = 0.4) -> bool:
+    """Whether something is actually listening on ``port``.
+
+    The port file outlives the browser: Chrome writes it at launch and does not
+    remove it on exit, so after the window is closed the file still names a port
+    that nothing owns. Trusting it made the agent attach to a dead endpoint and
+    fail with "All connection attempts failed" — a closed browser reported as a
+    broken task rather than as a browser that needs reopening.
+    """
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=timeout_s):
+            return True
+    except OSError:
+        return False
+
+
 def _read_devtools_endpoint(profile_dir: Path, timeout_s: float = 10.0) -> str | None:
     """Return the DevTools HTTP endpoint for the browser owning `profile_dir`.
 
-    Chrome only writes this file while it is running, so its presence is also
-    the signal that a live browser already holds the profile.
+    Chrome writes this file while running, but does **not** delete it on exit,
+    so its presence alone is not the signal it looks like — a stale file names a
+    port nobody is listening on. The file is only honoured once something is
+    actually accepting connections there.
     """
     path = profile_dir / _DEVTOOLS_PORT_FILE
     deadline = time.monotonic() + timeout_s
@@ -61,7 +80,13 @@ def _read_devtools_endpoint(profile_dir: Path, timeout_s: float = 10.0) -> str |
         try:
             lines = path.read_text().splitlines()
             if lines and lines[0].strip().isdigit():
-                return f"http://127.0.0.1:{lines[0].strip()}"
+                port = int(lines[0].strip())
+                if _port_is_live(port):
+                    return f"http://127.0.0.1:{port}"
+                # A stale file: the browser is gone. Returning it would hand
+                # the agent a dead endpoint, which is worse than admitting
+                # there is no browser.
+                return None
         except OSError:
             pass
         time.sleep(0.25)
@@ -157,9 +182,37 @@ class BrowserSession:
         """
         return _read_devtools_endpoint(self.settings.profile_dir, timeout_s=1.0)
 
+    def is_running(self) -> bool:
+        """Whether the browser this session launched is still alive.
+
+        A closed window leaves ``_context`` cached and every later call handing
+        back a context whose browser is gone: navigation then fails with
+        "Target page, context or browser has been closed", and the agent's CDP
+        attach fails with "All connection attempts failed". Both read as a
+        broken task rather than as a browser that needs reopening.
+        """
+        if self._context is None:
+            return False
+        browser = getattr(self._context, "browser", None)
+        if browser is not None:
+            try:
+                return bool(browser.is_connected())
+            except Exception:
+                return False
+        # A persistent context has no separate Browser wrapper to ask, so the
+        # DevTools port is the liveness signal — and only if something is
+        # actually listening on it.
+        return self.cdp_endpoint is not None
+
     async def start(self) -> BrowserContext:
-        if self._context is not None:
+        if self._context is not None and self.is_running():
             return self._context
+        if self._context is not None:
+            # The window was closed under us (or the browser died). Drop the
+            # corpse before relaunching: a persistent context cannot be revived,
+            # and leaving it cached would fail every later call.
+            log.warning("browser for profile=%s is gone; restarting", self.settings.profile)
+            await self.stop()
 
         self.settings.profile_dir.mkdir(parents=True, exist_ok=True)
         _clear_stale_profile_lock(self.settings.profile_dir)

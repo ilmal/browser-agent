@@ -235,6 +235,12 @@ async def state() -> dict[str, Any]:
     return {
         "profile": settings.profile,
         "profile_initialised": profile_exists(settings),
+        # Whether the browser behind noVNC is actually up. The window can be
+        # closed from inside the live view, and until now nothing said so: the
+        # next task just failed with a connection error. Recovery is automatic
+        # on the next run (BrowserSession.start relaunches), and this is what
+        # lets the UI say so and offer a restart instead of looking broken.
+        "browser_running": session.is_running(),
         "novnc_port": settings.novnc_port,
         # Where the browser UI is reachable from the operator's machine. Empty
         # when the pod port is forwarded directly; set via BROWSER_BASE_URL when
@@ -534,6 +540,28 @@ async def start_login(req: LoginRequest) -> dict[str, Any]:
     """
     page = await session.goto(req.url)
     return {"opened": page.url, "takeover_url": "/vnc.html"}
+
+
+@app.post("/api/browser/restart", dependencies=[Depends(require_token)])
+async def restart_browser() -> dict[str, Any]:
+    """Close and relaunch the browser behind noVNC.
+
+    The window can be closed from inside the live view, which leaves the
+    desktop empty and the profile lock behind. Recovery is automatic on the next
+    task, but a human watching noVNC wants it now rather than after queueing
+    something — and the session is one browser per profile, so this is also the
+    honest "start over" when a page has wedged.
+    """
+    await session.stop()
+    try:
+        await session.start()
+        page = await session.page()
+        if page.url in ("", "about:blank"):
+            await page.goto(_IDLE_PAGE)
+    except Exception as exc:
+        log.exception("browser restart failed")
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+    return {"browser_running": session.is_running(), "url": page.url}
 
 
 # -- schedules -------------------------------------------------------------

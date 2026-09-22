@@ -183,6 +183,18 @@ def make_agent_runner(settings: Settings):
         # user_data_dir — it simply starts logged out — so a fresh launch would
         # leave the agent driving a different, unauthenticated browser while the
         # human watches the real one over noVNC.
+        #
+        # Ensure one is actually up first. Closing the browser window used to
+        # leave a stale DevTools port file behind, which the agent then attached
+        # to and failed with "All connection attempts failed" — a recoverable
+        # state reported as a broken task. start() is idempotent and relaunches
+        # when the previous browser is gone, so a closed window now just means
+        # the next run reopens it. Tolerated when absent: a session that cannot
+        # start (a stub in a test) still exposes cdp_endpoint, and failing here
+        # would report "no browser" for a reason that is not ours to diagnose.
+        start = getattr(session, "start", None)
+        if start is not None:
+            await start()
         cdp_url = session.cdp_endpoint
         if not cdp_url:
             raise RuntimeError(

@@ -36,20 +36,41 @@ def test_clears_lock_from_a_hostname_that_no_longer_exists(tmp_path):
     assert not lock.is_symlink() and not lock.exists()
 
 
-def test_keeps_lock_when_a_browser_is_running(tmp_path):
+def test_keeps_lock_when_a_browser_is_running(tmp_path, monkeypatch):
     """A live browser owns the profile; its lock must survive.
 
     Clearing it here would let a second Chrome into the same user_data_dir —
     the corruption the single-writer rule exists to prevent.
+
+    Liveness is "something is listening on the port", not "the port file
+    exists": Chrome writes the file at launch and never removes it on exit, so
+    the file alone is also what a *closed* window leaves behind.
     """
+    from browser_agent import browser as browser_mod
+
     profile = tmp_path / "x"
     lock = _make_lock(profile, "browser-agent-42")
-    # Chrome publishes the port file only while running.
     (profile / "DevToolsActivePort").write_text("9222\n/devtools/browser/abc\n")
+    monkeypatch.setattr(browser_mod, "_port_is_live", lambda port, timeout_s=0.4: True)
 
     _clear_stale_profile_lock(profile)
 
     assert lock.is_symlink(), "a running browser's lock was cleared"
+
+
+def test_clears_the_lock_when_the_window_was_closed(tmp_path):
+    """The stale-file case: the window is gone, so the lock is stale too.
+
+    Keeping it would refuse the relaunch with PROFILE_IN_USE, which is how a
+    closed browser turned into a bot that could not recover.
+    """
+    profile = tmp_path / "x"
+    lock = _make_lock(profile, "browser-agent-42")
+    (profile / "DevToolsActivePort").write_text("9222\n/devtools/browser/abc\n")
+
+    _clear_stale_profile_lock(profile)
+
+    assert not lock.is_symlink(), "a closed browser's lock left the profile unusable"
 
 
 def test_no_lock_is_a_noop(tmp_path):
@@ -68,3 +89,41 @@ def test_keeps_lock_when_port_file_is_unreadable_port(tmp_path):
     _clear_stale_profile_lock(profile)
 
     assert not lock.exists()
+
+
+def test_a_stale_port_file_is_not_an_endpoint(tmp_path):
+    """The exact reported failure: a closed browser, a port nobody owns.
+
+    /profiles/x/DevToolsActivePort survived the window being closed, so
+    cdp_endpoint kept handing out http://127.0.0.1:37445 and the agent attached
+    to it, failing with "All connection attempts failed" — a recoverable state
+    reported as a broken task.
+    """
+    from browser_agent.browser import _read_devtools_endpoint
+
+    profile = tmp_path / "x"
+    profile.mkdir()
+    (profile / "DevToolsActivePort").write_text("37445\n/devtools/browser/abc\n")
+
+    assert _read_devtools_endpoint(profile, timeout_s=0.1) is None
+
+
+def test_a_live_port_file_is_an_endpoint(tmp_path, monkeypatch):
+    from browser_agent import browser as browser_mod
+    from browser_agent.browser import _read_devtools_endpoint
+
+    profile = tmp_path / "x"
+    profile.mkdir()
+    (profile / "DevToolsActivePort").write_text("37445\n/devtools/browser/abc\n")
+    monkeypatch.setattr(browser_mod, "_port_is_live",
+                        lambda port, timeout_s=0.4: port == 37445)
+
+    assert _read_devtools_endpoint(profile, timeout_s=0.1) == "http://127.0.0.1:37445"
+
+
+def test_no_port_file_is_no_endpoint(tmp_path):
+    from browser_agent.browser import _read_devtools_endpoint
+
+    profile = tmp_path / "x"
+    profile.mkdir()
+    assert _read_devtools_endpoint(profile, timeout_s=0.1) is None
