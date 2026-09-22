@@ -3,37 +3,22 @@
 A retry used to mint a brand-new, unlinked task. The operator saw a stack of
 unrelated History rows and no way to say "no, try it this way instead" — the
 only lever was a button that re-ran the identical instruction. A thread fixes
-the linkage; the ``messages`` table fixes the steering.
+the linkage; the messages fix the steering.
 
-Deliberately the same SQLite file as the schedules (the pod's PVC, one writer
-per profile), so a thread survives a pod restart the way a schedule does.
+Deliberately **in memory**, with exactly the lifetime of the tasks it annotates.
+An earlier cut persisted these in SQLite so a thread would survive a pod
+restart, which turned out to be worse than useless: tasks are in-memory, so
+after a restart the messages came back with no attempts to attach to — a store
+outliving the thing it describes, plus rows nothing could ever read. Keeping
+both in one process makes that divergence impossible by construction.
 """
 
 from __future__ import annotations
 
-import json
-import logging
-import sqlite3
 import time
 import uuid
-from dataclasses import dataclass
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any
-
-log = logging.getLogger(__name__)
-
-_SCHEMA = """
-CREATE TABLE IF NOT EXISTS messages (
-    id        TEXT PRIMARY KEY,
-    thread_id TEXT NOT NULL,
-    at        REAL NOT NULL,
-    role      TEXT NOT NULL,
-    kind      TEXT NOT NULL,
-    text      TEXT NOT NULL,
-    meta      TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS messages_by_thread ON messages (thread_id, at);
-"""
 
 #: Who wrote a message. "operator" is the person iterating; "bot" is a
 #: deterministic outcome the runner records; "system" is housekeeping.
@@ -45,6 +30,10 @@ ROLES = ("operator", "bot", "system")
 #: indistinguishable in the log exactly when it mattered.
 KINDS = ("instruction", "parameter", "config", "note")
 
+#: Bounded per thread, so a long conversation cannot grow the process without
+#: limit. Far more than any real thread needs.
+MAX_PER_THREAD = 500
+
 
 @dataclass
 class Message:
@@ -54,7 +43,7 @@ class Message:
     role: str
     kind: str
     text: str
-    meta: dict[str, Any]
+    meta: dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -69,13 +58,10 @@ class Message:
 
 
 class ThreadStore:
-    def __init__(self, db_path: Path) -> None:
-        self.db_path = db_path
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        self._conn.row_factory = sqlite3.Row
-        self._conn.executescript(_SCHEMA)
-        self._conn.commit()
+    """Messages per thread, in process memory."""
+
+    def __init__(self) -> None:
+        self._by_thread: dict[str, list[Message]] = {}
 
     def say(
         self,
@@ -99,66 +85,18 @@ class ThreadStore:
             text=" ".join(str(text).split())[:2000],
             meta=meta or {},
         )
-        self._conn.execute(
-            "INSERT INTO messages (id, thread_id, at, role, kind, text, meta) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (msg.id, msg.thread_id, msg.at, msg.role, msg.kind, msg.text,
-             json.dumps(msg.meta)),
-        )
-        self._conn.commit()
+        bucket = self._by_thread.setdefault(thread_id, [])
+        bucket.append(msg)
+        if len(bucket) > MAX_PER_THREAD:
+            del bucket[: len(bucket) - MAX_PER_THREAD]
         return msg
 
     def for_thread(self, thread_id: str) -> list[Message]:
-        rows = self._conn.execute(
-            "SELECT * FROM messages WHERE thread_id = ? ORDER BY at", (thread_id,)
-        ).fetchall()
-        return [self._row(r) for r in rows]
+        return list(self._by_thread.get(thread_id, ()))
 
     def last_instruction(self, thread_id: str) -> str:
-        """The most recent operator instruction, which is the live one.
-
-        Used to brief the next attempt: the thread's newest wording is what the
-        operator meant, not whatever the first attempt was queued with.
-        """
-        row = self._conn.execute(
-            "SELECT text FROM messages WHERE thread_id = ? AND kind = 'instruction' "
-            "ORDER BY at DESC LIMIT 1",
-            (thread_id,),
-        ).fetchone()
-        return row["text"] if row is not None else ""
-
-    def threads_with_tasks(self, tasks: list[Any]) -> list[dict[str, Any]]:
-        """Group task dicts by thread, newest thread first.
-
-        The bot page shows one row per *line of work* rather than per attempt,
-        which is the operator's actual complaint: "a history with one block,
-        then the retries".
-        """
-        groups: dict[str, list[Any]] = {}
-        for t in tasks:
-            groups.setdefault(t.thread_id or t.id, []).append(t)
-        out: list[dict[str, Any]] = []
-        for thread_id, members in groups.items():
-            members = sorted(members, key=lambda t: t.created_at)
-            out.append(
-                {
-                    "thread_id": thread_id,
-                    "attempts": [m.to_dict() for m in members],
-                    "count": len(members),
-                    "latest": members[-1].to_dict(),
-                }
-            )
-        out.sort(key=lambda g: g["latest"]["created_at"], reverse=True)
-        return out
-
-    @staticmethod
-    def _row(row: sqlite3.Row) -> Message:
-        return Message(
-            id=row["id"],
-            thread_id=row["thread_id"],
-            at=row["at"],
-            role=row["role"],
-            kind=row["kind"],
-            text=row["text"],
-            meta=json.loads(row["meta"] or "{}"),
-        )
+        """The most recent operator instruction, which is the live one."""
+        for msg in reversed(self._by_thread.get(thread_id, ())):
+            if msg.kind == "instruction":
+                return msg.text
+        return ""

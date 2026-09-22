@@ -33,7 +33,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 settings: Settings = load_settings()
 session = BrowserSession(settings)
 store = ScheduleStore(settings.state_db)
-threads = ThreadStore(settings.state_db)
+threads = ThreadStore()
 runner = TaskRunner(settings, session, agent_runner=make_agent_runner(settings))
 
 # Shown on a freshly started pod so noVNC opens on a real page instead of a

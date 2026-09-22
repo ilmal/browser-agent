@@ -63,7 +63,7 @@ def test_an_explicit_thread_is_kept():
 
 
 def test_messages_round_trip_in_order(tmp_path):
-    store = ThreadStore(tmp_path / "s.db")
+    store = ThreadStore()
     store.say("t1", "operator", "instruction", "do it differently")
     store.say("t1", "bot", "note", "attempt 1 failed")
     store.say("t2", "operator", "instruction", "unrelated")
@@ -75,7 +75,7 @@ def test_messages_round_trip_in_order(tmp_path):
 
 
 def test_the_last_instruction_is_what_the_operator_meant(tmp_path):
-    store = ThreadStore(tmp_path / "s.db")
+    store = ThreadStore()
     store.say("t1", "operator", "instruction", "first")
     store.say("t1", "operator", "instruction", "second")
     assert store.last_instruction("t1") == "second"
@@ -83,7 +83,7 @@ def test_the_last_instruction_is_what_the_operator_meant(tmp_path):
 
 
 def test_an_unknown_role_or_kind_is_refused(tmp_path):
-    store = ThreadStore(tmp_path / "s.db")
+    store = ThreadStore()
     with pytest.raises(ValueError):
         store.say("t1", "nobody", "instruction", "hi")
     with pytest.raises(ValueError):
@@ -91,23 +91,9 @@ def test_an_unknown_role_or_kind_is_refused(tmp_path):
 
 
 def test_whitespace_in_a_message_is_collapsed(tmp_path):
-    store = ThreadStore(tmp_path / "s.db")
+    store = ThreadStore()
     msg = store.say("t1", "operator", "instruction", "  line one\n\n  line two  ")
     assert msg.text == "line one line two"
-
-
-def test_threads_group_attempts_under_one_line_of_work():
-    a = Task(recipe="r", payload={}, thread_id="t1", attempt=1, id="a")
-    b = Task(recipe="r", payload={}, thread_id="t1", attempt=2, id="b", parent_id="a")
-    b.created_at = a.created_at + 5
-    c = Task(recipe="r", payload={}, thread_id="t2", attempt=1, id="c")
-    c.created_at = a.created_at + 10
-
-    groups = ThreadStore(Path("/tmp/unused-thread-grouping.db")).threads_with_tasks([a, b, c])
-    assert [g["thread_id"] for g in groups] == ["t2", "t1"]
-    assert groups[1]["count"] == 2
-    assert [x["id"] for x in groups[1]["attempts"]] == ["a", "b"]
-    assert groups[1]["latest"]["id"] == "b"
 
 
 # -- the runner ------------------------------------------------------------
