@@ -122,10 +122,12 @@ spec:
             - { name: PLANNER_MAX_STEPS, value: "12" }
             - { name: PLANNER_STEP_TIMEOUT_S, value: "10" }
             - { name: PLANNER_CLIENT_ID, value: "browser-agent-planner" }
-            # Laya keeps CONFIRM only. PICK is off on engine grounds: benched
-            # in-pod (scripts/laya_pick_bench.py), laya could not discriminate
-            # candidates (4/18, flat probabilities), so no confidence floor is
-            # ever cleared. CONFIRM's failure mode is a repair attempt.
+            # Laya keeps CONFIRM only. PICK is off on coverage, not accuracy:
+            # re-benched in-pod 2026-09-22 against prod /v1/decide — 14/18
+            # correct (78%) with 100% precision on everything that cleared the
+            # 0.75 floor, but only 22% cleared it (bench bar is 80%). It would
+            # not misclick; it would just abstain on ~4 of 5 decisions.
+            # CONFIRM's failure mode is a repair attempt.
             - { name: LAYA_ENABLED, value: "true" }
             - { name: LAYA_DECIDE_URL, value: "http://llm-service.llm-service.svc.cluster.local:8001/v1/decide" }
             - { name: LAYA_PICK_ENABLED, value: "false" }

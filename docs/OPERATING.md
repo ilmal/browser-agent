@@ -150,9 +150,14 @@ the plan runs deterministically:
    instead of reaching the agent.
 
 The gate summary in a done task's result shows how much Laya did
-(`picks`/`confirms`/`inconclusive`). In k8s the picker starts flag-off
-(`LAYA_PICK_ENABLED=false`) until the fixture accuracy bench gives it a real
-number; confirmation is on.
+(`picks`/`confirms`/`inconclusive`). In k8s the picker is flag-off
+(`LAYA_PICK_ENABLED=false`). Re-benched in-pod 2026-09-22 against the prod
+`/v1/decide` engine (`scripts/laya_pick_bench.py`): 14/18 correct (78%), and
+**100% precision** on every pick that cleared the 0.75 confidence floor — but
+only 22% cleared it, short of the bench's 80% coverage bar, so the picker
+abstains on most decisions. The reason to keep it off is coverage, not
+accuracy: turning it on would not misclick, it would just rarely answer.
+Confirmation is on.
 
 ## Reading the failure states
 

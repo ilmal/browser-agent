@@ -134,11 +134,17 @@ spec:
             - { name: PLANNER_CLIENT_ID, value: "browser-agent-planner" }
             # Laya gate. Runs over HTTP against llm-service's /v1/decide
             # proxy (see the llm-service skill) — no torch in this image.
-            # PICK stays off on engine grounds: benched in this pod
-            # 2026-09-21 (scripts/laya_pick_bench.py), laya could not
-            # discriminate candidates — choice head 4/18 with flat
-            # probabilities, yes/no tournament all p in 0.41-0.55 — so no
-            # confidence floor is ever cleared. CONFIRM stays on: its
+            # PICK stays off on *coverage*, not accuracy: re-benched in this
+            # pod 2026-09-22 (scripts/laya_pick_bench.py, prod /v1/decide) —
+            # 14/18 correct (78%), and every pick it acted on at the 0.75
+            # floor was correct (4/4, precision 100%). What fails is how
+            # often it clears the floor: only 22% of fixtures, against the
+            # bench's 80% bar. The 2026-09-21 note claiming "choice head 4/18
+            # with flat probabilities" was measured against the broken vulkan
+            # engine and is superseded; the engine now answers (see
+            # laya-judge-distillation). Turning PICK on would therefore not
+            # misclick — it would just do nothing on ~4 of 5 decisions, which
+            # is still not worth a wrong-answer risk. CONFIRM stays on: its
             # failure mode is a repair attempt, not a human page.
             - { name: LAYA_ENABLED, value: "true" }
             - { name: LAYA_DECIDE_URL, value: "http://llm-service.llm-service.svc.cluster.local:8001/v1/decide" }
