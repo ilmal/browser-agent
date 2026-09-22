@@ -57,6 +57,7 @@ CREATE TABLE IF NOT EXISTS runs (
     started_at  REAL,
     finished_at REAL,
     used_agent  INTEGER NOT NULL DEFAULT 0,
+    reads_instruction INTEGER NOT NULL DEFAULT 1,
     payload     TEXT NOT NULL,
     result      TEXT,
     activity    TEXT NOT NULL,
@@ -91,6 +92,11 @@ class Run:
     started_at: float | None
     finished_at: float | None
     used_agent: bool
+    #: Whether a message would change what this attempt does — a fact about the
+    #: recipe at the time it ran, so it is stored rather than re-derived. A
+    #: stored recipe can be edited or deleted after the run, and a recipe that
+    #: is gone must not retroactively make an old thread claim it was steerable.
+    reads_instruction: bool
     payload: dict[str, Any]
     result: dict[str, Any] | None
     activity: list[dict[str, Any]]
@@ -108,6 +114,7 @@ class Run:
             "started_at": self.started_at,
             "finished_at": self.finished_at,
             "used_agent": self.used_agent,
+            "reads_instruction": self.reads_instruction,
             "payload": self.payload,
             "result": self.result,
             "activity": self.activity,
@@ -154,6 +161,7 @@ class RunStore:
             self._conn = sqlite3.connect(str(db_path), check_same_thread=False)
             self._conn.row_factory = sqlite3.Row
             self._conn.executescript(_SCHEMA)
+            self._migrate()
             self._conn.commit()
         except Exception as exc:
             # A read-only or missing volume must not stop the agent from running.
@@ -161,6 +169,27 @@ class RunStore:
             log.warning("run archive unavailable at %s (%s); runs will not be saved",
                         db_path, exc)
             self._conn = None
+
+    def _migrate(self) -> None:
+        """Bring an existing archive up to the current schema.
+
+        ``CREATE TABLE IF NOT EXISTS`` does nothing to a table that already
+        exists, so a column added later would silently be missing on every
+        database written by an older build — and the INSERT names it, so every
+        save would fail. Adding the column is the whole migration: the default
+        backfills the rows already there, which is right, because a run recorded
+        before this column existed was recorded by a build where every recipe's
+        steerability was the same question asked live.
+        """
+        if self._conn is None:
+            return
+        with contextlib.suppress(Exception):
+            have = {r["name"] for r in self._conn.execute("PRAGMA table_info(runs)")}
+            if "reads_instruction" not in have:
+                self._conn.execute(
+                    "ALTER TABLE runs ADD COLUMN reads_instruction "
+                    "INTEGER NOT NULL DEFAULT 1"
+                )
 
     @property
     def enabled(self) -> bool:
@@ -175,8 +204,9 @@ class RunStore:
             self._conn.execute(
                 "INSERT OR REPLACE INTO runs "
                 "(task_id, thread_id, profile, recipe, attempt, status, detail, "
-                "created_at, started_at, finished_at, used_agent, payload, result, "
-                "activity, decisions) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "created_at, started_at, finished_at, used_agent, "
+                "reads_instruction, payload, result, "
+                "activity, decisions) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     task.id,
                     getattr(task, "thread_id", "") or task.id,
@@ -189,6 +219,7 @@ class RunStore:
                     getattr(task, "started_at", None),
                     getattr(task, "finished_at", None),
                     1 if getattr(task, "used_agent", False) else 0,
+                    1 if getattr(task, "reads_instruction", True) else 0,
                     _dumps(getattr(task, "payload", {}) or {}),
                     _dumps(getattr(task, "result", None)),
                     _dumps(activity),
@@ -328,6 +359,11 @@ class RunStore:
             started_at=row["started_at"],
             finished_at=row["finished_at"],
             used_agent=bool(row["used_agent"]),
+            # Absent on rows written before the column existed; those runs all
+            # predate stored recipes' steerability question, and True is the
+            # permissive reading — it never claims a recipe that is not there.
+            reads_instruction=bool(row["reads_instruction"])
+            if "reads_instruction" in row.keys() else True,
             payload=_loads(row["payload"], {}),
             result=_loads(row["result"], None),
             activity=_loads(row["activity"], []),

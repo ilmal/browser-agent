@@ -74,10 +74,17 @@ class Task:
     #: live log per task, so without this a finished attempt's feed is gone and
     #: the thread has nothing to show for what it actually tried.
     activity: list[dict[str, Any]] = field(default_factory=list)
+    #: Whether a message on this attempt would change what it does. ``None``
+    #: means "ask the registry" and is resolved once in ``__post_init__``; an
+    #: attempt restored from the archive passes the stored answer instead, so a
+    #: recipe edited or deleted since cannot rewrite what an old run was.
+    reads_instruction: bool | None = None
 
     def __post_init__(self) -> None:
         if not self.thread_id:
             self.thread_id = self.id
+        if self.reads_instruction is None:
+            self.reads_instruction = recipe_reads_instruction(self.recipe)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -85,7 +92,7 @@ class Task:
             "recipe": self.recipe,
             # Whether a message on this attempt would change anything, so the
             # thread panel can promise the right thing before the operator types.
-            "reads_instruction": recipe_reads_instruction(self.recipe),
+            "reads_instruction": bool(self.reads_instruction),
             # Carried so the thread can show what each attempt was actually
             # asked to do — an attempt's instruction is the one thing the
             # operator needs in order to tell two attempts apart.

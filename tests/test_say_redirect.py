@@ -429,7 +429,10 @@ async def test_the_opening_instruction_is_recorded_in_the_thread(api_mod):
     assert [m.text for m in msgs] == ["find flights to Oslo"]
     assert msgs[0].role == "operator"
     assert msgs[0].kind == "instruction"
-    assert msgs[0].at <= out["created_at"] + 0.001, "the ask must precede the attempt"
+    # Not "close to": the ask caused the attempt, so it can never sort after it.
+    # Dating it at record time made the thread open on an attempt that answered
+    # a question nobody had asked yet, which is the bug this pins.
+    assert msgs[0].at <= out["created_at"], "the ask must not follow the attempt"
 
 
 @pytest.mark.asyncio

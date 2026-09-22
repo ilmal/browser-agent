@@ -257,9 +257,10 @@ def _recent_tasks(limit: int = 50) -> list[dict[str, Any]]:
             continue
         d = run.to_dict()
         d["id"] = d.pop("task_id")
-        # A finished attempt reads no instruction through its recipe, and the
-        # "Talk to it" flow depends on knowing that. Computing it costs nothing.
-        d["reads_instruction"] = recipe_reads_instruction(run.recipe)
+        # ``reads_instruction`` rides along from the record — the archive stored
+        # it when the run happened. Re-deriving it here would ask today's recipe
+        # registry a question about last week's run, so a stored recipe that was
+        # edited or deleted since would silently rewrite the answer.
         d["amended_count"] = 0
         d["archived"] = True
         out.append(d)
@@ -393,9 +394,17 @@ async def create_task(req: TaskRequest) -> dict[str, Any]:
     # whose whole reason for existing was this sentence. Recorded for every
     # recipe, because a deterministic one is asked for by prose too — the run
     # just does not read it — and hiding it would make the thread open mid-story.
+    #
+    # Stamped with the task's own creation time, not "now". Saying it after
+    # ``submit`` returns would date the ask a few hundred microseconds *later*
+    # than the attempt it caused, and the thread sorts by time — so the
+    # conversation would open with an attempt that answered a question nobody
+    # had asked yet.
     opening = _task_text(task)
     if opening:
-        threads.say(task.thread_id, "operator", "instruction", opening)
+        threads.say(
+            task.thread_id, "operator", "instruction", opening, at=task.created_at
+        )
     return task.to_dict()
 
 

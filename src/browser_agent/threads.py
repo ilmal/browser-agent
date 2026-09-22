@@ -82,6 +82,7 @@ class ThreadStore:
         text: str,
         *,
         meta: dict[str, Any] | None = None,
+        at: float | None = None,
     ) -> Message:
         if role not in ROLES:
             raise ValueError(f"unknown role {role!r}; have {ROLES}")
@@ -90,7 +91,7 @@ class ThreadStore:
         msg = Message(
             id=uuid.uuid4().hex[:12],
             thread_id=thread_id,
-            at=time.time(),
+            at=time.time() if at is None else at,
             role=role,
             kind=kind,
             text=" ".join(str(text).split())[:2000],

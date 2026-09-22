@@ -932,7 +932,11 @@ function renderThread() {
   const items = [];
   (threadData.messages || []).forEach(m => items.push({ at: m.at, kind: "msg", m }));
   (threadData.attempts || []).forEach(a => items.push({ at: a.created_at, kind: "att", a }));
-  items.sort((x, y) => (x.at || 0) - (y.at || 0));
+  // A message and the attempt it caused can share a timestamp to the
+  // fraction; the message goes first, because an attempt is the answer to
+  // whatever was said just before it.
+  items.sort((x, y) => (x.at || 0) - (y.at || 0) ||
+    (x.kind === "msg" ? -1 : 1));
 
   const turns = items.map(it => {
     if (it.kind === "msg") {
