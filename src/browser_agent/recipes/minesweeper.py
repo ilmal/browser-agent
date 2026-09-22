@@ -60,6 +60,10 @@ _MAX_TIEBREAK_CANDIDATES = 3
 
 class Minesweeper:
     name = "minesweeper.play"
+    #: Deterministic: the same code runs whatever it is told, so an operator
+    #: instruction is not an input it has. See /api/tasks/{id}/say.
+    reads_instruction = False
+
     description = "Play a full Beginner game of minesweeper.online to a win, solver-driven."
 
     def __init__(self, laya: LayaGate | None = None, settings: Any = None,

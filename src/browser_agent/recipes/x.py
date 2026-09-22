@@ -42,6 +42,10 @@ DEFAULT_MAX_CHARS = 280
 
 class XPost:
     name = "x.post"
+    #: Deterministic: the same code runs whatever it is told, so an operator
+    #: instruction is not an input it has. See /api/tasks/{id}/say.
+    reads_instruction = False
+
     description = "Post a text update to X as the logged-in account."
 
     @property

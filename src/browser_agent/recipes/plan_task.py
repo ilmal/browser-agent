@@ -40,6 +40,7 @@ class PlanTask:
         "Freeform: an LLM plans once, a deterministic executor runs the steps, "
         "Laya picks elements and confirms."
     )
+    reads_instruction = True
 
     @property
     def entry_url(self) -> str:

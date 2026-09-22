@@ -24,7 +24,13 @@ from .browser import BrowserSession, profile_exists
 from .config import Settings, load_settings
 from .escalation import detect_challenge
 from .scheduler import ScheduleStore
-from .tasks import TaskRunner, TaskStatus, list_recipes
+from .tasks import (
+    AGENT_RECIPE,
+    TaskRunner,
+    TaskStatus,
+    list_recipes,
+    recipe_reads_instruction,
+)
 from .threads import ThreadStore
 
 log = logging.getLogger(__name__)
@@ -413,6 +419,30 @@ async def steer_task(task_id: str, req: SteerRequest) -> dict[str, Any]:
 # -- the retry conversation ------------------------------------------------
 
 
+def _recipe_reads_payload(name: str) -> bool:
+    """Whether this recipe actually honours its payload's instruction.
+
+    The built-ins that do are the two agent paths and the stored step recipes
+    (whose steps carry their own goal text). Everything else — the thin social
+    recipes, the game — runs the same code whatever it is told.
+    """
+    return recipe_reads_instruction(name)
+
+
+def _last_url(task: Any) -> str:
+    """The URL the previous attempt was working on, as a start point.
+
+    Better than the recipe's ``entry_url`` when the operator is redirecting the
+    task: it is where the work actually is, so "go to another site" begins from
+    a real page rather than the site that just blocked us.
+    """
+    for source in (task.result or {}, task.payload, {"detail": task.detail or ""}):
+        url = source.get("url") if isinstance(source, dict) else None
+        if isinstance(url, str) and url.startswith("http"):
+            return url
+    return ""
+
+
 class SayRequest(BaseModel):
     text: str
     #: "instruction" changes the wording for the next attempt; "note" only
@@ -475,7 +505,20 @@ async def say(task_id: str, req: SayRequest) -> dict[str, Any]:
         return {"task_id": task.id, "ran": False, "control": runner.control.to_dict()}
 
     payload = {**task.payload, "task": text, "text": text, "goal": text}
-    nxt = runner.retry(task.id, payload=payload)
+
+    # A deterministic recipe reads no instruction: it does the same thing to the
+    # same site however the operator words it, so "don't use that site" would be
+    # recorded and then ignored, and the attempt would hit the same wall. Those
+    # recipes are exactly the ones the freeform agent exists to take over, so the
+    # attempt becomes an agent run — which *does* read the instruction — while
+    # anything that genuinely reads its payload (plan.task, agent.task, a stored
+    # step recipe) is left alone.
+    recipe = task.recipe
+    if not _recipe_reads_payload(recipe):
+        payload.setdefault("url", _last_url(task))
+        recipe = AGENT_RECIPE
+
+    nxt = runner.retry(task.id, payload=payload, recipe=recipe)
     return {"task_id": nxt.id, "ran": True, "task": nxt.to_dict()}
 
 

@@ -33,6 +33,10 @@ DEFAULT_MAX_CHARS = 63206
 
 class FacebookPagePost:
     name = "facebook.page_post"
+    #: Deterministic: the same code runs whatever it is told, so an operator
+    #: instruction is not an input it has. See /api/tasks/{id}/say.
+    reads_instruction = False
+
     description = "Post a text update to a Facebook Page the profile administers."
 
     @property

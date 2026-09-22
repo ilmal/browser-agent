@@ -21,7 +21,13 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 from browser_agent import recipes  # noqa: E402,F401  (registers built-ins)
-from browser_agent.tasks import Task, TaskRunner, TaskStatus, register  # noqa: E402
+from browser_agent.tasks import (  # noqa: E402
+    Task,
+    TaskRunner,
+    TaskStatus,
+    recipe_reads_instruction,
+    register,
+)
 from browser_agent.threads import ThreadStore  # noqa: E402
 
 
@@ -213,3 +219,54 @@ async def test_the_snapshot_survives_the_next_attempt_resetting_the_live_log(run
     # is still there, which is what the thread panel reads.
     assert [e["text"] for e in first.activity] == ["did the thing"]
     assert first.id != second.id
+
+
+# -- a message must actually change what the next attempt does -------------
+#
+# The operator's report: a blocked minesweeper task, told "go to another site.
+# dont use the site I'm blocked on", came back blocked on the *same* site one
+# second later. Nothing was broken in the plumbing — the message was recorded
+# and then ignored, because /say merged it into a payload that
+# ``minesweeper.play`` never reads. A deterministic recipe runs the same code
+# whatever it is told, so "say what to do differently" was a promise the old
+# code could not keep on exactly the recipes an operator most wants to redirect.
+
+DETERMINISTIC = ("minesweeper.play", "x.post", "facebook.page_post",
+                 "linkedin.page_post")
+INSTRUCTION_READING = ("plan.task", "agent.task")
+
+
+def test_the_agent_paths_and_stored_recipes_read_the_instruction():
+    from browser_agent.recipes.stored import StoredRecipe
+
+    for name in INSTRUCTION_READING:
+        assert recipe_reads_instruction(name) is True, name
+    assert StoredRecipe.reads_instruction is True
+
+
+def test_the_deterministic_recipes_do_not():
+    for name in DETERMINISTIC:
+        assert recipe_reads_instruction(name) is False, name
+
+
+def test_an_unknown_recipe_reads_nothing_instead_of_raising():
+    """A thread can outlive a stored recipe the operator deleted."""
+    assert recipe_reads_instruction("deleted.stored.recipe") is False
+
+
+def test_an_unregistered_recipe_still_serialises():
+    """to_dict is on every list and thread response, so it must never raise."""
+    assert Task(recipe="x", payload={}).to_dict()["reads_instruction"] is False
+
+
+def test_to_dict_reports_it_so_the_panel_can_promise_the_truth(runner):
+    register(_OkRecipe())
+    assert runner.submit("thread.ok", {"task": "one"}).to_dict()[
+        "reads_instruction"] is False
+    assert Task(recipe="plan.task", payload={}).to_dict()["reads_instruction"] is True
+
+
+def test_retry_keeps_the_recipe_when_none_is_given(runner):
+    register(_OkRecipe())
+    first = runner.submit("thread.ok", {"task": "one"})
+    assert runner.retry(first.id).recipe == "thread.ok"

@@ -387,9 +387,44 @@ const when = (ts) => ts ? new Date(ts * 1000).toLocaleString() : "—";
 // Write innerHTML only when it actually changed. Polling re-rendered a 50-row
 // table every few seconds, which made the page feel slow and could move a
 // button out from under the pointer mid-click.
+//
+// Rewriting innerHTML still collapses any <details> the operator had open, and
+// drops a text selection, so the open/closed state of every <details> inside is
+// carried across the rewrite. The key is a stable id on the element itself
+// (data-detail / data-keep), not its position, so reordering rows cannot swap
+// two panels' states.
+function detailsOpen(root) {
+  const state = {};
+  root.querySelectorAll("details").forEach((d, i) => {
+    if (d.open) state[d.dataset.detail || d.dataset.keep || `i${i}`] = true;
+  });
+  return state;
+}
+
+function restoreDetails(root, state) {
+  root.querySelectorAll("details").forEach((d, i) => {
+    const key = d.dataset.detail || d.dataset.keep || `i${i}`;
+    if (state[key]) d.open = true;
+  });
+}
+
 function set(id, html) {
   const el = $(id);
-  if (el.dataset.sig !== html) { el.innerHTML = html; el.dataset.sig = html; }
+  if (el.dataset.sig === html) return;
+  const open = detailsOpen(el);
+  const sel = window.getSelection();
+  // A selection inside this node would be destroyed by the rewrite; leave the
+  // text selected afterwards rather than silently dropping it mid-copy.
+  const hadSelection = sel && !sel.isCollapsed && el.contains(sel.anchorNode);
+  el.innerHTML = html;
+  el.dataset.sig = html;
+  restoreDetails(el, open);
+  if (hadSelection) {
+    const r = document.createRange();
+    r.selectNodeContents(el);
+    sel.removeAllRanges();
+    sel.addRange(r);
+  }
 }
 
 // Where this bot's noVNC view lives, as seen from the operator's browser.
@@ -545,7 +580,7 @@ function renderTasks() {
       <td>${esc(t.detail)}${isCurrent ? ` <span class="live-dot"></span>` : ""}${hasResult ? `<details data-detail="${esc(t.id)}">
         <summary>result</summary><pre>${esc(JSON.stringify(t.result, null, 2))}</pre></details>` : ""}</td>
       <td>${t.used_agent ? "yes" : "—"}</td>
-      <td class="muted">${ago(t.created_at)}</td>
+      <td class="muted"><span data-elapsed="${t.created_at}">${ago(t.created_at)}</span> ago</td>
       <td>${canRetry
         ? `<button class="ghost" data-talk="${esc(t.thread_id || t.id)}"
              title="Say what to do differently — it tries again with that"
@@ -790,34 +825,50 @@ function renderThread() {
   if (!threadData) return;
   const running = !!(state && state.current && threadData.attempts
     .some(a => a.id === state.current.id));
+  // A deterministic recipe has no instruction to change, so a message on one
+  // hands the work to the agent instead. Say so here rather than after they hit
+  // send: "it will try again with this" was a promise the old code could not
+  // keep on these recipes, which is exactly why the message looked ignored.
+  const last = threadData.attempts[threadData.attempts.length - 1];
+  const deterministic = last && last.reads_instruction === false;
   $("thread-sub").innerHTML = `Attempts at one piece of work. ` +
     (running
       ? `This one is still running — what you type steers it.`
-      : `The next thing you type becomes the next attempt, which is told what the
-         earlier ones already tried.`);
+      : deterministic
+        ? `<code>${esc(last.recipe)}</code> runs the same steps whatever it is told,
+           so your message becomes an <strong>agent run</strong> on this thread
+           instead of a re-run.`
+        : `The next thing you type becomes the next attempt, which is told what the
+           earlier ones already tried.`);
 
   const turns = [];
   const msgs = threadData.messages || [];
+  // Timestamps go through data-elapsed and the local ticker rather than being
+  // baked into the markup: an "ago" string changes every second, which changed
+  // the dedupe signature every second, which rewrote this whole panel every
+  // second. That is what made <details> collapse and killed text selection
+  // while you were reading. Same trick as the current-task card.
+  const age = (ts) => `<span data-elapsed="${ts}">${ago(ts)}</span> ago`;
   threadData.attempts.forEach((a, i) => {
     // Show the operator's messages that landed before this attempt, so the
     // panel reads as a conversation rather than two unrelated lists.
     msgs.filter(m => m.at <= a.created_at).forEach(m => {
       turns.push(`<div class="turn operator">
-        <div class="who">you · ${esc(ago(m.at))} ago</div>
+        <div class="who">you · ${age(m.at)}</div>
         <div class="say">${esc(m.text)}</div></div>`);
     });
     msgs.splice(0, msgs.filter(m => m.at <= a.created_at).length);
     const feed = (a.activity || []).slice(-8).map(e =>
       `<div class="muted">· ${esc(e.text)}</div>`).join("");
     turns.push(`<div class="turn ${esc(a.status)}">
-      <div class="who">attempt ${a.attempt} · <span class="status ${esc(a.status)}">${esc(a.status)}</span> · ${esc(ago(a.created_at))} ago</div>
+      <div class="who">attempt ${a.attempt} · <span class="status ${esc(a.status)}">${esc(a.status)}</span> · ${age(a.created_at)}</div>
       <div class="say">${esc(a.detail || "")}</div>
-      ${feed ? `<details><summary>what it did</summary>${feed}</details>` : ""}
+      ${feed ? `<details data-keep="a${esc(a.id)}"><summary>what it did</summary>${feed}</details>` : ""}
       ${a.used_agent ? `<div class="muted">finished via the agent fallback</div>` : ""}
     </div>`);
   });
   msgs.forEach(m => turns.push(`<div class="turn operator">
-    <div class="who">you · ${esc(ago(m.at))} ago</div>
+    <div class="who">you · ${age(m.at)}</div>
     <div class="say">${esc(m.text)}</div></div>`));
 
   const latest = threadData.attempts[threadData.attempts.length - 1];

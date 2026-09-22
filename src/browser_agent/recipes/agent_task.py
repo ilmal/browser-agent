@@ -21,6 +21,7 @@ from ..tasks import AGENT_RECIPE, register_builtin
 class AgentTask:
     name = AGENT_RECIPE
     description = "Freeform: give the agent an instruction and a start URL."
+    reads_instruction = True
     # No default: a freeform instruction is meaningless without a page to work
     # on, so the runner requires `url` in the payload rather than silently
     # handing the agent a blank page.

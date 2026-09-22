@@ -29,6 +29,9 @@ log = logging.getLogger(__name__)
 class StoredRecipe:
     """One operator-authored recipe, materialised from the library."""
 
+    #: Each step carries its own ``goal`` text, so the steps are the instruction.
+    reads_instruction = True
+
     def __init__(
         self,
         spec: dict[str, Any],

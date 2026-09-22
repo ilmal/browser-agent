@@ -83,6 +83,9 @@ class Task:
         return {
             "id": self.id,
             "recipe": self.recipe,
+            # Whether a message on this attempt would change anything, so the
+            # thread panel can promise the right thing before the operator types.
+            "reads_instruction": recipe_reads_instruction(self.recipe),
             # Carried so the thread can show what each attempt was actually
             # asked to do — an attempt's instruction is the one thing the
             # operator needs in order to tell two attempts apart.
@@ -110,6 +113,11 @@ class Recipe(Protocol):
     description: str
     #: Starting URL, used when the agent fallback has to take over.
     entry_url: str
+    #: Whether ``run`` reads the caller's instruction at all. False for the
+    #: thin recipes and the game, which do the same thing however they are
+    #: worded — so an operator message asking for something different has to
+    #: become an agent run instead (see ``/api/tasks/{id}/say``).
+    reads_instruction: bool
 
     async def run(self, session: BrowserSession, payload: dict[str, Any]) -> dict[str, Any]: ...
 
@@ -158,6 +166,18 @@ def get_recipe(name: str) -> Recipe:
     return _REGISTRY[name]
 
 
+def recipe_reads_instruction(name: str) -> bool:
+    """Whether ``name`` honours its payload's instruction.
+
+    False for a name that is not in the registry at all — a stored recipe the
+    operator deleted while a thread still references it. Absent is not
+    instruction-reading, and this must never raise: it is called from
+    ``Task.to_dict``, which every list and thread response goes through.
+    """
+    recipe = _REGISTRY.get(name)
+    return bool(getattr(recipe, "reads_instruction", False))
+
+
 def list_recipes() -> list[dict[str, str]]:
     _load_library()
     return [
@@ -166,6 +186,10 @@ def list_recipes() -> list[dict[str, str]]:
             "description": r.description,
             "entry_url": r.entry_url,
             "origin": "stored" if r.name in _STORED_NAMES else "builtin",
+            # Surfaced so the thread panel can promise the right thing: on a
+            # recipe that is told nothing, a message redirects the attempt to
+            # the agent rather than re-running the same deterministic code.
+            "reads_instruction": bool(getattr(r, "reads_instruction", False)),
         }
         for r in _REGISTRY.values()
     ]
@@ -288,12 +312,25 @@ class TaskRunner:
         )
         return task
 
-    def retry(self, task_id: str, *, payload: dict[str, Any] | None = None) -> Task:
+    def retry(
+        self,
+        task_id: str,
+        *,
+        payload: dict[str, Any] | None = None,
+        recipe: str | None = None,
+    ) -> Task:
         """Re-queue an existing task as the next attempt in its thread.
 
         Only legal once a human has cleared it. ``payload`` overrides the stored
         one, which is how an edited instruction becomes a real new plan instead
         of a re-run of the old text.
+
+        ``recipe`` lets an attempt change *how* it runs, not just what it is
+        told. A deterministic recipe has no prose path — it does the same thing
+        to the same site however you word the instruction — so an operator who
+        says "don't use that site" needs the attempt to become an agent run,
+        which does read the instruction. Without this, every message to a
+        blocked task re-ran the identical recipe and hit the identical wall.
 
         The new attempt inherits the thread so the conversation is one row in
         the History, and is briefed with what the earlier attempts tried — an
@@ -306,7 +343,7 @@ class TaskRunner:
         if brief:
             base = {**base, "history": brief}
         return self.submit(
-            old.recipe,
+            recipe or old.recipe,
             base,
             thread_id=old.thread_id,
             attempt=old.attempt + 1,
