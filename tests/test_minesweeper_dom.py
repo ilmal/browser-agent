@@ -180,6 +180,93 @@ def test_click_cell_uses_the_right_button(flag: bool, button: str):
     assert pace.seen == [("#cell_5_3", button)]
 
 
+class MousePage:
+    """Records the pointer path and the presses a Pace produces."""
+
+    def __init__(self, box: dict | None) -> None:
+        self._box = box
+        self.moves: list[tuple[float, float, int]] = []
+        self.presses: list[tuple[float, float, str]] = []
+        self.waits: list[int] = []
+        self.mouse = self._Mouse(self)
+
+    class _Mouse:
+        def __init__(self, page: MousePage) -> None:
+            self._p = page
+
+        async def move(self, x, y, steps=1):
+            self._p.moves.append((x, y, steps))
+
+        async def click(self, x, y, *, button="left", delay=None):
+            self._p.presses.append((x, y, button))
+
+    def locator(self, selector: str):
+        page = self
+
+        class Loc:
+            async def scroll_into_view_if_needed(self, timeout=None):
+                return None
+
+            async def bounding_box(self, timeout=None):
+                return page._box
+
+            async def click(self, *, button="left", timeout=None, delay=None):
+                page.presses.append((-1.0, -1.0, button))
+
+            @property
+            def first(self):
+                return self
+
+        return Loc()
+
+    async def wait_for_timeout(self, ms: int) -> None:
+        self.waits.append(ms)
+
+
+def test_pace_moves_the_pointer_instead_of_teleporting():
+    # locator.click() jumps the cursor to the target; a hand does not. The move
+    # must be stepped, and the press must land where the pointer went.
+    page = MousePage({"x": 100.0, "y": 200.0, "width": 24.0, "height": 24.0})
+    pace = Pace(min_ms=0, max_ms=0, hover_ms=0, jitter_px=4, move_steps=3)
+    asyncio.run(pace.click(page, "#cell_0_0"))
+
+    assert len(page.moves) == 1
+    x, y, steps = page.moves[0]
+    assert steps == 3
+    assert len(page.presses) == 1
+    px, py, button = page.presses[0]
+    assert button == "left"
+    # The press is at the point the pointer moved to, not the cell centre.
+    assert (px, py) == (x, y)
+
+
+def test_pace_lands_inside_the_cell_and_off_centre():
+    # Off-centre is the point, but it must never leave the cell: a 24px cell
+    # centred at (112,212) holds x in 100..124. Sample, since it is random.
+    page = MousePage({"x": 100.0, "y": 200.0, "width": 24.0, "height": 24.0})
+    pace = Pace(min_ms=0, max_ms=0, hover_ms=0, jitter_px=4)
+    seen = set()
+    for _ in range(100):
+        page.moves.clear()
+        asyncio.run(pace.click(page, "#cell_0_0"))
+        x, y, _ = page.moves[0]
+        assert 100.0 <= x <= 124.0, x
+        assert 200.0 <= y <= 224.0, y
+        seen.add((round(x, 3), round(y, 3)))
+    # And the landing point actually varies — a fixed offset is its own tell.
+    assert len(seen) > 50
+
+
+def test_pace_falls_back_to_locator_click_without_geometry():
+    # A detached or hidden cell has no bounding box. Losing the move would lose
+    # the game, so the plain click must still happen.
+    page = MousePage(None)
+    pace = Pace(min_ms=0, max_ms=0, hover_ms=0)
+    asyncio.run(pace.click(page, "#cell_0_0"))
+    assert page.presses == [(-1.0, -1.0, "left")]
+    assert page.moves == []
+
+
 def test_gameview_defaults_read_as_not_ready():
     # A GameView is also built by callers that only have a board; the flags
     # must default to "nothing known" rather than an optimistic True.

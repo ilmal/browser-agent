@@ -35,11 +35,29 @@ def _payload(grid: list[list[Any]], face: str = LIVE_FACE) -> dict:
 
 
 class ScriptedPage:
-    """A page that returns each payload in turn, and records the clicks."""
+    """A page that returns each payload in turn, and records the clicks.
+
+    Records at the *mouse* layer, because that is where the pace now presses:
+    ``locator.click()`` would teleport the pointer, so the pace computes a
+    landing point and presses with ``page.mouse``. Asserting on the selector
+    the locator was built from is what keeps these tests readable.
+    """
 
     def __init__(self, payloads: list[dict], clicks: list[tuple[str, str]]) -> None:
         self._payloads = list(payloads)
         self.clicks = clicks
+        self._pending = "#unknown"
+        self.mouse = self._Mouse(self)
+
+    class _Mouse:
+        def __init__(self, page: ScriptedPage) -> None:
+            self._p = page
+
+        async def move(self, x, y, steps=1):
+            return None
+
+        async def click(self, x, y, *, button="left", delay=None):
+            self._p.clicks.append((self._p._pending, button))
 
     async def evaluate(self, script, arg=None):
         # The last payload repeats if the loop reads more often than scripted,
@@ -51,6 +69,7 @@ class ScriptedPage:
 
     def locator(self, selector: str):
         page = self
+        page._pending = selector
 
         class Loc:
             async def scroll_into_view_if_needed(self, timeout=None):
@@ -58,6 +77,9 @@ class ScriptedPage:
 
             async def hover(self, timeout=None):
                 return None
+
+            async def bounding_box(self, timeout=None):
+                return {"x": 100.0, "y": 200.0, "width": 24.0, "height": 24.0}
 
             async def click(self, *, button="left", timeout=None, delay=None):
                 page.clicks.append((selector, button))

@@ -132,20 +132,34 @@ async def wait_for_board(page: Page, *, tries: int = 30, gap_ms: int = 1000) -> 
 
 @dataclass
 class Pace:
-    """Human-ish timing for every interaction.
+    """Human-ish timing and motion for every interaction.
 
     The ban this defends against keys on interaction volume and machine
-    regularity, so two properties matter and both are deliberate: a randomised
-    gap (never a fixed sleep) and a hover-then-pause before each press, which
-    is what a hand does and what a scripted ``dispatchEvent`` does not. The
-    click itself is Playwright's real trusted input — never a synthetic event,
-    which the site can and does distinguish.
+    regularity, so three properties matter and all three are deliberate:
+
+    * a **randomised** gap (never a fixed sleep), because a constant interval is
+      the machine tell;
+    * a **moving** pointer — the cursor travels to the cell in a few steps and
+      lands a little off-centre, because ``locator.click()`` teleports to the
+      exact centre of every target, which no hand does;
+    * a **real trusted press** (Playwright's own input). A synthetic
+      ``dispatchEvent`` click is what the site can and does distinguish — that,
+      not the pacing, is what got the earlier run blocked.
+
+    The off-centre landing is bounded well inside a 24x24 cell, so the miss
+    cannot lose a game.
     """
 
     min_ms: int = 220
     max_ms: int = 700
     #: Pause between moving onto a cell and pressing it.
     hover_ms: int = 90
+    #: Max distance the landing point may sit off the cell's centre. A cell is
+    #: ~24 px square, so ±4 px always stays inside it with room to spare.
+    jitter_px: int = 4
+    #: Segments the pointer travels in. One is a teleport; a few reads as a
+    #: hand moving across the board.
+    move_steps: int = 3
 
     def _gap(self) -> float:
         return random.uniform(self.min_ms, self.max_ms) / 1000.0
@@ -154,14 +168,36 @@ class Pace:
         """Wait a random beat, as a person would between decisions."""
         await page.wait_for_timeout(int(self._gap() * 1000))
 
+    def _landing_point(self, box: dict) -> tuple[float, float]:
+        """A point inside the cell, near but not exactly at its centre."""
+        jitter = self.jitter_px
+        return (
+            box["x"] + box["width"] / 2 + random.uniform(-jitter, jitter),
+            box["y"] + box["height"] / 2 + random.uniform(-jitter, jitter),
+        )
+
     async def click(self, page: Page, selector: str, *, button: str = "left") -> None:
-        """Hover, pause, then press — one real trusted click."""
+        """Travel to the cell in steps, pause, then press — one trusted click.
+
+        Uses ``page.mouse.click`` at a computed point rather than
+        ``locator.click()`` so the pointer path and landing are ours; the press
+        is still Playwright's real input, which is the part that matters.
+        """
         loc = page.locator(selector).first
         await loc.scroll_into_view_if_needed(timeout=5000)
-        await loc.hover(timeout=5000)
+        box = await loc.bounding_box(timeout=5000)
+        if box is None:
+            # No geometry (detached, hidden): fall back to the plain click
+            # rather than skipping the move — a lost move is a lost game.
+            await loc.click(button=button, timeout=8000, delay=random.randint(30, 90))
+            await self.settle(page)
+            return
+
+        x, y = self._landing_point(box)
+        await page.mouse.move(x, y, steps=self.move_steps)
         if self.hover_ms:
             await page.wait_for_timeout(self.hover_ms)
-        await loc.click(button=button, timeout=8000, delay=random.randint(30, 90))
+        await page.mouse.click(x, y, button=button, delay=random.randint(30, 90))
         await self.settle(page)
 
 
