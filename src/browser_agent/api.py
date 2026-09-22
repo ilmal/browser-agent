@@ -20,6 +20,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import BaseModel
 
 from . import recipes  # noqa: F401  (importing registers every built-in recipe)
+from .accounts import AccountStore, load_accounts, remove_account, valid_account
 from .agent import make_agent_runner
 from .browser import BrowserSession, profile_exists
 from .config import Settings, load_settings
@@ -42,7 +43,15 @@ settings: Settings = load_settings()
 session = BrowserSession(settings)
 store = ScheduleStore(settings.state_db)
 threads = ThreadStore()
-runner = TaskRunner(settings, session, agent_runner=make_agent_runner(settings))
+# The runner asks where the active account is rather than being told once, so a
+# pod that restarted after a switch reconciles before its first task instead of
+# running silently as the previous identity.
+runner = TaskRunner(
+    settings,
+    session,
+    agent_runner=make_agent_runner(settings),
+    active_account=lambda: load_accounts(settings.profile_root, settings.accounts_path).active_account(),
+)
 
 # Shown on a freshly started pod so noVNC opens on a real page instead of a
 # blank X root window. A data URL on purpose: it cannot fail on DNS, on the
@@ -83,6 +92,20 @@ async def _schedule_loop() -> None:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     import asyncio
+
+    # Migrate before anything touches the disk, and in particular before the
+    # browser pre-warm below. Order matters here and is not obvious: this build
+    # keeps Chrome's user-data-dir one level deeper than the last one
+    # (/profiles/<bot>/accounts/<account>), so a bot upgraded from the old
+    # layout has its login sitting at /profiles/<bot>/. Launching first would
+    # have Chrome create a *fresh* profile in the new location — and the
+    # migration would then merge the old files into a directory Chrome had
+    # already written, which is how a profile gets corrupted rather than merely
+    # reported wrong. So: move, then start.
+    try:
+        session.set_account(store_accounts().active_account())
+    except Exception:
+        log.exception("could not prepare this bot's accounts; the profile may be unmigrated")
 
     # Start the browser now rather than on first use. Everything a human sees
     # over noVNC is this X display, and the browser was only launched lazily by
@@ -200,7 +223,8 @@ async def healthz() -> dict[str, Any]:
     return {
         "ok": True,
         "profile": settings.profile,
-        "profile_initialised": profile_exists(settings),
+        "account": session.account,
+        "profile_initialised": profile_exists(settings, session.account),
         "llm_enabled": runner.llm.enabled,
     }
 
@@ -215,12 +239,24 @@ async def whoami() -> dict[str, Any]:
     the network, so a roster can poll every bot at once without waking any of
     them up. It is also the only endpoint that does not require the profile to
     have been initialised — a roster has to see a bot before it is signed in.
+
+    The account fields stay deliberately shallow for that reason: the roster
+    shows *which* identity is live, but the per-account detail (cookie counts
+    for each of four accounts, on every poll of every bot) belongs to the bot's
+    own page, and /api/state carries it.
     """
+    accounts = store_accounts()
+    running = accounts.get(session.account)
     return {
         "profile": settings.profile,
         "display_name": settings.display_name,
         "job": settings.display_job,
-        "profile_initialised": profile_exists(settings),
+        "account": session.account,
+        # Falls back to the slug when the running account is not in the store —
+        # reachable by hand-editing accounts.json under a live pod.
+        "account_label": running.to_dict()["display_label"] if running else session.account,
+        "accounts": len(accounts.accounts),
+        "profile_initialised": profile_exists(settings, session.account),
         "url_prefix": _REACHED_PREFIX.get(),
     }
 
@@ -236,7 +272,14 @@ async def state() -> dict[str, Any]:
         current["control"] = runner.control.to_dict()
     return {
         "profile": settings.profile,
-        "profile_initialised": profile_exists(settings),
+        "profile_initialised": profile_exists(settings, session.account),
+        # Which account this bot is running as, and every account it holds.
+        # Accounts are cheap to read (a small JSON file plus, per account, one
+        # read-only SQLite count), and a switch has to be reflected here
+        # immediately — the UI's question after clicking "switch" is "did it
+        # take", and a cached answer would say no.
+        "account": session.account,
+        "accounts": store_accounts().to_dict(),
         # Whether the browser behind noVNC is actually up. The window can be
         # closed from inside the live view, and until now nothing said so: the
         # next task just failed with a connection error. Recovery is automatic
@@ -583,6 +626,138 @@ async def restart_browser() -> dict[str, Any]:
         log.exception("browser restart failed")
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"browser_running": session.is_running(), "url": page.url}
+
+
+# -- accounts --------------------------------------------------------------
+
+
+class AccountRequest(BaseModel):
+    name: str
+    label: str = ""
+    email: str = ""
+    notes: str = ""
+
+
+class AccountSwitchRequest(BaseModel):
+    name: str
+
+
+@app.get("/api/accounts", dependencies=[Depends(require_token)])
+async def list_accounts() -> dict[str, Any]:
+    """Every account on this bot, and which of them is running.
+
+    Cheap and browser-free, like /api/whoami: the UI polls it beside the state.
+    """
+    return store_accounts().to_dict()
+
+
+@app.post("/api/accounts", dependencies=[Depends(require_token)])
+async def create_account(req: AccountRequest) -> dict[str, Any]:
+    """Add an account. It exists immediately but is not signed in.
+
+    Creating one does *not* switch to it: signing in is a deliberate act over
+    noVNC, and silently swapping the running identity under a bot that is
+    mid-schedule would be the wrong default even though it is technically safe
+    (the switch is serialised).
+    """
+    name = _clean_account(req.name)
+    if not valid_account(name):
+        raise HTTPException(status_code=400, detail="invalid account name")
+    acc = store_accounts()
+    if acc.get(name) is not None:
+        raise HTTPException(status_code=409, detail="account already exists")
+    acc.add(name, label=req.label, email=req.email, notes=req.notes)
+    acc.save()
+    return acc.to_dict()
+
+
+@app.post("/api/accounts/switch", dependencies=[Depends(require_token)])
+async def switch_account(req: AccountSwitchRequest) -> dict[str, Any]:
+    """Make one account the running identity, restarting the browser onto it.
+
+    Serialised against running tasks by the runner's lock: the switch waits for
+    the current task to finish rather than tearing a browser out from under it,
+    because two writers on one Chrome user-data-dir corrupt the profile.
+
+    A failure to relaunch is reported but the *store* keeps the new choice: the
+    operator asked for this account, and silently reverting would leave the UI
+    disagreeing with the file. A restart from the UI is the retry path.
+    """
+    name = _clean_account(req.name)
+    accounts = store_accounts()
+    if accounts.get(name) is None:
+        raise HTTPException(status_code=404, detail="no such account")
+
+    async with runner.account_switch():
+        accounts.set_active(name)
+        accounts.save()
+        session.set_account(name)
+        await session.stop()
+        error = ""
+        page_url = ""
+        try:
+            await session.start()
+            page = await session.page()
+            if page.url in ("", "about:blank"):
+                await page.goto(_IDLE_PAGE)
+            page_url = page.url
+        except Exception as exc:
+            log.exception("browser could not start on account %s", name)
+            error = str(exc)
+
+    payload = accounts.to_dict()
+    payload.update({
+        "browser_running": session.is_running(),
+        "url": page_url,
+        "error": error,
+    })
+    return payload
+
+
+@app.delete("/api/accounts/{name}", dependencies=[Depends(require_token)])
+async def delete_account(name: str, purge: bool = False) -> dict[str, Any]:
+    """Remove an account from the list, optionally deleting its profile dir.
+
+    ``purge`` is the destructive half and defaults OFF: dropping the name is
+    reversible (add it back and the Chrome directory is still there, still
+    signed in), whereas deleting the directory *is* logging out of everything
+    that identity holds. Deleting the running account is refused outright — the
+    browser is holding that directory open.
+
+    The last account is never removable: a bot with no account has no
+    user-data-dir to launch, so every later task would fail with a confusing
+    error instead of an honest "add an account first".
+    """
+    name = _clean_account(name)
+    accounts = store_accounts()
+    if accounts.get(name) is None:
+        raise HTTPException(status_code=404, detail="no such account")
+    if name == session.account:
+        raise HTTPException(status_code=409, detail="account is running; switch away first")
+    try:
+        removed = accounts.remove(name)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    accounts.save()
+    purged = remove_account(settings.profile_root, removed.name) if purge else False
+    payload = accounts.to_dict()
+    payload["purged"] = purged
+    return payload
+
+
+def store_accounts() -> AccountStore:
+    """Read this bot's accounts from disk, fresh.
+
+    Read per request rather than cached: the file is a few lines, and a cache
+    would have to be invalidated on every write — including writes by whatever
+    the operator does by hand over kubectl exec, which is the whole reason the
+    file is human-editable.
+    """
+    return load_accounts(settings.profile_root, settings.accounts_path)
+
+
+def _clean_account(name: str) -> str:
+    return str(name or "").strip().lower()
 
 
 # -- schedules -------------------------------------------------------------

@@ -101,6 +101,13 @@ async def list_bots() -> dict[str, Any]:
             # The pod's own answer wins on whether a human has signed in: it is
             # read off the PVC, whereas the registry only knows what it was told.
             "signed_in": bool(probe.get("reachable") and probe.get("profile_initialised")),
+            # Which identity is live, and how many the bot holds. Roster-level
+            # only: the per-account detail lives on the bot's own page, because
+            # polling four cookie counts for every bot on every roster refresh
+            # is work the roster has no use for.
+            "account": probe.get("account", ""),
+            "account_label": probe.get("account_label", ""),
+            "accounts": probe.get("accounts", 0),
         })
 
     return {

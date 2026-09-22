@@ -112,6 +112,10 @@ spec:
             - { name: novnc, containerPort: 6080 }
           env:
             - { name: AGENT_PROFILE, value: $NAME }
+            # The whole profile volume, mounted at the root: one bot = one PVC,
+            # and every account it holds is a user-data-dir inside it. Adding an
+            # account is a directory under /profiles/$NAME, so it needs no
+            # manifest change and no new PVC.
             - { name: PROFILES_ROOT, value: /profiles }
             - { name: DATA_ROOT, value: /data }
             # The shared recipe library, as the hub writes it. Stated

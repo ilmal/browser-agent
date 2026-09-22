@@ -19,6 +19,7 @@ import logging
 import time
 import uuid
 from collections.abc import Awaitable, Callable
+from contextlib import AbstractContextManager
 from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any, Protocol
@@ -259,11 +260,18 @@ class TaskRunner:
         session: BrowserSession,
         *,
         agent_runner: AgentRunner | None = None,
+        active_account: Callable[[], str] | None = None,
     ) -> None:
         self.settings = settings
         self.session = session
         self.llm = LLMClient(settings)
         self._agent_runner = agent_runner
+        # Where "which account should be running" comes from. A callable rather
+        # than a value because the answer changes while the pod lives, and a
+        # callable rather than a direct import so a test can run the runner with
+        # no account store at all.
+        self._active_account = active_account
+
         self.queue: asyncio.Queue[Task] = asyncio.Queue()
         self.tasks: dict[str, Task] = {}
         self.current: Task | None = None
@@ -275,6 +283,13 @@ class TaskRunner:
         self.control: Control | None = None
         self.activity = Activity()
         self._worker: asyncio.Task | None = None
+        # Held for the duration of a task and, separately, for an account
+        # switch. This is what makes "one account runs at a time" true rather
+        # than merely intended: a switch cannot land between two steps of a
+        # running task, and a task cannot start against a profile being swapped
+        # underneath it. Chrome's user-data-dir is single-writer, so the failure
+        # this prevents is a corrupted profile, not just a confusing log line.
+        self._run_lock = asyncio.Lock()
 
     # -- lifecycle ---------------------------------------------------------
 
@@ -382,6 +397,18 @@ class TaskRunner:
 
     # -- live control ------------------------------------------------------
 
+    def account_switch(self) -> AbstractContextManager[None]:
+        """Hold the run lock while the running account is changed.
+
+        The caller swaps the browser onto another account inside this block. The
+        lock is the whole point: without it a switch could land between two steps
+        of a running task, handing a live agent a different Chrome profile than
+        the one it launched on — and two writers on one user-data-dir corrupt it.
+        Waiting for the current task to finish is the trade: a switch is a
+        deliberate, occasional act and the operator can see the queue.
+        """
+        return self._run_lock
+
     def running(self, task_id: str) -> Task | None:
         """The task with this id iff it is the one currently executing."""
         if self.current is not None and self.current.id == task_id:
@@ -402,7 +429,8 @@ class TaskRunner:
         while True:
             task = await self.queue.get()
             try:
-                await self._run(task)
+                async with self._run_lock:
+                    await self._run(task)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # never let one task kill the worker
@@ -420,6 +448,14 @@ class TaskRunner:
                 self.queue.task_done()
 
     async def _run(self, task: Task) -> None:
+        # Bind the account every task, not once at boot. The store's `active` is
+        # the operator's choice and it changes while the pod lives; the session
+        # is created before the store is read, so on a pod that restarted after
+        # a switch the two would otherwise disagree — the file saying "work"
+        # while the browser was launched on "default", which is a task quietly
+        # running as the wrong identity. Reading it here also means the
+        # reconciliation happens under the run lock, so it cannot race a switch.
+        await self._bind_account()
         # A fresh activity log and control set per task: the runner outlives the
         # task, so without this the UI would show the previous task's steps and
         # a stale "stopped" flag would cancel the next one at step 0.
@@ -431,6 +467,32 @@ class TaskRunner:
         finally:
             self._attach(self.activity, None)
             self.control = None
+
+    async def _bind_account(self) -> None:
+        """Make the session match the account the store says is active.
+
+        Restarting only when the account actually differs keeps the common case
+        free: a bot with one account never relaunches, so this changes nothing
+        for every existing deployment. A failure to relaunch is logged and left
+        for the task itself to surface — a task is a better place to report a
+        broken browser than a background reconciliation.
+        """
+        if self._active_account is None:
+            return
+        try:
+            want = self._active_account()
+        except Exception:
+            log.warning("could not read the active account", exc_info=True)
+            return
+        if not want or want == self.session.account:
+            return
+        log.info("task binding to account %s (was %s)", want, self.session.account)
+        self.session.set_account(want)
+        await self.session.stop()
+        try:
+            await self.session.start()
+        except Exception:
+            log.exception("browser could not start on account %s", want)
 
     def _attach(self, activity: Activity, control: Control | None) -> None:
         """Mirror the live state onto the session, best-effort.
