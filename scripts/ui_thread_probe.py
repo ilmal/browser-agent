@@ -48,6 +48,20 @@ async def main() -> int:
         page.on("pageerror", lambda e: print("  [pageerror]", str(e)[:200]))
         await page.goto(args.url, wait_until="networkidle")
 
+        # A running task auto-opens the live-browser lightbox, which is
+        # `position: fixed; inset: 0` and swallows every click. Close it the way
+        # the operator does (the panel's close handler) rather than by hiding the
+        # node, so the probe drives the page as a person would.
+        await page.evaluate(
+            """() => {
+                const lb = document.getElementById('lightbox');
+                if (lb && !lb.classList.contains('hidden')) {
+                    document.getElementById('lb-close').click();
+                }
+            }"""
+        )
+        await page.wait_for_timeout(400)
+
         # Open the thread panel the way the operator does: the History row's
         # "Talk to it" button. Fall back to the banner if there is no row.
         if args.task_id:
