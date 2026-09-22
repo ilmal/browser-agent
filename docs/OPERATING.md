@@ -164,11 +164,35 @@ Confirmation is on.
 | Status | Meaning | What to do |
 |---|---|---|
 | `done` | Recipe worked, or the agent recovered it (`used_agent: true`) | nothing |
-| `blocked` | A human is needed. The agent was **not** invoked | open noVNC, clear it, then **Retry** |
+| `blocked` | A human is needed. The agent was **not** invoked | open noVNC, clear it, then **Talk to it** |
 | `failed` | Recipe broke and the fallback also failed, or no fallback | check `detail`; the recipe's selectors probably moved |
 
 `blocked` is the only state that means "a person must act". A `failed` that
 mentions selectors is a code fix, not an account problem.
+
+### Retrying is a conversation, not a button
+
+A failed or blocked row offers **Talk to it**, which opens the thread: every
+attempt at that one piece of work, with what was said between them. Type what to
+do differently and the next attempt is queued with it — and told what the
+earlier attempts tried, so it does not walk back into the same wall.
+
+Three things that are easy to assume wrongly:
+
+* **A message to a running task steers it; to a finished one it starts the next
+  attempt.** One box, and the page says which one you are doing, because needing
+  to know the difference before you can speak is the whole problem.
+* **The next attempt is briefed, not just re-queued.** Its payload carries a
+  `history` block: each earlier attempt's status, its `detail`, and the last few
+  feed lines. Both the planner and the agent template read it. An "iterate" that
+  did not carry the prior failure forward would just be a second identical roll.
+* **A finished attempt's feed is readable.** The runner snapshots the activity
+  log when an attempt ends (`GET /api/activity?task_id=`), because the live log
+  is reset per task — without the snapshot the thread could show only the
+  running attempt and the point of the thread would be lost.
+
+Everything an attempt did is preserved, so a thread is the record of what was
+tried and why it stopped, not just a list of outcomes.
 
 ## When a recipe breaks
 

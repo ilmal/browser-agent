@@ -57,13 +57,18 @@ async def _schedule_loop() -> None:
     import asyncio
 
     while True:
-        try:
-            for sched in store.due():
+        # Per schedule, not around the whole batch. One schedule naming a
+        # recipe that no longer exists — a stored recipe deleted from the
+        # library, say — raises out of submit(), and with the guard outside the
+        # loop that aborted every *later* schedule on every pass, forever.
+        # Each entry is independent, so each gets its own guard.
+        for sched in store.due():
+            try:
                 task = runner.submit(sched.recipe, sched.payload)
                 store.mark_run(sched.id, task.id)
                 log.info("schedule %s fired task %s", sched.id, task.id)
-        except Exception:
-            log.exception("schedule loop iteration failed")
+            except Exception:
+                log.exception("schedule %s could not be fired", sched.id)
         await asyncio.sleep(30)
 
 
