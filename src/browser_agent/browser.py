@@ -8,11 +8,14 @@ session to solve a captcha. A headless context would be un-takeover-able.
 from __future__ import annotations
 
 import logging
+import re
+import subprocess
 import time
 from pathlib import Path
 from typing import Any
 
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
+from playwright.sync_api import sync_playwright
 
 from .activity import Activity
 from .config import Settings
@@ -24,6 +27,26 @@ log = logging.getLogger(__name__)
 # when launched with `--remote-debugging-port=0`. Reading it is how a second
 # process attaches without guessing a port or hardcoding one.
 _DEVTOOLS_PORT_FILE = "DevToolsActivePort"
+
+_browser_exe: str | None = None
+
+
+def chromium_executable() -> str | None:
+    """Path to the Chromium Playwright will launch, resolved once.
+
+    Playwright's async and sync APIs expose the same bundled binary; the sync
+    entry point is the one that can be queried without a running event loop,
+    which is what lets a UA helper stay synchronous.
+    """
+    global _browser_exe
+    if _browser_exe is None:
+        try:
+            with sync_playwright() as p:
+                _browser_exe = p.chromium.executable_path
+        except Exception:
+            log.debug("could not resolve the Chromium path", exc_info=True)
+            _browser_exe = ""
+    return _browser_exe or None
 
 
 def _read_devtools_endpoint(profile_dir: Path, timeout_s: float = 10.0) -> str | None:
@@ -43,6 +66,42 @@ def _read_devtools_endpoint(profile_dir: Path, timeout_s: float = 10.0) -> str |
             pass
         time.sleep(0.25)
     return None
+
+
+def _browser_version() -> str | None:
+    """The bundled Chromium's own version, e.g. ``153.0.8010.12``.
+
+    Read from the binary so a Playwright upgrade cannot leave a hand-written
+    version string behind that no longer matches the engine underneath it.
+    """
+    try:
+        exe = chromium_executable()
+        if not exe:
+            return None
+        proc = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    match = re.search(r"(\d+\.\d+\.\d+\.\d+)", proc.stdout)
+    return match.group(1) if match else None
+
+
+def _user_agent(headless: bool) -> str | None:
+    """A UA string that does not announce the browser as automated.
+
+    Sites gate on this. minesweeper.online, for one, serves a script-less shell
+    with **zero** game cells to the stock Playwright headless UA
+    (``HeadlessChrome/…``) — the page looks loaded and is inert, which reads as
+    "the selector broke" rather than "the request was refused". In headless
+    mode Playwright also appends ``HeadlessChrome``, so the fix is to present a
+    plain Chrome UA; headed mode already sends one and needs no override.
+    """
+    if not headless:
+        return None
+    version = _browser_version() or "131.0.0.0"
+    return (
+        f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        f"(KHTML, like Gecko) Chrome/{version} Safari/537.36"
+    )
 
 
 def _clear_stale_profile_lock(profile_dir: Path) -> None:
@@ -127,6 +186,12 @@ class BrowserSession:
             ],
             "ignore_default_args": ["--enable-automation"],
         }
+        # Present a browser that does not announce itself as automated. Some
+        # sites (minesweeper.online) serve a script-less shell to Playwright's
+        # headless UA, which looks like a broken selector rather than a refusal.
+        agent = _user_agent(self.settings.headless)
+        if agent:
+            launch["user_agent"] = agent
         # A persistent context cannot be launched with a proxy per-page; the
         # proxy belongs to the browser. Residential egress (office-proxy) is
         # what keeps these sessions from being flagged as datacenter. This is
