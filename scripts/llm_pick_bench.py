@@ -62,8 +62,8 @@ async def main() -> int:
 
     correct = sum(1 for r in rows if r[2])
     no_pick = sum(1 for r in rows if r[1] == "<no pick>")
-    acted = total - no_pick
     total = len(rows)
+    acted = total - no_pick
 
     print(f"picker: {settings.picker_model} | cap {PICKER_CAP} | floor semantics: parse+range only")
     print(f"{'fixture':<18} correct  picked line")
