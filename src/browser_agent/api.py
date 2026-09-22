@@ -25,6 +25,7 @@ from .agent import make_agent_runner
 from .browser import BrowserSession, profile_exists
 from .config import Settings, load_settings
 from .escalation import detect_challenge
+from .router import route
 from .runstore import RunStore
 from .scheduler import ScheduleStore
 from .tasks import (
@@ -92,7 +93,11 @@ async def _schedule_loop() -> None:
         # Each entry is independent, so each gets its own guard.
         for sched in store.due():
             try:
-                task = runner.submit(sched.recipe, sched.payload)
+                # A schedule carries its instruction too, so it routes by the
+                # same rule as a typed one — a nightly "cheapest flight to X"
+                # schedule lands on the deterministic recipe, not the agent.
+                text = str(sched.payload.get("task") or sched.payload.get("text") or "")
+                task = runner.submit(route(text, sched.recipe), sched.payload)
                 store.mark_run(sched.id, task.id)
                 log.info("schedule %s fired task %s", sched.id, task.id)
             except Exception:
@@ -430,8 +435,13 @@ async def challenge() -> dict[str, Any]:
 
 @app.post("/api/tasks", dependencies=[Depends(require_token)])
 async def create_task(req: TaskRequest) -> dict[str, Any]:
+    # The recipe is picked here rather than trusted blindly: the instruction is
+    # what the operator actually wrote, and a deterministic recipe that can
+    # answer it outright must not lose to a 135-second LLM plan just because the
+    # dropdown was left on the default. See router.py.
+    text = str(req.payload.get("task") or req.payload.get("text") or "")
     try:
-        task = runner.submit(req.recipe, req.payload)
+        task = runner.submit(route(text, req.recipe), req.payload)
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     # The instruction that STARTED the work is part of the conversation, and it

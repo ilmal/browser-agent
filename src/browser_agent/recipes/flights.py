@@ -338,7 +338,6 @@ async def _confirm(session: BrowserSession, tfs: str) -> str | None:
     and the stop count, which is what makes the answer checkable by hand.
     """
     page = await _open_search(session, tfs)
-    card = page.locator("li").filter(has_not_text=" ").first
     el = page.locator("li").filter(has_text="SEK").first
     try:
         if await el.count():
@@ -361,6 +360,37 @@ class FlightSearch:
     @property
     def entry_url(self) -> str:
         return cfg("flights.search", "entry_url", "https://www.google.com/travel/flights")
+
+    @classmethod
+    def understands(cls, text: str, today: date) -> bool:
+        """Whether this recipe can answer ``text`` completely deterministically.
+
+        The router's contract, and it is deliberately strict: the sentence is
+        only claimed when *every* piece the run needs is already legible in it
+        — a flight word, two places this module can resolve, a month, and a
+        trip length. A partial match is worse than no match. Claiming "find
+        cheap flights to seattle in january" would hand the run to a recipe
+        whose first act is ``resolve_place``/``resolve_month`` raising
+        ``StepFailure``, i.e. the agent fallback anyway, but via a wasted
+        page load instead of an honest plan.
+
+        All seven of :data:`PLACES` plus any bare IATA code resolve; the month
+        and the duration come from the same helpers ``run()`` uses, so "yes
+        here" cannot disagree with "works there".
+        """
+        low = text.lower()
+        if not re.search(r"\bfl(?:ight|y|ights|ying)\b|\bairfare\b|\bround[- ]?trip\b", low):
+            return False
+        origin, dest = parse_market(text)
+        if not origin or not dest:
+            return False
+        try:
+            resolve_place(origin)
+            resolve_place(dest)
+            resolve_month(text, today)
+        except StepFailure:
+            return False
+        return parse_trip_length(text) is not None
 
     async def run(self, session: BrowserSession, payload: dict[str, Any]) -> dict[str, Any]:
         task_text = str(payload.get("task") or payload.get("text") or "").strip()

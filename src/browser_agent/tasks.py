@@ -192,6 +192,19 @@ def recipe_reads_instruction(name: str) -> bool:
     return bool(getattr(recipe, "reads_instruction", False))
 
 
+def iter_recipes() -> list[Recipe]:
+    """Every registered recipe, in registration order.
+
+    The order is the contract the router relies on: built-ins register by
+    importing ``recipes``, so it is stable across processes, and a stored
+    recipe registers after them. Anything that claims an instruction *first*
+    wins, which is why this returns the live objects rather than the
+    ``list_recipes`` dicts — the claim is a method, not a field.
+    """
+    _load_library()
+    return list(_REGISTRY.values())
+
+
 def list_recipes() -> list[dict[str, str]]:
     _load_library()
     return [
