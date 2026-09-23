@@ -38,6 +38,14 @@ class Bot:
     # Free text the operator can leave for themselves — which login this bot
     # holds, which account, what to do when it hits a wall.
     notes: str = ""
+    # Who this identity is, in the operator's words — the persona a farm task
+    # is framed for ("You are Kai. Background: …"). Injected into the task text
+    # when a farm assigns work to this bot, so each environment runs the same
+    # instruction as its own person.
+    background: str = ""
+    # Account notes for this identity: which site, which login, how the 2FA
+    # is solved. Lives on the hub's volume, never in the repo.
+    login_notes: str = ""
     created_at: float = 0.0
     # Whether the operator wants it on the roster's active list. Hidden is not
     # stopped: a hidden bot still runs its schedules, it is just out of the way
@@ -92,6 +100,8 @@ def load(path: Path) -> Registry:
             job=_clean(item.get("job", "")),
             url=_clean(item.get("url", "")),
             notes=_clean(item.get("notes", ""), 500),
+            background=_clean(item.get("background", ""), 2000),
+            login_notes=_clean(item.get("login_notes", ""), 2000),
             created_at=float(item.get("created_at") or 0.0),
             hidden=bool(item.get("hidden")),
         ))
@@ -127,9 +137,15 @@ def upsert(reg: Registry, profile: str, **fields) -> Bot:
     if bot is None:
         bot = Bot(profile=profile, created_at=time.time())
         reg.bots.append(bot)
-    for key in ("name", "job", "url", "notes"):
+    for key in ("name", "job", "url", "notes", "background", "login_notes"):
         if key in fields and fields[key] is not None:
-            setattr(bot, key, _clean(fields[key], 500 if key == "notes" else 200))
+            if key in ("background", "login_notes"):
+                limit = 2000
+            elif key == "notes":
+                limit = 500
+            else:
+                limit = 200
+            setattr(bot, key, _clean(fields[key], limit))
     if "hidden" in fields and fields["hidden"] is not None:
         bot.hidden = bool(fields["hidden"])
     reg.bots.sort(key=lambda b: b.created_at)

@@ -21,9 +21,11 @@ the result.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 import os
 import subprocess
+import time
 from pathlib import Path
 from typing import Any
 
@@ -32,14 +34,30 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
-from . import recipe_store, registry
+from . import farms, recipe_store, registry
 from .config import load_settings
 from .plan_model import PlanRejected
 
 log = logging.getLogger("browser_agent.hub")
 
 settings = load_settings()
-app = FastAPI(title="browser-agent roster")
+
+# The farm store lives beside the roster on the hub's volume, so an assignment
+# survives a hub restart: a farm scheduled for 10:00 must still fire at 10:00
+# even if the pod was recreated at 09:58. The runner is started by the app
+# lifespan, so the loop only exists while the process is actually serving.
+farm_store = farms.FarmStore(settings.registry_path.parent / "farms.json")
+farm_runner = farms.FarmRunner(farm_store, settings)
+
+
+@contextlib.asynccontextmanager
+async def _lifespan(app: FastAPI) -> Any:
+    farm_runner.start()
+    yield
+    await farm_runner.stop()
+
+
+app = FastAPI(title="browser-agent roster", lifespan=_lifespan)
 
 
 # -- auth ------------------------------------------------------------------
@@ -147,6 +165,8 @@ class PatchBot(BaseModel):
     name: str | None = None
     job: str | None = None
     notes: str | None = None
+    background: str | None = None
+    login_notes: str | None = None
     hidden: bool | None = None
 
 
@@ -277,6 +297,119 @@ async def delete_bot(profile: str, purge: bool = False) -> dict[str, Any]:
 async def roster_page() -> HTMLResponse:
     ui = Path(__file__).parent / "ui" / "roster.html"
     return HTMLResponse(ui.read_text())
+
+
+# -- farms -----------------------------------------------------------------
+#
+# A farm is one task assigned to several bots — the same instruction, run by
+# each environment as its own person. The hub owns it because only the hub can
+# reach every pod; the routes below are the write side (compose, cancel,
+# remove) and the read side the farm room renders, while the firing itself is
+# the runner's loop, started in the lifespan above.
+
+_FARM_MODES = ("parallel", "stagger", "schedule")
+
+
+class CreateFarm(BaseModel):
+    name: str = ""
+    recipe: str
+    task: str
+    url: str = ""
+    profiles: list[str]
+    mode: str = "parallel"
+    stagger_seconds: int = 60
+    # Only meaningful for mode="schedule": the epoch everyone starts at. A
+    # past epoch means "now" — the runner fires on its next tick either way.
+    start_at: float | None = None
+
+
+def _farm_payload(farm: farms.Farm) -> dict[str, Any]:
+    return farm.to_dict()
+
+
+@app.post("/api/farms", status_code=201, dependencies=[Depends(require_token)])
+async def create_farm(req: CreateFarm) -> dict[str, Any]:
+    if not req.recipe.strip():
+        raise HTTPException(400, "a farm needs a recipe")
+    if not req.task.strip():
+        raise HTTPException(400, "a farm needs a task")
+    if not req.profiles:
+        raise HTTPException(400, "a farm needs at least one environment")
+    if req.mode not in _FARM_MODES:
+        raise HTTPException(400, f"mode must be one of {', '.join(_FARM_MODES)}")
+    if req.mode == "stagger" and req.stagger_seconds <= 0:
+        raise HTTPException(400, "stagger_seconds must be positive")
+
+    # Catch at assignment time what would otherwise fail identically on every
+    # member: a recipe that does not exist, and a recipe with no built-in
+    # entry_url (agent.task) that was assigned without a start url.
+    from . import recipes  # noqa: F401  (registers the built-ins)
+    from .tasks import list_recipes
+
+    known = {r["name"]: r for r in list_recipes()}
+    if req.recipe not in known:
+        raise HTTPException(400, f"unknown recipe {req.recipe}")
+    if not req.url.strip() and not known[req.recipe]["entry_url"]:
+        raise HTTPException(400, f"recipe {req.recipe} needs a start url in the payload")
+
+    reg = registry.load(settings.registry_path)
+    bots: dict[str, registry.Bot] = {}
+    for profile in req.profiles:
+        bot = reg.get(profile)
+        if bot is None:
+            raise HTTPException(400, f"no bot named {profile} on the roster")
+        bots[profile] = bot
+
+    members = farms.build_members(
+        list(dict.fromkeys(req.profiles)), bots,
+        task=req.task.strip(), mode=req.mode,
+        stagger_seconds=req.stagger_seconds, start_at=req.start_at,
+        now=time.time(),
+    )
+    farm = farm_store.create(
+        name=req.name, recipe=req.recipe.strip(), task=req.task.strip(),
+        url=req.url, mode=req.mode, stagger_seconds=req.stagger_seconds,
+        members=members,
+    )
+    log.info("created farm %s (%s) -> %d members", farm.id, farm.mode, len(farm.members))
+    return {"farm": _farm_payload(farm)}
+
+
+@app.get("/api/farms", dependencies=[Depends(require_token)])
+async def list_farms() -> dict[str, Any]:
+    return {"farms": [_farm_payload(f) for f in farm_store.all()]}
+
+
+@app.get("/api/farms/{farm_id}", dependencies=[Depends(require_token)])
+async def get_farm(farm_id: str) -> dict[str, Any]:
+    farm = farm_store.get(farm_id)
+    if farm is None:
+        raise HTTPException(404, f"no farm named {farm_id}")
+    return {"farm": _farm_payload(farm)}
+
+
+@app.post("/api/farms/{farm_id}/cancel", dependencies=[Depends(require_token)])
+async def cancel_farm(farm_id: str) -> dict[str, Any]:
+    """Cancel what has not started; running members keep running.
+
+    Stopping a live member is a decision made on that bot's own page with its
+    own stop button — the farm's cancel is about the assignment, not about
+    reaching into pods.
+    """
+    farm = farm_store.get(farm_id)
+    if farm is None:
+        raise HTTPException(404, f"no farm named {farm_id}")
+    farms.cancel_farm(farm)
+    farm_store.persist()
+    log.info("cancelled farm %s", farm_id)
+    return {"farm": _farm_payload(farm)}
+
+
+@app.delete("/api/farms/{farm_id}", dependencies=[Depends(require_token)])
+async def delete_farm(farm_id: str) -> dict[str, Any]:
+    if not farm_store.remove(farm_id):
+        raise HTTPException(404, f"no farm named {farm_id}")
+    return {"ok": True}
 
 
 # -- the recipe library ----------------------------------------------------

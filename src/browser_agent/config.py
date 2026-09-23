@@ -209,6 +209,11 @@ class Settings:
     # profile is the wrong place for it (several bots share one roster).
     registry_path: Path = Path("/data/bots.json")
     bot_probe_timeout_s: float = 3.0
+    # How the hub reaches a bot pod's API: {profile} and {api_port} are
+    # substituted per call. Bare service DNS resolves from inside the cluster
+    # (the hub pod has the namespace search path); the override exists for a
+    # hub run from a laptop, where the pod names are unreachable.
+    bot_url_template: str = "http://profile-{profile}:{api_port}"
     namespace: str = "browser-agent"
     kubectl_bin: str = "kubectl"
     # Where the "new bot" button finds the manifest generator. Baked into the
@@ -333,6 +338,7 @@ def load_settings() -> Settings:
         laya_pick_retries=_env_int("LAYA_PICK_RETRIES", 1),
         registry_path=Path(_env("REGISTRY_PATH", "/data/bots.json")),
         bot_probe_timeout_s=_env_float("BOT_PROBE_TIMEOUT_S", 3.0),
+        bot_url_template=_env("BOT_URL_TEMPLATE", "http://profile-{profile}:{api_port}"),
         namespace=_env("AGENT_NAMESPACE", "browser-agent"),
         kubectl_bin=_env("KUBECTL_BIN", "kubectl"),
         add_profile_script=_env(
