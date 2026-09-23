@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 import uuid
@@ -142,6 +143,36 @@ PLAN_RECIPE = "plan.task"
 def _task_text(task: Task) -> str:
     """The instruction as the caller wrote it, whichever field they used."""
     return str(task.payload.get("task") or task.payload.get("text") or "").strip()
+
+
+def _outcome_text(task: Task) -> str | None:
+    """The bot's one-line report for a finished attempt.
+
+    None for a status that is not an outcome — a worker cancelled mid-run
+    leaves its task RUNNING, and a pod shutdown is not something to speak.
+    Normalised the way ThreadStore.say stores text (whitespace collapsed) so
+    the dedupe compares against what is actually in the thread.
+    """
+    if task.status is TaskStatus.DONE:
+        body = ""
+        if task.result:
+            if isinstance(task.result, dict):
+                body = json.dumps(task.result, ensure_ascii=False, default=str)
+            else:
+                body = str(task.result)
+        body = body or task.detail or "finished"
+        text = f"Done: {body}"
+    elif task.status is TaskStatus.BLOCKED:
+        text = f"I'm blocked and need you: {task.detail or 'a challenge I cannot pass'}"
+    elif task.status is TaskStatus.FAILED:
+        detail = task.detail or "no detail"
+        if "stopped by the operator" in detail:
+            # The operator's own decision is not a failure to report.
+            return "Stopped at your request."
+        text = f"Failed: {detail}"
+    else:
+        return None
+    return " ".join(text.split())[:300]
 
 _REGISTRY: dict[str, Recipe] = {}
 
@@ -281,6 +312,7 @@ class TaskRunner:
         *,
         agent_runner: AgentRunner | None = None,
         runs: Any = None,
+        threads: Any = None,
         active_account: Callable[[], str] | None = None,
     ) -> None:
         self.settings = settings
@@ -291,6 +323,10 @@ class TaskRunner:
         # that only wants the live behaviour — is not forced to build one; a
         # missing archive costs the record, never the run.
         self.runs = runs
+        # The thread store, so a finished attempt can speak its outcome into
+        # the conversation. Optional for the same reason as `runs`: a missing
+        # store costs the message, never the run.
+        self.threads = threads
         # Where "which account should be running" comes from. A callable rather
         # than a value because the answer changes while the pod lives, and a
         # callable rather than a direct import so a test can run the runner with
@@ -508,6 +544,9 @@ class TaskRunner:
                 # run is already over, and a store failure must not surface as a
                 # task failure.
                 self._archive(task)
+                # The bot's own turn in the conversation it was given: a run
+                # that ends says so in its thread, not only in History.
+                self._speak_outcome(task)
                 self.current = None
                 self.queue.task_done()
 
@@ -516,6 +555,29 @@ class TaskRunner:
             return
         with contextlib.suppress(Exception):
             self.runs.save(task)
+
+    def _speak_outcome(self, task: Task) -> None:
+        """Post the attempt's outcome into its thread as a bot message.
+
+        The operator reads a thread as a conversation, so a run that ends says
+        so there instead of leaving the outcome only in History. Deduped: the
+        worker can pass one terminal task through here more than once (a
+        cancelled worker re-runs its ``finally``), and the tail message is
+        what the room UI reads. Best-effort like the archive — the run is
+        already over, and a broken store must not surface as a new failure.
+        """
+        if self.threads is None:
+            return
+        try:
+            text = _outcome_text(task)
+            if text is None:
+                return
+            recent = self.threads.for_thread(task.thread_id)
+            if recent and recent[-1].role == "bot" and recent[-1].text == text:
+                return
+            self.threads.say(task.thread_id, "bot", "note", text)
+        except Exception:
+            log.debug("outcome message for %s not posted", task.id, exc_info=True)
 
     async def _run(self, task: Task) -> None:
         # Bind the account every task, not once at boot. The store's `active` is

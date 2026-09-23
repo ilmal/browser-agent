@@ -60,6 +60,7 @@ runner = TaskRunner(
     session,
     agent_runner=make_agent_runner(settings),
     runs=runs,
+    threads=threads,
     active_account=lambda: load_accounts(
         settings.profile_root, settings.accounts_path
     ).active_account(),
