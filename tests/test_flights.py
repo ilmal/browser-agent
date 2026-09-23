@@ -189,3 +189,84 @@ def test_click_first_gives_up_when_the_selector_never_appears():
 
     assert asyncio.run(_click_first(page, ("#nope",), timeout_s=0.3)) is False
     assert page.clicked == []
+
+
+def test_transient_nav_errors_are_classified_not_matched_loosely():
+    # Measured live 2026-09-23: a SOCKS-tunnel blip killed 2 of 3 benchmark runs
+    # with "Page.goto: net::ERR_PROXY_CONNECTION_FAILED". That is the hop, not
+    # Google, and the next attempt usually succeeds — but only if the string is
+    # recognised as retryable. A real refusal must not be.
+    from browser_agent.browser import is_transient_nav_error
+
+    blip = Exception(
+        "Page.goto: net::ERR_PROXY_CONNECTION_FAILED at https://www.google.com/travel/flights"
+    )
+    assert is_transient_nav_error(blip) is True
+    assert is_transient_nav_error(Exception("net::ERR_CONNECTION_RESET")) is True
+    # Not a network hop: retrying would just repeat the failure.
+    closed = Exception("Target page, context or browser has been closed")
+    assert is_transient_nav_error(closed) is False
+    assert is_transient_nav_error(ValueError("bad url")) is False
+
+
+def test_goto_retries_a_transient_hop_then_succeeds():
+    # The whole point: one flaky hop costs a retry, not the run.
+    import asyncio
+
+    from browser_agent.browser import BrowserSession
+
+    calls = {"n": 0}
+
+    class _P:
+        async def goto(self, url, wait_until="domcontentloaded"):
+            calls["n"] += 1
+            if calls["n"] < 3:
+                raise Exception(
+                    "Page.goto: net::ERR_PROXY_CONNECTION_FAILED at " + url
+                )
+
+    class _S(BrowserSession):
+        def __init__(self):  # bypass Settings entirely
+            self._ctx = _P()
+
+        async def page(self):
+            return self._ctx
+
+    page = asyncio.run(_S().goto("https://example.com", backoff_s=0.01))
+    assert calls["n"] == 3 and page is not None
+
+
+def test_goto_gives_up_after_the_last_attempt_and_does_not_retry_a_refusal():
+    import asyncio
+
+    from browser_agent.browser import BrowserSession
+
+    class _P:
+        def __init__(self, err):
+            self.n = 0
+            self.err = err
+
+        async def goto(self, url, wait_until="domcontentloaded"):
+            self.n += 1
+            raise self.err
+
+    class _S(BrowserSession):
+        def __init__(self, p):
+            self._ctx = p
+
+        async def page(self):
+            return self._ctx
+
+    import pytest
+
+    # Bounded: exactly `attempts` tries, then it raises.
+    p1 = _P(RuntimeError("net::ERR_PROXY_CONNECTION_FAILED"))
+    with pytest.raises(RuntimeError):
+        asyncio.run(_S(p1).goto("https://example.com", attempts=2, backoff_s=0.01))
+    assert p1.n == 2
+
+    # A refusal is not the hop: one attempt, no delay.
+    p2 = _P(RuntimeError("Target page, context or browser has been closed"))
+    with pytest.raises(RuntimeError):
+        asyncio.run(_S(p2).goto("https://example.com", attempts=3, backoff_s=0.01))
+    assert p2.n == 1

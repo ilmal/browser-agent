@@ -661,7 +661,17 @@ class TaskRunner:
             await self._run_plan_recipe(task, recipe)
             return
 
-        page = await self.session.goto(recipe.entry_url)
+        try:
+            page = await self.session.goto(recipe.entry_url)
+        except Exception as exc:
+            # `goto` already retried a transient egress failure. Still failing
+            # means the hop is down for good, which the agent fallback cannot fix
+            # either — it egresses the same tunnel. Fail legibly instead of
+            # escaping to the worker as "unhandled", which reads like a crash.
+            task.status = TaskStatus.FAILED
+            task.detail = f"entry page unreachable: {exc}"
+            log.warning("entry page for %s unreachable: %s", task.recipe, exc)
+            return
 
         # A challenge before we even start means the profile is not usable.
         challenge = await detect_challenge(page)

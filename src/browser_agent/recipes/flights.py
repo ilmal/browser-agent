@@ -36,7 +36,7 @@ from datetime import date, timedelta
 from typing import Any
 
 from ..activity import activity_of
-from ..browser import BrowserSession
+from ..browser import BrowserSession, is_transient_nav_error
 from ..plan_model import StepFailure
 from ..tasks import register_builtin
 from ._config import cfg
@@ -343,7 +343,18 @@ async def _click_first(
 
 async def _open_search(session: BrowserSession, tfs: str) -> Any:
     """Load one ``tfs``, dismiss consent, click Search, wait for prices."""
-    page = await session.goto(_SEARCH_URL.format(tfs=tfs))
+    try:
+        # `session.goto` already retries a transient egress failure; this catch
+        # converts the *persistent* case into a StepFailure, so the run reaches
+        # the agent fallback instead of dying as "unhandled" with no second
+        # chance.
+        page = await session.goto(_SEARCH_URL.format(tfs=tfs))
+    except Exception as exc:
+        if is_transient_nav_error(exc):
+            raise StepFailure(
+                f"could not reach google (egress unavailable): {exc}"
+            ) from exc
+        raise
     await page.wait_for_timeout(2500)
     # Distinguish the rate wall from a page that merely has no results: every
     # later symptom ("no Search button", "no prices") is the same wall wearing a

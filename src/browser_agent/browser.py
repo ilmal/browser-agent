@@ -7,6 +7,7 @@ session to solve a captcha. A headless context would be un-takeover-able.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import re
 import socket
@@ -128,6 +129,32 @@ def _user_agent(headless: bool) -> str | None:
         f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         f"(KHTML, like Gecko) Chrome/{version} Safari/537.36"
     )
+
+
+#: Chromium's network-error strings that mean "the hop failed", not "the page
+#: said no". These sessions egress through a SOCKS tunnel whose far end is a
+#: residential line; when that end reconnects, an in-flight navigation dies with
+#: one of these. Measured live 2026-09-23: a tunnel blip killed 2 of 3 benchmark
+#: runs outright, because a *pre-run* navigation raised outside the recipe's
+#: error handling and there was nothing left to fall back to.
+TRANSIENT_NAV_ERRORS = (
+    "ERR_PROXY_CONNECTION_FAILED",
+    "ERR_TUNNEL_CONNECTION_FAILED",
+    "ERR_NETWORK_CHANGED",
+    "ERR_CONNECTION_RESET",
+    "ERR_CONNECTION_CLOSED",
+    "ERR_CONNECTION_REFUSED",
+    "ERR_EMPTY_RESPONSE",
+    "ERR_SOCKS_CONNECTION_FAILED",
+    "ERR_TIMED_OUT",
+    "ERR_NAME_NOT_RESOLVED",
+)
+
+
+def is_transient_nav_error(exc: BaseException) -> bool:
+    """Whether ``exc`` is a flaky-hop failure worth retrying rather than a refusal."""
+    text = str(exc)
+    return any(name in text for name in TRANSIENT_NAV_ERRORS)
 
 
 def _clear_stale_profile_lock(profile_dir: Path) -> None:
@@ -297,10 +324,43 @@ class BrowserSession:
             return ctx.pages[0]
         return await ctx.new_page()
 
-    async def goto(self, url: str, *, wait_until: str = "domcontentloaded") -> Page:
+    async def goto(
+        self,
+        url: str,
+        *,
+        wait_until: str = "domcontentloaded",
+        attempts: int = 3,
+        backoff_s: float = 3.0,
+    ) -> Page:
+        """Navigate, retrying a transient egress failure.
+
+        Every caller drives a browser that egresses a SOCKS tunnel; when the far
+        end reconnects, a navigation dies with ``ERR_PROXY_CONNECTION_FAILED``
+        and the next one usually succeeds. Retrying here means one flaky hop
+        costs a few seconds instead of the whole run. A non-transient error — a
+        real refusal, a bad URL — raises at once, so this never hides a real
+        problem behind a delay.
+        """
         page = await self.page()
-        await page.goto(url, wait_until=wait_until)
-        return page
+        last: BaseException | None = None
+        for i in range(max(1, attempts)):
+            try:
+                await page.goto(url, wait_until=wait_until)
+                return page
+            except Exception as exc:
+                last = exc
+                if not is_transient_nav_error(exc) or i == attempts - 1:
+                    raise
+                log.warning(
+                    "transient navigation failure (attempt %d/%d) for %s: %s",
+                    i + 1,
+                    attempts,
+                    url,
+                    exc,
+                )
+                await asyncio.sleep(backoff_s * (i + 1))
+        assert last is not None
+        raise last
 
     async def stop(self) -> None:
         if self._context is not None:
