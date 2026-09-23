@@ -966,6 +966,10 @@ function makeRow(key, at, html) {
 function insertSorted(key, at, node) {
   let anchor = null;
   for (const [, v] of rendered) { if (v.at > at) { anchor = v.el; break; } }
+  // The first real row retires the empty-state hint, which otherwise lingers
+  // above the messages until the next full rebuild.
+  const empty = $("transcript").querySelector(".empty");
+  if (empty) empty.remove();
   $("transcript").insertBefore(node, anchor);
   rendered.set(key, { at, el: node });
 }
