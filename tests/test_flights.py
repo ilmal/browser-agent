@@ -10,6 +10,8 @@ from __future__ import annotations
 from datetime import date
 
 from browser_agent.recipes.flights import (
+    _SEARCH_URL,
+    _click_first,
     _endpoint,
     encode_tfs,
     parse_cells,
@@ -31,10 +33,18 @@ def test_encode_tfs_is_byte_identical_to_a_real_capture():
     assert encode_tfs("2027-01-14", "2027-01-22", "ARN", "SEA") == REAL_TFS
 
 
-def test_encode_tfs_airport_vs_city_endpoint():
-    # IATA -> kind 1; a /m/ kgmid -> kind 3. The tag byte is what GF reads.
+def test_encode_tfs_endpoint_is_iata_kind_1():
+    # The tag byte is what GF reads: kind 1 = an IATA code. A kgmid (kind 3)
+    # does NOT populate the form — it renders Explore with no Search button —
+    # so it is refused here rather than silently producing an unsearchable tfs.
+    import pytest
+
+    from browser_agent.plan_model import StepFailure
+
     assert _endpoint("ARN") == b"\x08\x01\x12\x03ARN"
-    assert _endpoint("/m/06mxs") == b"\x08\x03\x12\x08/m/06mxs"
+    assert _endpoint("STO") == b"\x08\x01\x12\x03STO"
+    with pytest.raises(StepFailure):
+        _endpoint("/m/06mxs")
 
 
 def test_encode_tfs_roundtrips_dates_and_airports():
@@ -63,7 +73,11 @@ def test_resolve_month_prefers_iso_then_next_occurrence():
 
 
 def test_resolve_place():
-    assert resolve_place("Stockholm") == "/m/06mxs"
+    # Cities resolve to a 3-letter metro code (STO covers every Stockholm
+    # airport), not a kgmid: the form rejects kgmids and the tfs then yields a
+    # button-less Explore page.
+    assert resolve_place("Stockholm") == "STO"
+    assert resolve_place("Seattle") == "SEA"
     assert resolve_place("ARN") == "ARN"
     assert resolve_place("xyz") == "XYZ"  # a bare 3-letter code passes through
 
@@ -109,3 +123,69 @@ def test_pick_cheapest_breaks_ties_on_the_earlier_departure():
         (5071, date(2027, 1, 13), date(2027, 1, 21), 8),
     ]
     assert pick_cheapest(cells, 8)[1] == date(2027, 1, 13)
+
+
+def test_search_url_pins_the_locale():
+    # Google localises from the egress IP and this bot egresses Sweden, so a
+    # URL without an explicit locale renders the Swedish form — "Sök", "Sökväg",
+    # "14 jan" — and the literal English selectors below it match nothing. Seen
+    # live 2026-09-23: the recipe reported "no Search button" and the agent then
+    # clicked that very button, because it clicks by meaning and the recipe does
+    # not. Pin hl/gl/curr so the parsed page is the same page whatever the IP.
+    url = _SEARCH_URL.format(tfs="TFS")
+    assert "hl=en" in url and "gl=se" in url and "curr=SEK" in url
+    assert "/travel/flights/search?" in url
+
+
+class _Locator:
+    def __init__(self, page, selector):
+        self._page = page
+        self._selector = selector
+        self.first = self
+        self.last = self
+
+    async def count(self):
+        # The SPA paints its form after domcontentloaded: absent, then present.
+        return 1 if self._page.ticks >= self._page.appears_at else 0
+
+    async def click(self, *, timeout=None):
+        self._page.clicked.append(self._selector)
+
+
+class _Page:
+    def __init__(self, appears_at):
+        self.ticks = 0
+        self.appears_at = appears_at
+        self.clicked: list[str] = []
+
+    def locator(self, selector):
+        return _Locator(self, selector)
+
+
+def test_click_first_waits_out_a_late_paint():
+    # The bug: count() is instantaneous, so a single sample reads "not yet
+    # painted" as "not on the page". Poll instead of sampling once.
+    import asyncio
+
+    page = _Page(appears_at=3)
+
+    async def bumper():
+        while page.ticks < page.appears_at:
+            await asyncio.sleep(0.01)
+            page.ticks += 1
+
+    async def run():
+        await asyncio.gather(
+            bumper(), _click_first(page, ('button[aria-label="Search"]',))
+        )
+
+    asyncio.run(run())
+    assert page.clicked == ['button[aria-label="Search"]']
+
+
+def test_click_first_gives_up_when_the_selector_never_appears():
+    page = _Page(appears_at=10_000)
+    import asyncio
+
+    assert asyncio.run(_click_first(page, ("#nope",), timeout_s=0.3)) is False
+    assert page.clicked == []

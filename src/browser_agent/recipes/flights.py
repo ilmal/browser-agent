@@ -50,7 +50,19 @@ SOCS = "CAESHAgCEhJnd3MfMjAyMzA4MTAtMF9SQzIaAmVuIAEaBgiA_LyaBg"
 #: The fixed "flights and prices, no filters" request constant.
 TFU = "EgQIABABIgA"
 
-_SEARCH_URL = "https://www.google.com/travel/flights?tfs={tfs}&tfu=" + TFU
+#: Google localises the page from the *egress IP*, and this bot egresses a
+#: Swedish residential address, so without an explicit locale the form renders
+#: in Swedish — where the button is ``aria-label="Sök"``, not ``"Search"``, and
+#: the grid cells read ``14 jan``, not ``Jan 14``. The agent path never noticed
+#: because it clicks by meaning (measured 2026-09-23: the recipe reported "no
+#: Search button" and the agent then clicked that very button — it had simply
+#: been rendered in Swedish). The locale is pinned in the URL so the page this
+#: recipe parses is the same page on every run, whatever the IP geolocates to.
+_SEARCH_URL = (
+    "https://www.google.com/travel/flights/search?tfs={tfs}&hl=en&tfu="
+    + TFU
+    + "&curr=SEK&gl=se"
+)
 _SEARCH_BUTTONS = (
     'button[aria-label="Search for flights"]',
     'button[aria-label="Search"]',
@@ -60,6 +72,11 @@ _DATE_GRID_TABS = (
     '[role="tab"]:has-text("Date grid")',
 )
 _ACCEPT_BUTTONS = ('button:has-text("Accept all")', 'button:has-text("Accept")')
+
+#: How long to keep looking for an element the SPA has not painted yet. The
+#: form renders after ``domcontentloaded``, so the button is absent for a beat
+#: and then present; sampling once reads that beat as "no such button".
+_UI_TIMEOUT_S = 25.0
 
 #: Departure-day anchors; the grid covers ±3 days around each, so these tile a
 #: whole month with one page load each. Five is the minimum for a 31-day month.
@@ -82,23 +99,33 @@ _MONTH_WORDS = {
 }
 
 #: Instruction place names to the codes the transport understands: a 3-letter
-#: IATA airport, or an ``/m/`` city kgmid. Extend as needed.
+#: IATA code, airport (``ARN``) or metro (``STO``, which covers every Stockholm
+#: airport). Extend as needed.
+#:
+#: These were ``/m/`` city kgmids until 2026-09-23, and that is what broke the
+#: recipe: a kgmid endpoint does **not** populate the form. Measured through the
+#: bot's own egress proxy, ``tfs`` with ``/m/06mxs`` -> ``/m/04jr0`` renders
+#: Google's generic "Explore" page with **no Search button at all**, at every
+#: anchor, so the recipe failed on all five and fell back to the agent — which
+#: then typed the same cities by hand and worked. The same ``tfs`` with ``STO``
+#: -> ``SEA`` fills the form and shows Search within 2 s. The agent masked the
+#: bug because it never reads ``tfs``.
 PLACES = {
-    "stockholm": "/m/06mxs",
+    "stockholm": "STO",
     "arlanda": "ARN",
     "arn": "ARN",
-    "seattle": "/m/04jr0",
+    "seattle": "SEA",
     "sea": "SEA",
-    "gothenburg": "/m/04d0k",
-    "copenhagen": "/m/01lrt",
-    "oslo": "/m/05dq_",
-    "london": "/m/04jpl",
-    "new york": "/m/02_286",
-    "nyc": "/m/02_286",
-    "paris": "/m/05qtj",
-    "tokyo": "/m/07dfk",
-    "bangkok": "/m/0h8my",
-    "palma": "/m/04lz2",
+    "gothenburg": "GOT",
+    "copenhagen": "CPH",
+    "oslo": "OSL",
+    "london": "LON",
+    "new york": "NYC",
+    "nyc": "NYC",
+    "paris": "PAR",
+    "tokyo": "TYO",
+    "bangkok": "BKK",
+    "palma": "PMI",
 }
 
 
@@ -122,9 +149,17 @@ def _field(num: int, wire: int, payload: bytes) -> bytes:
 
 
 def _endpoint(code: str) -> bytes:
-    """Origin/destination: airport as {1:1, 2:code}, city as {1:3, 2:kgmid}."""
-    kind = 1 if len(code) == 3 and code.isalpha() else 3
-    return _field(1, 0, _varint(kind)) + _field(2, 2, code.encode())
+    """Origin/destination as ``{1:1, 2:code}`` — a 3-letter IATA code, airport
+    or metro.
+
+    Kind 3 (an ``/m/`` kgmid) is deliberately not encoded: the page form does
+    not accept it, and a kgmid in a ``tfs`` silently yields the generic Explore
+    page with no Search button, which reads downstream as a missing selector.
+    Reject it here, where the cause is still legible.
+    """
+    if not (len(code) == 3 and code.isalpha()):
+        raise StepFailure(f"flight endpoint must be a 3-letter IATA code, not {code!r}")
+    return _field(1, 0, _varint(1)) + _field(2, 2, code.encode())
 
 
 def _leg(dep: str, origin: str, dest: str) -> bytes:
@@ -279,17 +314,31 @@ async def _accept_consent(page: Any) -> None:
             continue
 
 
-async def _click_first(page: Any, selectors: tuple[str, ...], last: bool = False) -> bool:
-    for sel in selectors:
-        el = page.locator(sel)
-        el = el.last if last else el.first
-        try:
-            if await el.count():
-                await el.click(timeout=8000)
-                return True
-        except Exception:
-            continue
-    return False
+async def _click_first(
+    page: Any, selectors: tuple[str, ...], last: bool = False, timeout_s: float = _UI_TIMEOUT_S
+) -> bool:
+    """Click the first selector that appears, waiting out the SPA's paint.
+
+    ``count()`` is instantaneous, and this page paints its form *after*
+    ``domcontentloaded``: one sample at the wrong moment reads "not yet" as
+    "not there". That is exactly how the recipe declared "no Search button"
+    while the agent clicked the same button a moment later. So poll each
+    selector until the deadline instead of sampling once.
+    """
+    deadline = asyncio.get_event_loop().time() + timeout_s
+    while True:
+        for sel in selectors:
+            el = page.locator(sel)
+            el = el.last if last else el.first
+            try:
+                if await el.count():
+                    await el.click(timeout=8000)
+                    return True
+            except Exception:
+                continue
+        if asyncio.get_event_loop().time() >= deadline:
+            return False
+        await asyncio.sleep(0.5)
 
 
 async def _open_search(session: BrowserSession, tfs: str) -> Any:
