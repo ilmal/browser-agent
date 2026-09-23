@@ -77,7 +77,9 @@ async def require_token(request: Request) -> None:
 async def _probe(client: httpx.AsyncClient, bot: registry.Bot) -> dict[str, Any]:
     """Ask one bot pod who it is. Never raises: a bot that is down is a state
     the roster renders, not an error that breaks the page."""
-    url = f"http://profile-{bot.profile}:{settings.api_port}/api/whoami"
+    url = settings.bot_url_template.format(
+        profile=bot.profile, api_port=settings.api_port
+    ) + "/api/whoami"
     headers = {"Authorization": f"Bearer {settings.control_token}"}
     try:
         res = await client.get(url, headers=headers)

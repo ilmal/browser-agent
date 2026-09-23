@@ -998,3 +998,47 @@ def test_the_thread_box_cannot_reload_the_page(bot_env):
     assert "<form" in page, "the page carries forms"
     for tag in re.findall(r"<button[^>]*>", page):
         assert 'type="button"' in tag, f"a button would submit its form: {tag}"
+
+
+def test_probe_urls_follow_bot_url_template(hub_env, monkeypatch):
+    """The reachability probe builds its URL from bot_url_template, the same
+    knob the farm runner uses — two URL builders for the same pod is how a
+    deploy target that only exists in one of them goes unnoticed."""
+    object.__setattr__(hub_env.settings, "bot_url_template",
+                       "http://probe-hit:{profile}:{api_port}")
+    seen: list[str] = []
+
+    class FakeResp:
+        status_code = 200
+
+        def json(self):
+            return {"profile": "linkedin", "name": "LinkedIn", "signed_in": False}
+
+    class FakeClient:
+        def __init__(self, *a, **k):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *a):
+            return False
+
+        async def get(self, url, headers=None):
+            seen.append(url)
+            return FakeResp()
+
+    monkeypatch.setattr(hub_env.httpx, "AsyncClient", FakeClient)
+
+    from fastapi.testclient import TestClient
+
+    reg = hub_env.registry.Registry()
+    hub_env.registry.upsert(reg, "linkedin", name="LinkedIn outreach")
+    hub_env.registry.save(hub_env.settings.registry_path, reg)
+
+    with TestClient(hub_env.app) as client:
+        res = client.get("/api/bots", headers={"Authorization": "Bearer test-token"})
+        assert res.status_code == 200
+
+    assert seen, "the probe never asked any pod"
+    assert seen == [f"http://probe-hit:linkedin:{hub_env.settings.api_port}/api/whoami"]

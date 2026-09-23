@@ -763,15 +763,18 @@ function ensureFarmForm() {
   const bots = data.bots || [];
   const box = $("f-members");
   const sig = bots.map(b => b.profile + (b.reachable ? 1 : 0) + (b.signed_in ? 1 : 0)).join(",");
-  if (box.dataset.sig === sig) return;
-  box.dataset.sig = sig;
-  box.innerHTML = bots.length ? bots.map(b => {
-    const on = chosen.has(b.profile);
-    return `<button type="button" class="chip ${on ? "on" : ""}" data-pick="${esc(b.profile)}">
-      <span class="dot ${b.reachable ? (b.signed_in ? "done" : "block") : "dead"}"></span>
-      ${esc(b.display_name)}</button>`;
-  }).join("") : `<span class="empty">No bots yet — create one first.</span>`;
+  if (box.dataset.sig !== sig) {
+    box.dataset.sig = sig;
+    box.innerHTML = bots.length ? bots.map(b => {
+      const on = chosen.has(b.profile);
+      return `<button type="button" class="chip ${on ? "on" : ""}" data-pick="${esc(b.profile)}">
+        <span class="dot ${b.reachable ? (b.signed_in ? "done" : "block") : "dead"}"></span>
+        ${esc(b.display_name)}</button>`;
+    }).join("") : `<span class="empty">No bots yet — create one first.</span>`;
+  }
 
+  // Outside the sig gate on purpose: whichever of bots/recipes lands second
+  // must still fill the select, not only the order bots-then-recipes.
   if (lib) {
     const sel = $("f-recipe");
     if (sel.options.length !== (lib.recipes || []).length) {

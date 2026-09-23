@@ -297,6 +297,26 @@ def _outcome_snippet(row: dict[str, Any]) -> str:
     return _clean(text, OUTCOME_CHARS)
 
 
+def fire_body(farm: Farm, text: str) -> dict[str, Any]:
+    """The wire shape POST /api/tasks actually takes: ``{recipe, payload}``.
+
+    The instruction lives INSIDE ``payload`` — flat top-level fields are
+    silently dropped by TaskRequest, which ran a farm with an empty
+    instruction (found live: the pod's attempt carried ``payload: {}``). All
+    three aliases on purpose: the agent reads ``goal`` first, so a payload
+    missing it lets a stale instruction silently win.
+    """
+    return {
+        "recipe": farm.recipe,
+        "payload": {
+            "url": farm.url,
+            "task": text,
+            "text": text,
+            "goal": text,
+        },
+    }
+
+
 class FarmRunner:
     """Fires due members and folds pod state back into the farm.
 
@@ -444,18 +464,10 @@ class FarmRunner:
 
     async def _http_post(self, profile: str, farm: Farm) -> dict[str, Any]:
         text = next(m.task_text for m in farm.members if m.profile == profile)
-        payload = {
-            "recipe": farm.recipe,
-            "url": farm.url,
-            # All three aliases on purpose: the agent reads `goal` first, so a
-            # payload missing it lets a stale instruction silently win.
-            "task": text,
-            "text": text,
-            "goal": text,
-        }
         url = self._bot_url(profile) + "/api/tasks"
         async with httpx.AsyncClient(trust_env=False, timeout=15.0) as client:
-            res = await client.post(url, json=payload, headers=self._headers())
+            res = await client.post(url, json=fire_body(farm, text),
+                                    headers=self._headers())
             res.raise_for_status()
             return res.json()
 

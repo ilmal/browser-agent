@@ -245,11 +245,14 @@ class TestFire:
         assert seen["url"] == "http://profile-a:8000/api/tasks"
         assert seen["auth"] == "Bearer tok"
         expected = "You are Ada. bg words\n\nTASK: Find it"
-        assert seen["json"]["task"] == expected
-        assert seen["json"]["text"] == expected
-        assert seen["json"]["goal"] == expected
         assert seen["json"]["recipe"] == "plan.task"
-        assert seen["json"]["url"] == "https://x"
+        # The instruction rides INSIDE payload: TaskRequest drops flat fields,
+        # so the farm would otherwise fire with an empty ask.
+        payload = seen["json"]["payload"]
+        assert payload["task"] == expected
+        assert payload["text"] == expected
+        assert payload["goal"] == expected
+        assert payload["url"] == "https://x"
         assert farm.members[0].status == "started"
         assert farm.members[0].task_id == "t9"
         assert farm.members[0].thread_id == "th9"
@@ -607,3 +610,22 @@ class TestFarmRoutes:
         with _client() as client:
             assert client.get("/api/farms").status_code == 401
             assert client.post("/api/farms", json={}).status_code == 401
+
+
+def test_fire_body_carries_the_instruction_inside_payload():
+    """The wire shape the pod's TaskRequest actually takes: {recipe, payload}.
+
+    Flat top-level instruction fields are silently dropped (TaskRequest keeps
+    only recipe + payload), which ran a farm with an EMPTY instruction — found
+    live when the pod's attempt carried payload: {} and the thread had no ask.
+    """
+    farm = farms.Farm(id="f", name="", recipe="agent.task", task="T",
+                      url="https://example.com", mode="parallel",
+                      stagger_seconds=0, created_at=1.0,
+                      members=[farms.Member(profile="a", task_text="You are A.\n\nTASK: T")])
+    body = farms.fire_body(farm, "You are A.\n\nTASK: T")
+    assert body["recipe"] == "agent.task"
+    payload = body["payload"]
+    assert payload["url"] == "https://example.com"
+    # goal wins inside the agent — all three aliases must carry the instruction
+    assert payload["task"] == payload["text"] == payload["goal"] == "You are A.\n\nTASK: T"
