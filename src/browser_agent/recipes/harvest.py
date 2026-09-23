@@ -32,6 +32,35 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
+#: A harvested step gets a ``done_when`` proof derived from what the agent's
+#: next step observed, so the replay is verified by the page rather than by the
+#: Laya confirm question.
+#:
+#: Why this is load-bearing: ``_plan_exec`` falls back to ``confirm_step`` for a
+#: click/type that carries no ``done_when``, and that question cannot verify a
+#: step at all — measured on cn1, it advances whether the click worked
+#: (conf 0.80), did nothing (0.82), or landed on a 404 (0.76), because Laya sees
+#: only the post-action page and answers a leading question. A recipe whose
+#: clicks carry a proof is graded by the page's own url/text; only one that
+#: cannot be proven is left to that gate.
+#:
+#: browser-use records each step's ``state.url``/``title`` from the summary it
+#: captured *before* that step ran (``service.py``: ``_prepare_context`` is
+#: called before ``_execute_actions`` and the same summary reaches
+#: ``_finalize``). So the url recorded against step N+1 is the page step N
+#: produced — the observation the proof needs. The last step has no successor to
+#: observe it, and is left unproven.
+#:
+#: Which predicate is safe to derive depends on what the proof is *for*. A
+#: click's whole purpose is to change the page, so an unchanged url means it
+#: failed and ``url_contains`` proves it. A type's purpose is to change the
+#: field, which leaves the url alone — a url predicate there would fail every
+#: successful type, so a type is given the next page's ``text_contains``
+#: instead, and only when that text is a durable anchor rather than a value the
+#: recipe itself typed.
+_DW_TEXT_MAX = 40
+
+
 #: browser-use action name -> the plan step it becomes. The key is the
 #: **registry** name, which is what ``model_dump`` keys on: ``Tools`` registers
 #: the handlers as ``click``, ``input``, ``navigate`` (``tools/service.py``),
@@ -124,7 +153,46 @@ def _label_for(elem: Any) -> str:
     return ""
 
 
-def _step_from(action: Any, elem: Any, goal: str) -> dict[str, Any] | None:
+def _done_when_for(
+    kind: str, before_url: str, after_url: str, after_title: str, typed: str = ""
+) -> dict[str, str] | None:
+    """A page-checkable proof that this step did what it was for, or None.
+
+    ``before_url`` is the url recorded against this step (the page the agent saw
+    when it chose the action); ``after_url``/``after_title`` are the next step's
+    record (the page this action produced). See the module comment above
+    :data:`_STEP_FOR_ACTION` for why each predicate is the safe one for its
+    action.
+    """
+    before = (before_url or "").strip()
+    after = (after_url or "").strip()
+    if kind == "click":
+        # Only a real move can be asserted. Same url (a form field, an in-page
+        # toggle) is indistinguishable from "the click did nothing", and a proof
+        # that accepts both would wave a broken replay through.
+        if after and before and after != before:
+            return {"url_contains": after}
+        return None
+    if kind == "type":
+        # Typing leaves the url alone, so the proof must be text — and only the
+        # title is safe to take. Body text could be the string this very step
+        # typed, which would "prove" the step by finding what it just wrote.
+        #
+        # A title is not automatically safe either: "Results for stockholm" is a
+        # real results page and equally a page that already showed the query. A
+        # proof that holds whether or not the type reached the page is not a
+        # proof, so a title echoing the typed value is left unproven and the
+        # step falls to the confirm gate instead.
+        title = (after_title or "").strip()
+        if title and (not typed or typed.lower() not in title.lower()):
+            return {"text_contains": title[:_DW_TEXT_MAX]}
+        return None
+    return None
+
+
+def _step_from(
+    action: Any, elem: Any, goal: str, proof: dict[str, str] | None = None
+) -> dict[str, Any] | None:
     """One action + the element it touched -> one plan step, or None."""
     parsed = _dump(action)
     if parsed is None:
@@ -143,11 +211,15 @@ def _step_from(action: Any, elem: Any, goal: str) -> dict[str, Any] | None:
         return None
     step_goal = (goal or _label_for(elem) or "the element the agent used")[:_GOAL_MAX]
     if kind == "click":
-        return {"action": "click", "goal": step_goal, "selector": selector}
-    text = str(params.get("text") or "")
-    if not text:
-        return None
-    return {"action": "type", "goal": step_goal, "text": text, "selector": selector}
+        step: dict[str, Any] = {"action": "click", "goal": step_goal, "selector": selector}
+    else:
+        text = str(params.get("text") or "")
+        if not text:
+            return None
+        step = {"action": "type", "goal": step_goal, "text": text, "selector": selector}
+    if proof:
+        step["done_when"] = proof
+    return step
 
 
 def slug_for(goal: str) -> str:
@@ -186,19 +258,27 @@ def _harvest(
         return None
 
     steps: list[dict[str, Any]] = []
-    for item in items:
+    for n, item in enumerate(items):
         output = getattr(item, "model_output", None)
         actions = list(getattr(output, "action", None) or [])
         if not actions:
             return None
         state = getattr(item, "state", None)
         elements = list(getattr(state, "interacted_element", None) or [])
+        # This step's page, and — from the next step's record — the page this
+        # step produced. A step is proven by the *next* step's observation
+        # because browser-use snapshots the page before it acts; the last step
+        # has no successor, so it is left unproven.
+        before_url = str(getattr(state, "url", "") or "")
+        nxt = getattr(items[n + 1], "state", None) if n + 1 < len(items) else None
+        after_url = str(getattr(nxt, "url", "") or "") if nxt is not None else ""
+        after_title = str(getattr(nxt, "title", "") or "") if nxt is not None else ""
         step_goal = str(getattr(output, "next_goal", "") or "").strip()
         for i, action in enumerate(actions):
             parsed = _dump(action)
             if parsed is None:
                 return None
-            name, _ = parsed
+            name, params = parsed
             if name in _TERMINAL_ACTIONS:
                 # A done/extract ends the run. It may only be the last action
                 # of the last step; anywhere else the run continued past it and
@@ -207,7 +287,11 @@ def _harvest(
                     return None
                 continue
             elem = elements[i] if i < len(elements) else None
-            step = _step_from(action, elem, step_goal)
+            typed = str(params.get("text") or "") if isinstance(params, dict) else ""
+            proof = _done_when_for(
+                _STEP_FOR_ACTION.get(name, ""), before_url, after_url, after_title, typed
+            )
+            step = _step_from(action, elem, step_goal, proof)
             if step is None:
                 return None
             steps.append(step)

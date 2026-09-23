@@ -83,14 +83,16 @@ class _Output:
 
 
 class _State:
-    def __init__(self, elements):
+    def __init__(self, elements, url="", title=""):
         self.interacted_element = elements
+        self.url = url
+        self.title = title
 
 
 class _Item:
-    def __init__(self, output, elements):
+    def __init__(self, output, elements, url="", title=""):
         self.model_output = output
-        self.state = _State(elements)
+        self.state = _State(elements, url, title)
 
 
 class _History:
@@ -102,8 +104,8 @@ def _run(*items) -> _History:
     return _History(list(items))
 
 
-def _step(action, elements=None, goal="") -> _Item:
-    return _Item(_Output([action], goal), elements or [None])
+def _step(action, elements=None, goal="", url="", title="") -> _Item:
+    return _Item(_Output([action], goal), elements or [None], url, title)
 
 
 # -- harvesting ------------------------------------------------------------
@@ -163,6 +165,104 @@ def test_the_legacy_handler_names_still_map():
     spec = harvest(history, entry_url="https://example.com", goal="g")
     assert spec is not None
     assert spec["steps"][0]["selector"] == "#go"
+
+
+def test_a_click_step_is_proven_by_the_next_step_s_page():
+    # The point of the proof: `_plan_exec` only asks Laya's confirm question for
+    # a click/type with no `done_when`, and that question cannot verify a step
+    # (measured on cn1: it advances whether the click worked, did nothing, or
+    # 404'd). browser-use records each step's url from the summary it captured
+    # *before* that step ran, so the next step's url is the page this click
+    # produced — that is what proves it.
+    history = _run(
+        _step(_Action(navigate={"url": "https://example.com"}),
+              url="https://example.com"),
+        _step(_Action(click={"index": 5}), [_Element(attributes={"id": "go"})],
+              url="https://example.com"),
+        _step(_Action(done={"text": "ok"}),
+              url="https://www.iana.org/help/example-domains"),
+    )
+    spec = harvest(history, entry_url="https://example.com", goal="g")
+    assert spec is not None
+    click = spec["steps"][1]
+    assert click["selector"] == "#go"
+    assert click["done_when"] == {"url_contains": "https://www.iana.org/help/example-domains"}
+
+
+def test_a_click_that_changed_nothing_gets_no_proof():
+    # Same url before and after is indistinguishable from a click that did
+    # nothing, so no proof is claimed. The step is left to the confirm gate,
+    # which will refuse it and fall back to the agent — the safe direction.
+    history = _run(
+        _step(_Action(click={"index": 5}), [_Element(attributes={"id": "go"})],
+              url="https://example.com"),
+        _step(_Action(done={"text": "ok"}), url="https://example.com"),
+    )
+    spec = harvest(history, entry_url="https://example.com", goal="g")
+    assert spec is not None
+    assert "done_when" not in spec["steps"][0]
+
+
+def test_a_type_step_is_proven_by_the_next_page_s_title():
+    # Typing does not move the url, so a url proof would fail every successful
+    # type. The title is the anchor.
+    history = _run(
+        _step(_Action(input={"index": 2, "text": "stockholm"}),
+              [_Element(attributes={"name": "q"})], url="https://example.com/search"),
+        _step(_Action(done={"text": "ok"}),
+              url="https://example.com/search", title="Departures"),
+    )
+    spec = harvest(history, entry_url="https://example.com/search", goal="g")
+    assert spec is not None
+    typed = spec["steps"][0]
+    assert typed["text"] == "stockholm"
+    assert typed["done_when"] == {"text_contains": "Departures"}
+
+
+def test_a_title_echoing_the_typed_value_is_no_proof():
+    # "Results for stockholm" is a real results page — and equally a page that
+    # already showed the query. A proof that holds whether or not the type
+    # reached the page proves nothing, so this step is left to the gate.
+    history = _run(
+        _step(_Action(input={"index": 2, "text": "stockholm"}),
+              [_Element(attributes={"name": "q"})], url="https://example.com/search"),
+        _step(_Action(done={"text": "ok"}),
+              url="https://example.com/search", title="Results for stockholm"),
+    )
+    spec = harvest(history, entry_url="https://example.com/search", goal="g")
+    assert spec is not None
+    assert "done_when" not in spec["steps"][0]
+
+
+def test_the_last_step_has_nothing_to_prove_it():
+    # No successor observed the last step, so it cannot be given a proof.
+    history = _run(
+        _step(_Action(click={"index": 5}), [_Element(attributes={"id": "go"})],
+              url="https://example.com"),
+    )
+    spec = harvest(history, entry_url="https://example.com", goal="g")
+    assert spec is not None
+    assert "done_when" not in spec["steps"][0]
+
+
+def test_a_proven_step_survives_the_store_s_validation(tmp_path):
+    # The derivation is only worth anything if the spec it produces passes the
+    # same gate every stored step does.
+    history = _run(
+        _step(_Action(click={"index": 5}), [_Element(attributes={"id": "go"})],
+              url="https://example.com"),
+        _step(_Action(done={"text": "ok"}), url="https://example.com/done"),
+    )
+    spec = harvest(history, entry_url="https://example.com", goal="g")
+    store = RecipeStore(tmp_path)
+    save_learned_spec(store, spec)
+    stored = store.get(spec["name"])
+    # The store validates through the plan schema, which materialises every
+    # predicate — so the proof arrives with its unset ones as None, not absent.
+    done_when = stored["steps"][0]["done_when"]
+    assert done_when["url_contains"] == "https://example.com/done"
+    assert done_when.get("selector_visible") is None
+    assert done_when.get("text_contains") is None
 
 
 def test_an_unmappable_action_costs_the_whole_recipe():
