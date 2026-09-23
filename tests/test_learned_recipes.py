@@ -21,14 +21,48 @@ from browser_agent.recipes.harvest import harvest, slug_for
 
 # -- fakes for browser-use's history ---------------------------------------
 #
-# The real shapes (verified against browser-use 0.13.10): an action is a pydantic
-# model with exactly one field set, the field name IS the action name, and the
-# element it was dispatched on rides in ``state.interacted_element`` at the same
-# index. Modelling those three facts is all the harvester reads.
+# The real shapes (verified in the deployed image, browser-use 0.13.10): an
+# action is a pydantic model with exactly one field set, the field name IS the
+# **registry** action name, and the element it was dispatched on rides in
+# ``state.interacted_element`` at the same index. Modelling those three facts is
+# all the harvester reads.
+#
+# The registry names are NOT the handler or class names, and that distinction is
+# the whole bug this file exists to keep caught: ``Tools`` registers ``click``,
+# ``input`` and ``navigate`` (``tools/service.py``) and builds the per-action
+# models from those keys (``registry/service.py::create_action_model``), so
+# ``ClickElementAction`` dumps as ``{"click": {...}}`` — never
+# ``click_element_by_index``. A fake that uses a name prod never emits tests the
+# mapping against fiction, which is exactly how a harvest that refused every
+# real run stayed green. Use ``_REGISTRY_NAMES`` below, not the class names.
+
+
+#: The action names the installed browser-use actually puts in ``model_dump``.
+#: Read from the deployed image: ``sorted(Tools().registry.registry.actions)``
+#: minus the non-mutating ones the harvester never maps. Kept as one tuple so a
+#: future rename is a one-line change here plus one in ``harvest.py``.
+_REGISTRY_NAMES = ("navigate", "click", "input", "scroll", "done", "extract")
 
 
 class _Action:
-    def __init__(self, **kwargs):
+    """One browser-use action model.
+
+    ``_Action(click={...})`` — prod's registry vocabulary, the way every test
+    should build one. ``_Action(name="click_element_by_index", index=5)`` — an
+    explicit ``name``, for pinning a legacy alias the package may emit again.
+    """
+
+    def __init__(self, *, name=None, **kwargs):
+        if name is not None:
+            assert not kwargs, "an explicit name carries no field shorthand"
+            self._d = {name: {}}
+            return
+        assert len(kwargs) == 1, "an action model carries exactly one field"
+        (field,) = kwargs
+        assert field in _REGISTRY_NAMES, (
+            f"{field!r} is not a name the installed browser-use emits "
+            f"({_REGISTRY_NAMES}); use name= to pin a legacy alias deliberately"
+        )
         self._d = kwargs
 
     def model_dump(self, **_kw):
@@ -81,12 +115,12 @@ def test_a_click_and_type_run_becomes_a_plan():
     history = _run(
         _step(_Action(navigate={"url": "https://example.com/search"})),
         _step(
-            _Action(input_text={"index": 2, "text": "stockholm"}),
+            _Action(input={"index": 2, "text": "stockholm"}),
             [_Element(attributes={"name": "q"})],
             goal="type the origin",
         ),
         _step(
-            _Action(click_element_by_index={"index": 5}),
+            _Action(click={"index": 5}),
             [_Element(attributes={"id": "search-btn"})],
             goal="run the search",
         ),
@@ -104,13 +138,40 @@ def test_a_click_and_type_run_becomes_a_plan():
     assert spec["replays"] == 0
 
 
+def test_the_registry_names_are_what_the_harvester_maps():
+    # The bug this file shipped with: the fakes spoke ``click_element_by_index``
+    # / ``input_text`` (browser-use's *handler* names) while the installed
+    # package emits ``click`` / ``input`` (its *registry* names). Every real run
+    # was refused, and the tests were green because they asserted the fiction.
+    # Pin the mapping against the vocabulary prod emits.
+    from browser_agent.recipes.harvest import _STEP_FOR_ACTION
+
+    for name in ("navigate", "click", "input"):
+        assert name in _STEP_FOR_ACTION, (
+            f"{name!r} is a registry name the installed browser-use emits; without "
+            f"it every run containing that action is refused"
+        )
+
+
+def test_the_legacy_handler_names_still_map():
+    # The package is unpinned, so a release that renames ``click`` back to
+    # ``click_element_by_index`` must not silently stop harvesting.
+    history = _run(
+        _step(_Action(name="click_element_by_index"),
+              [_Element(attributes={"id": "go"})]),
+    )
+    spec = harvest(history, entry_url="https://example.com", goal="g")
+    assert spec is not None
+    assert spec["steps"][0]["selector"] == "#go"
+
+
 def test_an_unmappable_action_costs_the_whole_recipe():
     # A scroll is not a step the executor has, so the run cannot be represented
     # faithfully. Half a recipe would replay a *different* task.
     history = _run(
         _step(_Action(navigate={"url": "https://example.com"})),
         _step(_Action(scroll={"down": True, "pages": 2})),
-        _step(_Action(click_element_by_index={"index": 5}),
+        _step(_Action(click={"index": 5}),
               [_Element(attributes={"id": "go"})]),
     )
     assert harvest(history, entry_url="https://example.com", goal="g") is None
@@ -120,14 +181,14 @@ def test_a_click_with_no_durable_target_is_not_harvested():
     # browser-use names elements by its own view index, which means nothing to a
     # later run. No selector, no recipe.
     history = _run(
-        _step(_Action(click_element_by_index={"index": 5}), [_Element()]),
+        _step(_Action(click={"index": 5}), [_Element()]),
     )
     assert harvest(history, entry_url="https://example.com", goal="g") is None
 
 
 def test_the_xpath_is_the_last_resort_selector():
     history = _run(
-        _step(_Action(click_element_by_index={"index": 1}),
+        _step(_Action(click={"index": 1}),
               [_Element(x_path="/html/body/div[3]/button")]),
     )
     spec = harvest(history, entry_url="https://example.com", goal="g")
@@ -149,7 +210,7 @@ def test_a_trailing_done_is_not_a_step_and_mid_run_done_disqualifies():
 
     mid = _run(
         _step(_Action(done={"text": "looks done"})),
-        _step(_Action(click_element_by_index={"index": 2}),
+        _step(_Action(click={"index": 2}),
               [_Element(attributes={"id": "next"})]),
     )
     assert harvest(mid, entry_url="https://example.com", goal="g") is None
@@ -157,7 +218,7 @@ def test_a_trailing_done_is_not_a_step_and_mid_run_done_disqualifies():
 
 def test_a_type_step_with_no_text_is_not_harvested():
     history = _run(
-        _step(_Action(input_text={"index": 2, "text": ""}),
+        _step(_Action(input={"index": 2, "text": ""}),
               [_Element(attributes={"name": "q"})]),
     )
     assert harvest(history, entry_url="https://example.com", goal="g") is None

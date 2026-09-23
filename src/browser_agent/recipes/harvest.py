@@ -32,18 +32,23 @@ from typing import Any
 
 log = logging.getLogger(__name__)
 
-#: browser-use action name -> the plan step it becomes. The agent's own names
-#: (``views.py`` in browser_use/tools) are what ``model_dump`` keys on. Aliases
-#: are kept because the package is unpinned and has renamed actions across
-#: releases (``go_to_url`` -> ``navigate``, ``click_element`` ->
-#: ``click_element_by_index``); a rename must cost a lost harvest, not a wrong
-#: mapping, so an unknown name disqualifies the run rather than being guessed.
+#: browser-use action name -> the plan step it becomes. The key is the
+#: **registry** name, which is what ``model_dump`` keys on: ``Tools`` registers
+#: the handlers as ``click``, ``input``, ``navigate`` (``tools/service.py``),
+#: and the per-action models are built from those names
+#: (``registry/service.py::create_action_model``). Aliases are kept because the
+#: package is unpinned and has renamed actions across releases
+#: (``go_to_url`` -> ``navigate``, ``click_element`` -> ``click``); a rename
+#: must cost a lost harvest, not a wrong mapping, so an unknown name
+#: disqualifies the run rather than being guessed.
 _STEP_FOR_ACTION: dict[str, str] = {
     "navigate": "navigate",
     "go_to_url": "navigate",
+    "click": "click",
     "click_element_by_index": "click",
     "click_element": "click",
     "click_element_index_only": "click",
+    "input": "type",
     "input_text": "type",
     "type_text": "type",
 }
