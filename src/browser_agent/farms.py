@@ -118,19 +118,22 @@ def build_members(
     stagger_seconds: int,
     start_at: float | None,
     now: float,
+    start_times: dict[str, float] | None = None,
 ) -> list[Member]:
     """One Member per assigned profile, with start times from the mode.
 
     Stagger follows the order the operator assigned — the first profile starts
     now, the second stagger_seconds later, and so on. A scheduled farm starts
-    everyone at the one epoch (in the past means immediately).
+    everyone at the one epoch (in the past means immediately), except where
+    start_times gives a profile its own clock time — "this person at 10,
+    that person at 11".
     """
     members: list[Member] = []
     for i, profile in enumerate(profiles):
         if mode == "stagger":
             at = now + i * stagger_seconds
         elif mode == "schedule":
-            at = float(start_at or now)
+            at = float((start_times or {}).get(profile) or start_at or now)
         else:
             at = now
         members.append(Member(

@@ -323,6 +323,9 @@ class CreateFarm(BaseModel):
     # Only meaningful for mode="schedule": the epoch everyone starts at. A
     # past epoch means "now" — the runner fires on its next tick either way.
     start_at: float | None = None
+    # Per-profile clock times on top of start_at — "kai at 10, lex at 11".
+    # Unknown profile names are rejected so a typo can't silently fall back.
+    start_times: dict[str, float] = {}
 
 
 def _farm_payload(farm: farms.Farm) -> dict[str, Any]:
@@ -362,11 +365,15 @@ async def create_farm(req: CreateFarm) -> dict[str, Any]:
             raise HTTPException(400, f"no bot named {profile} on the roster")
         bots[profile] = bot
 
+    unknown_times = set(req.start_times) - set(req.profiles)
+    if unknown_times:
+        raise HTTPException(400, f"start_times names bots not on the farm: {sorted(unknown_times)}")
+
     members = farms.build_members(
         list(dict.fromkeys(req.profiles)), bots,
         task=req.task.strip(), mode=req.mode,
         stagger_seconds=req.stagger_seconds, start_at=req.start_at,
-        now=time.time(),
+        start_times=req.start_times, now=time.time(),
     )
     farm = farm_store.create(
         name=req.name, recipe=req.recipe.strip(), task=req.task.strip(),

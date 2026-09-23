@@ -400,8 +400,9 @@
           <input id="f-stagger" type="number" min="0" value="120" style="max-width:200px">
         </div>
         <div id="f-schedule-wrap" class="hidden" style="margin-top:8px">
-          <label for="f-at">Start at</label>
+          <label for="f-at">Everyone at (sets each person below)</label>
           <input id="f-at" type="datetime-local" style="max-width:260px">
+          <div id="f-times" class="hidden" style="margin-top:10px"></div>
         </div>
         <div class="row end" style="margin-top:14px">
           <span class="muted" id="f-why"></span>
@@ -785,6 +786,24 @@ function ensureFarmForm() {
   }
 }
 
+// Per-member schedule times: one clock per chosen bot, seeded from the
+// shared "everyone at" field so "kai at 10, lex at 11" is two edits.
+function renderFarmTimes() {
+  const box = $("f-times");
+  if (farmMode !== "schedule" || !chosen.size) {
+    box.classList.add("hidden"); box.innerHTML = ""; return;
+  }
+  const prev = {};
+  box.querySelectorAll("input[data-time-for]").forEach(i => { prev[i.dataset.timeFor] = i.value; });
+  const shared = $("f-at").value;
+  box.innerHTML = [...chosen].map(p => `
+    <div class="row" style="gap:10px;margin:6px 0">
+      <span style="min-width:140px">${esc(botName(p))}</span>
+      <input type="datetime-local" data-time-for="${esc(p)}" value="${esc(prev[p] || shared || "")}" style="max-width:260px">
+    </div>`).join("");
+  box.classList.remove("hidden");
+}
+
 async function submitFarm() {
   const profiles = [...chosen];
   const name = $("f-name").value.trim();
@@ -799,9 +818,18 @@ async function submitFarm() {
   if (url) body.url = url;
   if (farmMode === "stagger") body.stagger_seconds = parseInt($("f-stagger").value, 10) || 0;
   if (farmMode === "schedule") {
-    const at = $("f-at").value ? new Date($("f-at").value).getTime() / 1000 : 0;
-    if (!at) { why.textContent = "pick a start time"; return; }
-    body.start_at = at;
+    const shared = $("f-at").value ? new Date($("f-at").value).getTime() / 1000 : 0;
+    const times = {};
+    document.querySelectorAll("#f-times input[data-time-for]").forEach(i => {
+      if (i.value) times[i.dataset.timeFor] = new Date(i.value).getTime() / 1000;
+    });
+    const missing = profiles.filter(p => !times[p] && !shared);
+    if (missing.length) {
+      why.textContent = "pick a start time for " + missing.map(botName).join(", ");
+      return;
+    }
+    if (shared) body.start_at = shared;
+    if (Object.keys(times).length) body.start_times = times;
   }
   const btn = $("do-create-farm");
   btn.disabled = true; why.textContent = "creating…";
@@ -810,6 +838,7 @@ async function submitFarm() {
     chosen.clear();
     document.querySelectorAll("#f-members .chip.on").forEach(c => c.classList.remove("on"));
     $("f-name").value = ""; $("f-task").value = ""; $("f-url").value = "";
+    renderFarmTimes();
     $("farm-form").classList.add("hidden"); $("show-farm").classList.remove("hidden");
     location.hash = "#/farm/" + res.farm.id;
   } catch (e) {
@@ -1437,6 +1466,7 @@ document.addEventListener("click", async (ev) => {
     const p = t.dataset.pick;
     if (chosen.has(p)) chosen.delete(p); else chosen.add(p);
     t.classList.toggle("on");
+    renderFarmTimes();
     return;
   }
   if (t.dataset.mode) {
@@ -1444,6 +1474,7 @@ document.addEventListener("click", async (ev) => {
     document.querySelectorAll("#f-mode .chip").forEach(c => c.classList.toggle("on", c === t));
     $("f-stagger-wrap").classList.toggle("hidden", farmMode !== "stagger");
     $("f-schedule-wrap").classList.toggle("hidden", farmMode !== "schedule");
+    renderFarmTimes();
     return;
   }
   if (t.id === "do-create-farm") { submitFarm(); return; }
@@ -1571,6 +1602,11 @@ document.addEventListener("click", async (ev) => {
 $("f-recipe").addEventListener("change", () => {
   const r = lib && lib.recipes.find(x => x.name === $("f-recipe").value);
   $("f-recipe-hint").textContent = r ? r.description : "";
+});
+
+$("f-at").addEventListener("input", () => {
+  if (farmMode !== "schedule") return;
+  document.querySelectorAll("#f-times input[data-time-for]").forEach(i => { i.value = $("f-at").value; });
 });
 
 function autoGrow(ta) {

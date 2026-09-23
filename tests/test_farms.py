@@ -108,6 +108,22 @@ class TestBuildMembers:
         )
         assert [m.start_at for m in members] == [999.0, 999.0]
 
+    def test_schedule_per_member_times_override_the_shared_epoch(self):
+        members = farms.build_members(
+            ["a", "b"], {"a": _bot("a"), "b": _bot("b")},
+            task="T", mode="schedule", stagger_seconds=60,
+            start_at=999.0, now=100.0, start_times={"b": 7200.0},
+        )
+        assert [m.start_at for m in members] == [999.0, 7200.0]
+
+    def test_schedule_ignores_start_times_outside_schedule_mode(self):
+        members = farms.build_members(
+            ["a"], {"a": _bot("a")},
+            task="T", mode="parallel", stagger_seconds=0,
+            start_at=None, now=100.0, start_times={"a": 7200.0},
+        )
+        assert [m.start_at for m in members] == [100.0]
+
     def test_task_text_frozen_per_identity(self):
         members = farms.build_members(
             ["a"], {"a": _bot("a", name="Ada", background="bg")},
@@ -551,6 +567,22 @@ class TestFarmRoutes:
             res = _create(client, recipe="no.such.recipe")
             assert res.status_code == 400
             assert "unknown recipe" in res.text
+
+    def test_create_accepts_per_member_schedule_times(self, farm_env):
+        with _client() as client:
+            res = _create(client, mode="schedule", start_at=1000.0,
+                          start_times={"lex": 7200.0})
+            assert res.status_code == 201, res.text
+            by_profile = {m["profile"]: m for m in res.json()["farm"]["members"]}
+            assert by_profile["kai"]["start_at"] == 1000.0
+            assert by_profile["lex"]["start_at"] == 7200.0
+
+    def test_create_rejects_start_times_for_bots_not_on_the_farm(self, farm_env):
+        with _client() as client:
+            res = _create(client, mode="schedule", start_at=1000.0,
+                          start_times={"ghost": 7200.0})
+            assert res.status_code == 400
+            assert "start_times" in res.text
 
     def test_create_rejects_entry_url_less_recipe_without_a_url(self, farm_env):
         # agent.task has an empty entry_url on purpose: a freeform instruction

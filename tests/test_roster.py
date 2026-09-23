@@ -405,6 +405,22 @@ def test_the_roster_offers_a_remove_control(hub_env):
     assert "Remove bot" in html
 
 
+def test_the_schedule_mode_takes_a_clock_per_member(hub_env):
+    """The point of a scheduled farm is per-person times — "at 10 this person,
+    at 11 that person" — so one shared epoch is not enough: every chosen
+    member gets its own input, and the submit sends those as start_times."""
+    roster = Path(__file__).resolve().parents[1] / "src" / "browser_agent" / "ui" / "roster.html"
+    html = roster.read_text()
+    assert "function renderFarmTimes()" in html
+    assert "data-time-for=" in html
+    # Re-rendered on every member pick and mode change, and reset after a
+    # successful create, so the rows always describe the current choice.
+    assert html.count("renderFarmTimes()") >= 4
+    assert "body.start_times = times" in html
+    # A member with neither an override nor the shared time blocks the create.
+    assert "pick a start time for" in html
+
+
 def test_the_bot_page_advertises_the_prefixed_live_view(bot_env):
     """Under a roster the live view is the bot's own, not the roster's.
 
