@@ -357,6 +357,11 @@ async def test_the_thread_survives_a_restart_through_the_archive(api_mod):
 
     assert info["archived"] is True
     assert [a["task_id"] for a in info["attempts"]] == ["old111"]
+    # The live attempt shape names it "id" and every page reads attempts by
+    # that name — the composer says to attempts[last].id. An archive row that
+    # lacked the alias made the composer POST /api/tasks/undefined/say after
+    # every deploy.
+    assert [a["id"] for a in info["attempts"]] == ["old111"]
     # The decisions travel with the record, which is the point of archiving:
     # an evaluation walks these, and re-deriving them at read time is what drifts.
     assert [d["text"] for d in info["attempts"][0]["decisions"]] == ["laya: no (conf 0.41)"]

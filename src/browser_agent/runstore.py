@@ -105,6 +105,10 @@ class Run:
     def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
+            # The live attempt shape (Task.to_dict) names it "id", and every
+            # page reads attempts by that name; an archive-only thread that
+            # lacked the alias made the composer say /api/tasks/undefined/say.
+            "id": self.task_id,
             "thread_id": self.thread_id,
             "recipe": self.recipe,
             "attempt": self.attempt,
