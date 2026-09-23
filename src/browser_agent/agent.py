@@ -19,6 +19,9 @@ from .activity import activity_of
 from .browser import BrowserSession
 from .config import Settings
 from .escalation import Challenge, ChallengeKind, EscalationRequired, detect_challenge
+from .page_state import fingerprint
+from .recipes.harvest import harvest
+from .stall import AgentStalled, StallLatch, confirm_stall, step_mutating
 
 log = logging.getLogger(__name__)
 
@@ -221,18 +224,63 @@ def make_agent_runner(settings: Settings):
         log_ = activity_of(session)
         control = getattr(session, "control", None)
 
+        # The stall latch. Same semantic fingerprint the plan executor uses, so
+        # "the page changed" means one thing in both paths. Without this a run
+        # with nothing left to do spends one slow model call per step until the
+        # cap — the 26-step Done/Search thrash this was written for.
+        latch = StallLatch()
+        page = await session.page()
+
+        # Per-run step budget. The Settings default (25) is the fallback: a task
+        # that knows it needs fewer steps than that should be able to say so,
+        # because every step is a slow model call and the cap is what bounds a
+        # runaway. Clamped to the configured ceiling so a payload cannot ask for
+        # an effectively unbounded run — the single-worker queue is why the cap
+        # exists at all.
+        try:
+            effective_max_steps = int(payload.get("max_steps") or settings.agent_max_steps)
+        except (TypeError, ValueError):
+            effective_max_steps = settings.agent_max_steps
+        effective_max_steps = max(1, min(effective_max_steps, settings.agent_max_steps))
+
         async def on_step_start(a) -> None:
             if control is not None:
                 await control.checkpoint(await _current_url(session))
+            if latch.should_stop():
+                raise AgentStalled(
+                    f"agent stalled: {latch.no_change} consecutive steps left the "
+                    f"page unchanged (step {a.state.n_steps} of {effective_max_steps})"
+                )
             log_.note("agent", f"step {a.state.n_steps}: thinking")
 
         async def on_step_end(a) -> None:
             _record_agent_step(a, log_)
+            actions = [
+                getattr(r, "name", None) or getattr(r, "action", None)
+                for r in (a.state.last_result or [])
+            ]
+            # No actions recorded means no evidence of a wait, so the step is
+            # treated as mutating: the latch must fire on the loops we have
+            # seen rather than be defeated by an empty result list.
+            mutating = not actions or any(step_mutating(x) for x in actions)
+            if latch.observe(await fingerprint(page), mutating):
+                # The fingerprint count is the authority, deliberately. Laya's
+                # answer is recorded for the operator but does not gate the
+                # stop: its `noul` confidence on this question measured
+                # indistinguishable (0.47/0.52), and making it a veto would
+                # disable the latch exactly when Laya is down and a runaway is
+                # most expensive. jev's latch has no model confirmation either.
+                confirmed = await confirm_stall(settings, a.state.last_result)
+                log_.note(
+                    "agent",
+                    f"stalled: {latch.no_change} consecutive steps left the page "
+                    f"unchanged (gate confirmed: {confirmed})",
+                )
         log.info(
             "agent fallback attaching to %s for %s (max_steps=%d, timeout=%ds)",
             cdp_url,
             url,
-            settings.agent_max_steps,
+            effective_max_steps,
             settings.agent_timeout_s,
         )
         try:
@@ -243,7 +291,7 @@ def make_agent_runner(settings: Settings):
             # the wall clock is the backstop for a step hung in the browser.
             history = await asyncio.wait_for(
                 agent.run(
-                    max_steps=settings.agent_max_steps,
+                    max_steps=effective_max_steps,
                     on_step_start=on_step_start,
                     on_step_end=on_step_end,
                 ),
@@ -271,7 +319,23 @@ def make_agent_runner(settings: Settings):
         result = history.final_result()
         if result is not None:
             log.info("agent fallback finished")
-            return {"agent_result": str(result), "url": page.url}
+            out: dict[str, Any] = {"agent_result": str(result), "url": page.url}
+            # The recipe half of Nils's idea: a run that succeeded is the only
+            # place a reusable plan can come from. Harvested here, where the
+            # history still exists, and handed to the runner as a plain dict so
+            # this module never touches the recipe store. Never raises — a
+            # harvesting bug must cost a recipe, not a task that succeeded.
+            if settings.learn_recipes:
+                # Named from the operator's own instruction, not the agent's
+                # paraphrase: that sentence is what a later request is matched
+                # against, and matching against the paraphrase would match the
+                # agent's wording rather than the human's.
+                instruction = str(payload.get("task") or payload.get("text") or goal)
+                spec = harvest(history, entry_url=url, goal=goal, task_text=instruction)
+                if spec is not None:
+                    out["learned_recipe"] = spec
+                    log.info("harvested a candidate recipe: %s", spec["name"])
+            return out
 
         _raise_for_no_result(history, page.url)
 

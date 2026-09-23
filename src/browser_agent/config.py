@@ -197,6 +197,24 @@ class Settings:
     #: the code all point at one name.
     recipes_configmap: str = "browser-agent-recipes"
 
+    # ---- learned recipes (Nils, 2026-09-23) ----
+    # Where a recipe the *agent* earned is written. Deliberately NOT the
+    # operator's ``recipes_dir``: that directory is a ConfigMap the hub owns and
+    # every pod mounts read-only, and a learned recipe carries the literal text
+    # the agent typed into a logged-in session, which must stay on the pod's own
+    # volume rather than be published to the cluster. Empty disables harvesting.
+    learned_recipes_dir: Path = Path("")
+    #: Whether a successful agent run is written down as a replayable recipe at
+    #: all. On by default: writing a spec costs nothing, and a spec that never
+    #: replays is inert. It is the *routing* below that needs the guardrail.
+    learn_recipes: bool = True
+    #: How many clean replays a learned recipe needs before the router will pick
+    #: it for a sentence that no hand-authored recipe claims. Two, not one: a
+    #: single replay only proves the page had not moved that morning, and the
+    #: cost of being wrong is a run that reports a different task's result as
+    #: this one's. Below the count it is offered, never auto-routed.
+    learned_recipe_min_replays: int = 2
+
     #: Hub only, and OFF by default. Publishing the library to the cluster is a
     #: deployment-specific act — whether this hub has a cluster to publish to,
     #: and whether it is allowed to — so the real value is set at deploy time
@@ -350,6 +368,11 @@ def load_settings() -> Settings:
         recipes_dir=Path(_env("RECIPES_DIR", "/recipes")),
         recipes_configmap=_env("RECIPES_CONFIGMAP", "browser-agent-recipes"),
         recipes_publish=_env("RECIPES_PUBLISH", "false").lower() in {"1", "true", "yes"},
+        # Default lives under the pod's own data PVC, beside the pick log: it is
+        # written data about this bot, not part of the operator's shared library.
+        learned_recipes_dir=Path(_env("LEARNED_RECIPES_DIR", "/data/learned-recipes")),
+        learn_recipes=_env("LEARN_RECIPES", "true").lower() in {"1", "true", "yes"},
+        learned_recipe_min_replays=_env_int("LEARNED_RECIPE_MIN_REPLAYS", 2),
         ops_alert_url=_env("OPS_ALERT_URL"),
         notify_on_escalation=_env("NOTIFY_ON_ESCALATION", "true").lower() in {"1", "true", "yes"},
         browser_proxy=_env("BROWSER_PROXY"),

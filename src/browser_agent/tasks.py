@@ -684,6 +684,9 @@ class TaskRunner:
             task.result = await recipe.run(self.session, task.payload)
             task.status = TaskStatus.DONE
             task.detail = "recipe succeeded"
+            # A learned recipe replays through here (it is a StoredRecipe, not
+            # plan.task), so its promotion is counted on this path.
+            self._note_replay(recipe, ok=True)
             return
         except Cancelled:
             task.status = TaskStatus.FAILED
@@ -694,6 +697,7 @@ class TaskRunner:
             return
         except Exception as exc:
             log.warning("recipe %s failed for %s: %s", task.recipe, task.id, exc)
+            self._note_replay(recipe, ok=False)
             if isinstance(exc, PlanRejected):
                 # A plan that never validated is a caller/model-quality bug.
                 # Failing visibly beats spending an agent run on the same
@@ -752,6 +756,7 @@ class TaskRunner:
             task.used_agent = True
             task.status = TaskStatus.DONE
             task.detail = f"{prefix} succeeded"
+            self._maybe_learn(task.result)
         except EscalationRequired as exc:
             await self._block(task, exc.challenge)
         except Cancelled:
@@ -770,6 +775,55 @@ class TaskRunner:
             task.status = TaskStatus.FAILED
             task.detail = f"{prefix} failed: {exc}"
             log.error("%s failed for %s: %s", prefix, task.id, exc)
+
+    def _note_replay(self, recipe: Any, *, ok: bool) -> None:
+        """Count one replay of a learned recipe. Never raises.
+
+        Only learned recipes are counted: a built-in's clean run says nothing
+        about a plan, and an operator's stored recipe is trusted when they
+        wrote it. This is the guardrail that makes auto-routing safe — the
+        recipe that answers a later request is one that has already been
+        replayed against a real page, not one harvested from a single run.
+        """
+        if getattr(recipe, "origin", "") != "learned":
+            return
+        from .recipe_store import learned_store_for, record_replay
+
+        store = learned_store_for(self.settings)
+        if store is None:
+            return
+        record_replay(store, recipe.name, ok=ok)
+
+    def _maybe_learn(self, result: Any) -> None:
+        """Persist a recipe the agent just earned, if the runner harvested one.
+
+        The runner stays ignorant of the store (a plain dict goes into its
+        result), so the write lives here. Never raises: a spec that cannot be
+        stored costs a speedup, never the task that produced it.
+        """
+        if not isinstance(result, dict):
+            return
+        spec = result.pop("learned_recipe", None)
+        if not isinstance(spec, dict):
+            return
+        from .recipe_store import RecipeError, learned_store_for, save_learned_spec
+
+        store = learned_store_for(self.settings)
+        if store is None:
+            return
+        try:
+            save_learned_spec(store, spec)
+            log.info("learned recipe stored: %s", spec.get("name"))
+            self.activity.note(
+                "info",
+                f"learned a recipe for this task: {spec.get('name')} "
+                f"(needs {store.learned_min_replays()} clean replays before it is reused)",
+            )
+        except RecipeError as exc:
+            # Not every successful run is representable as a plan (a scroll, a
+            # file upload, a target with no durable selector). Losing the
+            # recipe is the intended outcome, not an error to report.
+            log.info("agent run is not replayable as a recipe: %s", exc)
 
     def _apply_amendment(self, task: Task, exc: Amended) -> None:
         """Adopt the operator's new instruction as the task's own text.
@@ -856,6 +910,7 @@ class TaskRunner:
                 task.result = await recipe.run(self.session, task.payload)
                 task.status = TaskStatus.DONE
                 task.detail = "plan succeeded"
+                self._note_replay(recipe, ok=True)
                 return
             except Cancelled:
                 task.status = TaskStatus.FAILED
@@ -880,6 +935,7 @@ class TaskRunner:
             except StepFailure as exc:
                 # The plan was fine, the page disagreed. Hand the job to the
                 # agent rather than retrying the broken step blind.
+                self._note_replay(recipe, ok=False)
                 return await self._agent_attempt(
                     task,
                     exc.entry_url or recipe.entry_url,
@@ -888,6 +944,7 @@ class TaskRunner:
                 )
             except Exception as exc:
                 log.warning("plan.task failed for %s: %s", task.id, exc)
+                self._note_replay(recipe, ok=False)
                 return await self._agent_attempt(
                     task,
                     recipe.entry_url,

@@ -46,6 +46,9 @@ class StoredRecipe:
         #: The stored steps, kept as plain dicts so a spec refresh is picked up
         #: on the next run rather than being frozen at registration time.
         self.steps: list[dict[str, Any]] = list(spec.get("steps") or [])
+        #: "learned" when the agent wrote it, absent when a human did. The runner
+        #: reads it to decide whether a run counts toward the recipe's promotion.
+        self.origin: str = str(spec.get("origin") or "")
         self._settings = settings
         self._laya = laya
         self._picker = picker
@@ -56,6 +59,7 @@ class StoredRecipe:
         self.description = spec.get("description") or f"Stored recipe {self.name}"
         self.entry_url = str(spec.get("entry_url") or "")
         self.steps = list(spec.get("steps") or [])
+        self.origin = str(spec.get("origin") or "")
 
     def _deps(self, settings: Settings) -> None:
         if self._settings is None:
@@ -84,17 +88,30 @@ class StoredRecipe:
 
 
 def load_stored_recipes() -> list[str]:
-    """Read the library and install what it holds. Never raises.
+    """Read the libraries and install what they hold. Never raises.
 
     Called from ``tasks.get_recipe``/``list_recipes`` (so an edit lands without
     a restart) and once at boot. It is idempotent and cheap when nothing has
     changed: the store caches on the directory's mtime.
+
+    Two libraries are read: the operator's, and — when this bot has one — the
+    recipes its own agent earned. They are separate directories with the same
+    format, and both are installed here so a learned recipe is runnable the
+    moment it is written, without a restart.
     """
     from .. import tasks
+    from ..recipe_store import learned_store_for
 
     settings = load_settings()
-    store = store_for(settings)
-    specs = store.specs()
+    specs = dict(store_for(settings).specs())
+    learned = learned_store_for(settings)
+    if learned is not None:
+        # Learned names cannot collide with an operator's: a learned recipe is
+        # named with a hash of its goal. An operator spec still wins if one ever
+        # does, because a human's edit is the more deliberate artifact.
+        for name, spec in learned.specs().items():
+            specs.setdefault(name, spec)
+
     for name, spec in specs.items():
         try:
             tasks.install_stored(spec)

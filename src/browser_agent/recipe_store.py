@@ -68,6 +68,12 @@ OVERRIDABLE: dict[str, tuple[str, ...]] = {
 #: and the executor, not a change to a recipe.
 STEP_ACTIONS = ("navigate", "click", "type", "extract", "wait")
 
+#: Metadata a *learned* recipe carries that a hand-authored one does not.
+#: Preserved through validation on purpose: dropping them would silently promote
+#: a recipe the agent wrote from one lucky run to one the router trusts, which
+#: is the whole distinction the guardrail exists to hold.
+LEARNED_KEYS = ("origin", "unverified", "replays", "min_replays", "created")
+
 
 @dataclass
 class RecipeStore:
@@ -165,6 +171,38 @@ class RecipeStore:
         self.refresh()
         return {k: dict(v) for k, v in self._overrides.items()}
 
+    def learned_min_replays(self) -> int:
+        """How many clean replays a learned recipe needs before it is trusted.
+
+        Read from the environment rather than passed in so a ``RecipeStore``
+        built anywhere — the loader, a test, the API — agrees on the number. A
+        test that wants the count out of the way sets the env var, the same way
+        it sets every other knob.
+        """
+        import os
+
+        try:
+            return max(1, int(os.environ.get("LEARNED_RECIPE_MIN_REPLAYS", "2")))
+        except ValueError:
+            return 2
+
+    def learned(self) -> list[dict[str, Any]]:
+        """Every recipe in this store, filtered to the ones the agent earned.
+
+        A learned directory holds only learned recipes, so this is ``specs()``
+        in practice; filtering on ``origin`` keeps that true even if an operator
+        copies a spec in by hand, and keeps the router's promotion rule honest.
+        """
+        return [s for s in self.specs().values() if s.get("origin") == "learned"]
+
+    def trusted_learned(self) -> list[dict[str, Any]]:
+        """Learned recipes that have replayed cleanly enough to be routed to."""
+        floor = self.learned_min_replays()
+        return [
+            s for s in self.learned()
+            if not s.get("unverified") and int(s.get("replays") or 0) >= floor
+        ]
+
     def cfg(self, recipe: str, key: str, default: Any) -> Any:
         """One overridden value, or the built-in literal.
 
@@ -220,15 +258,19 @@ def _validate(data: Any, *, source: str) -> "StoredSpec":
     plan = parse_plan({"entry_url": entry_url, "steps": steps})
     _require_deterministic_targets(plan)
 
-    return StoredSpec(
-        name=name,
-        spec={
-            "name": name,
-            "description": description or f"Stored recipe {name}",
-            "entry_url": plan.entry_url,
-            "steps": [s.model_dump() for s in plan.steps],
-        },
-    )
+    spec: dict[str, Any] = {
+        "name": name,
+        "description": description or f"Stored recipe {name}",
+        "entry_url": plan.entry_url,
+        "steps": [s.model_dump() for s in plan.steps],
+    }
+    # A learned recipe's provenance rides along, so the router can tell one the
+    # agent wrote from one a human did, and hold the former to its replay count.
+    for key in LEARNED_KEYS:
+        if key in data:
+            spec[key] = data[key]
+
+    return StoredSpec(name=name, spec=spec)
 
 
 def _require_deterministic_targets(plan: Plan) -> None:
@@ -362,6 +404,7 @@ def delete_recipe(store: RecipeStore, name: str) -> str:
 # -- process-wide store -----------------------------------------------------
 
 _STORE: RecipeStore | None = None
+_LEARNED: RecipeStore | None = None
 
 
 def store_for(settings: Settings) -> RecipeStore:
@@ -370,3 +413,59 @@ def store_for(settings: Settings) -> RecipeStore:
     if _STORE is None or _STORE.directory != settings.recipes_dir:
         _STORE = RecipeStore(settings.recipes_dir)
     return _STORE
+
+
+def learned_store_for(settings: Settings) -> RecipeStore | None:
+    """The bot's own store for recipes its agent earned. None when disabled.
+
+    A :class:`RecipeStore` reads whatever ``*.json`` it finds, so the same class
+    serves both: the operator's library is one directory of specs, and the
+    learned ones are another. They are separate on purpose — a learned recipe
+    must never be published to the cluster-wide ConfigMap (see
+    ``Settings.learned_recipes_dir``).
+    """
+    directory = settings.learned_recipes_dir
+    if not settings.learn_recipes or not str(directory):
+        return None
+    global _LEARNED
+    if _LEARNED is None or _LEARNED.directory != directory:
+        _LEARNED = RecipeStore(directory)
+    return _LEARNED
+
+
+def record_replay(store: RecipeStore, name: str, *, ok: bool) -> dict[str, Any] | None:
+    """Count one replay of a learned recipe. Returns the updated spec, or None.
+
+    ``ok`` is the executor's verdict on the whole run, not a step's. A failed
+    replay does not increment toward promotion — a recipe that half-worked is
+    exactly the one that must keep being offered rather than trusted — and it
+    does not reset the count either, so a recipe that has replayed once cleanly
+    is not punished for a later page change. Never raises.
+    """
+    try:
+        spec = store.get(name)
+        if spec is None:
+            return None
+        if ok:
+            spec["replays"] = int(spec.get("replays") or 0) + 1
+        if spec["replays"] >= int(store.learned_min_replays()):
+            spec["unverified"] = False
+        save_learned_spec(store, spec)
+        return spec
+    except Exception:
+        log.debug("could not record replay for %s", name, exc_info=True)
+        return None
+
+
+def save_learned_spec(store: RecipeStore, spec: dict[str, Any]) -> dict[str, Any]:
+    """Write one learned spec, validated like any other. Raises RecipeError.
+
+    ``_validate`` is the same gate the read path uses, so a learned recipe that
+    was written is one the loader is guaranteed to accept — the executor's
+    contract that a recipe either replays or fails into the agent, never that it
+    half-loads.
+    """
+    validated = _validate(spec, source="learned")
+    _write_atomic(store.directory / f"{validated.name}.json", validated.spec)
+    store.refresh(force=True)
+    return validated.spec

@@ -16,8 +16,6 @@ is to finish the task, not to retry the broken step blind.
 
 from __future__ import annotations
 
-import asyncio
-import hashlib
 import json
 import logging
 import random
@@ -33,6 +31,8 @@ from ..browser import BrowserSession
 from ..config import Settings
 from ..escalation import EscalationRequired  # noqa: F401  (re-raised, never caught here)
 from ..laya_gate import LayaGate
+from ..page_state import fingerprint as _fingerprint
+from ..page_state import state_text, wait_stable as _wait_stable
 from ..picker import ElementPicker
 from ..plan_model import DoneWhen, Plan, Step, StepFailure
 from ._candidates import (
@@ -72,19 +72,6 @@ def _is_risky_unproven(step: Step) -> bool:
     return bool(_RISKY_RE.search(haystack))
 
 
-async def state_text(page: Page, limit: int = 900) -> str:
-    """Short text snapshot of the page for the Laya gate."""
-    try:
-        title = await page.title()
-    except Exception:
-        title = ""
-    try:
-        body = (await page.inner_text("body"))[:limit]
-    except Exception:
-        body = ""
-    return f"{title}\n{body}".strip()
-
-
 async def check_done_when(page: Page, dw: DoneWhen) -> bool:
     """Every predicate present must hold. A broken check reads as unmet."""
     try:
@@ -117,50 +104,6 @@ async def _retry_transient(op, *, what: str):
             if attempt or not any(t in str(exc) for t in _TRANSIENT_NET_ERRORS):
                 raise
             log.warning("transient network error during %s, retrying once: %s", what, exc)
-
-
-_FP_CONTROLS_JS = """\
-() => [...document.querySelectorAll('input, textarea, select')].map(e =>
-  e.type === 'checkbox' || e.type === 'radio'
-    ? (e.checked ? '1' : '0')
-    : String(e.value == null ? '' : e.value).slice(0, 40)
-).join('|')"""
-
-
-async def _fingerprint(page: Page) -> str | None:
-    """Semantic page fingerprint: url + title + visible text + control state.
-    Deliberately geometry-free (ported from jev-ultrafast's snapshot
-    fingerprint) so animations never read as change and real change never
-    reads as stale. Control state matters because typing into a field does
-    not change ``inner_text`` — without it, three legitimate field-fills
-    would trip the no-change latch."""
-    try:
-        title = await page.title()
-        body = (await page.inner_text("body"))[:2000]
-        controls = await page.evaluate(_FP_CONTROLS_JS)
-    except Exception:
-        return None
-    return hashlib.sha256(
-        f"{page.url}|{title}|{body}|{controls}".encode()
-    ).hexdigest()
-
-
-async def _wait_stable(page: Page, budget_s: float = 2.0) -> None:
-    """Best-effort quiescence wait: the fingerprint unchanged across one poll
-    interval, within budget. A plan acts on what it just observed; clicking
-    into a page that is still transitioning is how a correct pick lands on
-    the wrong DOM. Bounded — a page that never settles must not stall the
-    plan, the done_when/confirm gates still judge the outcome."""
-    last = await _fingerprint(page)
-    if last is None:
-        return
-    deadline = time.monotonic() + budget_s
-    while time.monotonic() < deadline:
-        await asyncio.sleep(0.2)
-        cur = await _fingerprint(page)
-        if cur is None or cur == last:
-            return
-        last = cur
 
 
 async def _fresh(cands: Candidates, idx: int) -> bool:

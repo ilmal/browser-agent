@@ -25,7 +25,7 @@ from .agent import make_agent_runner
 from .browser import BrowserSession, profile_exists
 from .config import Settings, load_settings
 from .escalation import detect_challenge
-from .router import route
+from .router import learned_match, route
 from .runstore import RunStore
 from .scheduler import ScheduleStore
 from .tasks import (
@@ -441,8 +441,12 @@ async def create_task(req: TaskRequest) -> dict[str, Any]:
     # answer it outright must not lose to a 135-second LLM plan just because the
     # dropdown was left on the default. See router.py.
     text = str(req.payload.get("task") or req.payload.get("text") or "")
+    # A learned recipe the agent earned may answer a freeform request, but only
+    # once it has replayed cleanly (see Settings.learned_recipe_min_replays).
+    # Consulted before the sync route() so a hand-authored predicate still wins.
+    matched = await learned_match(text, req.recipe, settings)
     try:
-        task = runner.submit(route(text, req.recipe), req.payload)
+        task = runner.submit(route(text, req.recipe, learned_match=matched), req.payload)
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     # The instruction that STARTED the work is part of the conversation, and it
