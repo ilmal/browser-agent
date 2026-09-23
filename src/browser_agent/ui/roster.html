@@ -333,8 +333,9 @@
         <label for="c-job">One job</label>
         <input id="c-job" placeholder="Post and reply on LinkedIn as me">
         <div class="muted" style="margin-top:5px">
-          One narrow job beats a general bot. Write it operationally, and end with
-          a limit — "never reply without my approval".
+          A bot is a login, so this describes who it is, not what to do — write it
+          operationally and end with a limit ("never reply without my approval").
+          The tasks it can be given come from the recipe library below.
         </div>
         <label for="c-notes">Notes (optional)</label>
         <textarea id="c-notes" placeholder="Which account it signs into, and what to do when it hits a wall."></textarea>
@@ -350,9 +351,11 @@
     <section id="sec-recipes" style="margin-top:22px">
       <h2>Recipe library</h2>
       <p class="sub">
-        What your bots can be asked to do. <b>This library is shared by every bot</b> —
-        editing a recipe changes it everywhere, and a run already under way keeps the
-        recipe it started with. A recipe with no overrides runs exactly as shipped.
+        The tasks your bots can be given — <b>a bot is a login; what it does is one
+        of these</b>. The library is shared by every bot, so editing a recipe changes
+        it everywhere (a run already under way keeps the recipe it started with), and
+        it grows as you compose new ones here. A recipe with no overrides runs
+        exactly as shipped.
       </p>
       <div id="recipe-err"></div>
       <div class="row" style="margin-bottom:12px">
@@ -1264,8 +1267,8 @@ function collectConfig(recipe) {
       values[key] = raw.split("\n").map(s => s.trim()).filter(Boolean);
     } else if (typeof def === "number" || key.startsWith("pace.") || key === "max_chars"
                || key === "max_clicks") {
-      const n = parseInt(raw, 10);
-      if (!raw.trim() || isNaN(n)) continue;      // blank means "leave it alone"
+      const n = Number(raw);
+      if (!raw.trim() || !Number.isFinite(n)) continue;  // blank means "leave it alone"
       values[key] = n;
     } else if (raw.trim()) {
       values[key] = raw.trim();

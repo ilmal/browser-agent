@@ -222,3 +222,32 @@ def test_a_stored_recipe_is_installed_and_can_be_forgotten(monkeypatch, tmp_path
             tasks.get_recipe("mine")
     finally:
         tasks.forget_recipe("mine")
+
+
+# ---- flights.search is a first-class library recipe -------------------------
+
+
+def test_flights_takes_a_float_override(library: RecipeStore) -> None:
+    merged = recipe_store.save_overrides(
+        library,
+        "flights.search",
+        {"entry_url": "https://www.google.com/travel/flights", "anchor_gap_s": 3.5},
+    )
+    assert merged == {
+        "entry_url": "https://www.google.com/travel/flights",
+        "anchor_gap_s": 3.5,
+    }
+
+
+def test_flights_rejects_a_negative_or_non_numeric_gap(library: RecipeStore) -> None:
+    for bad in (-1, "soon", True):
+        with pytest.raises(RecipeError):
+            recipe_store.validate_override("flights.search", "anchor_gap_s", bad)
+
+
+def test_the_hub_shows_flights_defaults_off_the_module() -> None:
+    from browser_agent.hub import _builtin_defaults
+
+    defaults = _builtin_defaults()["flights.search"]
+    assert defaults["entry_url"] == "https://www.google.com/travel/flights"
+    assert defaults["anchor_gap_s"] == 2.5

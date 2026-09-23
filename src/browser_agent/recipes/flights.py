@@ -50,6 +50,13 @@ SOCS = "CAESHAgCEhJnd3MfMjAyMzA4MTAtMF9SQzIaAmVuIAEaBgiA_LyaBg"
 #: The fixed "flights and prices, no filters" request constant.
 TFU = "EgQIABABIgA"
 
+#: The two keys the recipe library may override (recipe_store.OVERRIDABLE).
+#: Named here so hub._builtin_defaults reads them off this module rather than
+#: restating them — a changed literal cannot leave the editor showing an old
+#: value.
+DEFAULT_ENTRY_URL = "https://www.google.com/travel/flights"
+DEFAULT_ANCHOR_GAP_S = 2.5
+
 #: Google localises the page from the *egress IP*, and this bot egresses a
 #: Swedish residential address, so without an explicit locale the form renders
 #: in Swedish — where the button is ``aria-label="Sök"``, not ``"Search"``, and
@@ -419,7 +426,7 @@ class FlightSearch:
 
     @property
     def entry_url(self) -> str:
-        return cfg("flights.search", "entry_url", "https://www.google.com/travel/flights")
+        return cfg("flights.search", "entry_url", DEFAULT_ENTRY_URL)
 
     @classmethod
     def understands(cls, text: str, today: date) -> bool:
@@ -490,7 +497,7 @@ class FlightSearch:
                     walled += 1
             # One page load per anchor is five loads for a month; a short gap
             # keeps that under Google's published 10 req/s and reads as a person.
-            await asyncio.sleep(cfg("flights.search", "anchor_gap_s", 2.5))
+            await asyncio.sleep(cfg("flights.search", "anchor_gap_s", DEFAULT_ANCHOR_GAP_S))
         if not cells:
             if walled:
                 raise StepFailure(

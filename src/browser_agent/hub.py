@@ -495,7 +495,7 @@ def _builtin_defaults() -> dict[str, dict[str, Any]]:
     costs a blank placeholder — never the endpoint.
     """
     from .minesweeper_dom import Pace
-    from .recipes import facebook, linkedin, minesweeper, plan_task, x
+    from .recipes import facebook, flights, linkedin, minesweeper, plan_task, x
 
     pace = Pace()
     out: dict[str, dict[str, Any]] = {}
@@ -504,6 +504,7 @@ def _builtin_defaults() -> dict[str, dict[str, Any]]:
         (facebook, "facebook.page_post"),
         (linkedin, "linkedin.page_post"),
         (minesweeper, "minesweeper.play"),
+        (flights, "flights.search"),
         (plan_task, "plan.task"),
     ):
         defaults: dict[str, Any] = {
@@ -517,6 +518,9 @@ def _builtin_defaults() -> dict[str, dict[str, Any]]:
             defaults["max_clicks"] = getattr(module, "MAX_CLICKS_PER_GAME", None)
             defaults["pace.min_ms"] = pace.min_ms
             defaults["pace.max_ms"] = pace.max_ms
+        elif recipe == "flights.search":
+            # Its second key is a pause length, not a posting config key.
+            defaults["anchor_gap_s"] = getattr(module, "DEFAULT_ANCHOR_GAP_S", None)
         elif recipe == "plan.task":
             # Its entry_url default is a bare literal in the recipe, not a
             # module constant like the others.

@@ -61,6 +61,7 @@ OVERRIDABLE: dict[str, tuple[str, ...]] = {
     ),
     "plan.task": ("entry_url", "planner_prompt"),
     "minesweeper.play": ("entry_url", "pace.min_ms", "pace.max_ms", "max_clicks"),
+    "flights.search": ("entry_url", "anchor_gap_s"),
 }
 
 #: The five actions ``plan_model.Step`` already understands. A stored recipe
@@ -340,6 +341,9 @@ def validate_override(recipe: str, key: str, value: Any) -> None:
     elif key == "max_chars":
         if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
             raise RecipeError("max_chars must be a positive integer")
+    elif key == "anchor_gap_s":
+        if not isinstance(value, (int, float)) or isinstance(value, bool) or value < 0:
+            raise RecipeError("anchor_gap_s must be a non-negative number (seconds)")
     elif key == "planner_prompt":
         if not isinstance(value, str) or not value.strip():
             raise RecipeError("planner_prompt must be a non-empty string")
