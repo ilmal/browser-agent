@@ -103,6 +103,9 @@ spec:
       # exec-format error. Build multi-arch before removing this.
       nodeSelector:
         kubernetes.io/arch: amd64
+      # Same disk-pressure toleration as profile-x: see k8s/browser-agent.yaml.
+      tolerations:
+        - { key: node.kubernetes.io/disk-pressure, operator: Exists }
       containers:
         - name: agent
           image: $IMAGE

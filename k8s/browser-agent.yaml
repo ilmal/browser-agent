@@ -111,6 +111,16 @@ spec:
       # a multi-arch image before removing this.
       nodeSelector:
         kubernetes.io/arch: amd64
+      # cn1 sits ~1GiB above kubelet's 5% imagefs threshold, so the
+      # disk-pressure taint stamps and clears as ordinary writes cross the
+      # line — every image push (~700MB) tips it under mid-deploy, leaving
+      # the new pod unschedulable while Recreate has already terminated the
+      # old one. There is no other schedulable node (office-server is tainted
+      # dedicated), so waiting it out only blocks deploys indefinitely.
+      # Tolerate it; the kubelet's real defense — evicting running pods —
+      # stays in force.
+      tolerations:
+        - { key: node.kubernetes.io/disk-pressure, operator: Exists }
       containers:
         - name: agent
           image: localhost:5000/browser-agent:24e1185
