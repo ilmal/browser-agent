@@ -988,13 +988,13 @@ def test_a_retry_records_the_instruction_in_the_thread(bot_env):
 
 def test_the_thread_box_cannot_reload_the_page(bot_env):
     """A <button> inside a <form> submits it by default, so the page navigated
-    and the operator lost what they typed. Every button in that panel that is
-    not the form's own submit must say type="button"."""
+    and the operator lost what they typed. Every button in the page must say
+    type="button" explicitly — asserted file-wide, because the composer's
+    structure is allowed to change while its safety is not."""
     import re
 
     page = (Path(__file__).resolve().parents[1] / "src" / "browser_agent" / "ui"
             / "index.html").read_text()
-    form = re.search(r'<form id="thread-form">.*?</form>', page, re.S)
-    assert form, "the thread panel must render its form"
-    for tag in re.findall(r"<button[^>]*>", form.group(0)):
-        assert 'type="button"' in tag, f"a thread button would submit the form: {tag}"
+    assert "<form" in page, "the page carries forms"
+    for tag in re.findall(r"<button[^>]*>", page):
+        assert 'type="button"' in tag, f"a button would submit its form: {tag}"

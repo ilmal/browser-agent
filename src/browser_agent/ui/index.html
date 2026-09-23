@@ -6,202 +6,292 @@
 <!--PREFIX-->
 <title>browser-agent</title>
 <style>
+  /* Grok-companions palette (see references/grok-companions-flow.md and the
+     Mobbin design spec): pure black ground, near-black surfaces, white as the
+     primary action, orange reserved for the armed/working state. */
   :root {
-    --bg: #101014; --panel: #17171d; --panel-2: #1e1e26; --line: #2a2a34;
-    --text: #e8e8ee; --dim: #9a9aa8; --accent: #6ea8fe;
-    --ok: #4ec9a0; --warn: #e0b341; --bad: #e06c75;
-    --radius: 10px;
+    --bg: #000000; --panel: #1C1C1E; --panel-2: #2C2C2E; --line: rgba(255,255,255,0.08);
+    --text: #FFFFFF; --text-2: rgba(255,255,255,0.70); --text-3: #8E8E93;
+    --accent: #FF9500; --ok: #30D158; --warn: #FF9F0A; --bad: #FF453A;
+    --radius: 12px;
+    --push: cubic-bezier(0.32, 0.72, 0, 1);   /* iOS push — panels, split */
+    --ease: cubic-bezier(0.22, 1, 0.36, 1);   /* message + card entrances */
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
     margin: 0; background: var(--bg); color: var(--text);
     font: 14px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    display: flex; flex-direction: column; overflow: hidden;
   }
   header {
     display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
-    padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel);
-    position: sticky; top: 0; z-index: 10;
+    padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--bg);
+    flex: 0 0 auto; z-index: 20;
   }
-  header h1 { font-size: 15px; margin: 0 6px 0 0; font-weight: 600; letter-spacing: .2px; }
+  header h1 { font-size: 15px; margin: 0 6px 0 0; font-weight: 700; letter-spacing: .2px; }
   .pill {
     font-size: 12px; padding: 3px 9px; border-radius: 999px; white-space: nowrap;
-    background: var(--panel-2); color: var(--dim); border: 1px solid var(--line);
+    background: var(--panel); color: var(--text-3); border: 1px solid var(--line);
   }
-  .pill.ok { color: var(--ok); border-color: #24503f; }
-  .pill.warn { color: var(--warn); border-color: #55491f; }
-  .pill.bad { color: var(--bad); border-color: #55292d; }
+  .pill.ok { color: var(--ok); border-color: rgba(48,209,88,.35); }
+  .pill.warn { color: var(--warn); border-color: rgba(255,159,10,.35); }
+  .pill.bad { color: var(--bad); border-color: rgba(255,69,58,.35); }
+  .pill.accent { color: var(--accent); border-color: rgba(255,149,0,.4); }
   .spacer { flex: 1; }
-  /* minmax(0, 1fr) + min-width:0 on the children: a grid item defaults to
-     min-width:auto, so it refuses to shrink below its longest unbreakable
-     token. One captcha URL in a task detail stretched the whole page to
-     ~3900px regardless of viewport. */
-  main {
-    padding: 20px; max-width: 1080px; margin: 0 auto;
-    display: grid; grid-template-columns: minmax(0, 1fr); gap: 16px;
-  }
-  main > * { min-width: 0; }
-  @media (max-width: 720px) { main { padding: 12px; } }
 
-  section { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 16px; min-width: 0; }
-  section h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--dim); margin: 0 0 4px; }
-  section .sub { color: var(--dim); font-size: 12px; margin: 0 0 14px; overflow-wrap: anywhere; }
-
-  label { display: block; font-size: 12px; color: var(--dim); margin: 12px 0 4px; }
-  label:first-of-type { margin-top: 0; }
-  input, textarea, select {
-    width: 100%; background: var(--panel-2); color: var(--text);
-    border: 1px solid var(--line); border-radius: 7px; padding: 8px 10px; font: inherit;
-  }
-  input:focus, textarea:focus, select:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
-  textarea { min-height: 72px; resize: vertical; }
   button {
-    background: var(--accent); color: #0b0b10; border: 0; border-radius: 7px;
-    padding: 8px 14px; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap;
+    background: #FFFFFF; color: #000; border: 0; border-radius: 999px;
+    padding: 7px 16px; font: inherit; font-weight: 600; cursor: pointer; white-space: nowrap;
+    transition: transform .12s ease, filter .12s ease;
   }
-  button.ghost { background: transparent; color: var(--dim); border: 1px solid var(--line); font-weight: 500; }
-  button.ghost:hover { color: var(--text); }
-  button:disabled { opacity: .45; cursor: not-allowed; }
+  button:hover { filter: brightness(.92); }
+  button:active { transform: scale(.97); }
+  button.ghost {
+    background: var(--panel-2); color: var(--text-2);
+    border: 1px solid var(--line); font-weight: 500;
+  }
+  button.ghost:hover { color: var(--text); filter: none; border-color: rgba(255,255,255,.2); }
+  button.ghost.danger { color: var(--bad); border-color: rgba(255,69,58,.35); }
+  button:disabled { opacity: .4; cursor: not-allowed; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .row.end { justify-content: flex-end; }
+  label { display: block; font-size: 12px; color: var(--text-3); margin: 12px 0 4px; }
+  input, textarea, select {
+    width: 100%; background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; font: inherit;
+  }
+  input:focus, textarea:focus, select:focus { outline: none; border-color: rgba(255,255,255,.35); }
+  textarea { min-height: 72px; resize: vertical; }
 
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  /* A task detail is often a raw URL and URLs have no spaces: without
-     anywhere-breaking the cell sets the table's min width, not the reverse. */
-  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line);
-    vertical-align: top; overflow-wrap: anywhere; }
-  th { color: var(--dim); font-weight: 500; font-size: 12px; }
-  tr:last-child td { border-bottom: 0; }
-  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--dim); }
+  /* The workspace: chat always, browser beside it when open. */
+  #workspace { flex: 1 1 auto; display: flex; min-height: 0; }
+  #workspace > * { min-width: 0; }
 
-  /* The read-only recipe list. A card per recipe, because the useful content is
-     a name and a sentence — the same reason the roster uses cards. */
-  .rl { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 10px; }
-  .rc { background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px;
-    padding: 11px 12px; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
-  .rc .nm { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; min-width: 0; }
-  .rc .nm code { font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
-  .rc .desc { font-size: 12px; color: var(--dim); overflow-wrap: anywhere; }
-  /* A composed recipe is this library's own work, not something that shipped in
-     the image — worth marking, because it is the one kind the operator can
-     rewrite from scratch. */
-  .pill.stored { color: var(--accent); border-color: #2a3d5c; }
+  #banner { flex: 0 0 auto; padding: 0 16px; }
+  #banner:empty { padding: 0; }
+  .alert { border-radius: 12px; padding: 10px 14px; font-size: 13px; margin: 10px 0;
+    border: 1px solid rgba(255,159,10,.4); background: rgba(255,159,10,.1); color: #ffd9a0;
+    min-width: 0; overflow-wrap: anywhere; }
+  .alert.bad { border-color: rgba(255,69,58,.4); background: rgba(255,69,58,.1); color: #ffc2be; }
+  .alert a { color: inherit; font-weight: 600; }
+  .alert .row { margin-top: 8px; }
 
+  /* -- chat pane: the main surface ------------------------------------ */
+  #chat-pane { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+  #chat-head {
+    display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+    padding: 12px 20px 8px; flex: 0 0 auto;
+  }
+  .avatar {
+    width: 36px; height: 36px; border-radius: 50%; flex: 0 0 auto;
+    background: var(--panel-2); border: 1px solid var(--line);
+    display: grid; place-items: center; font-weight: 700; font-size: 15px; color: var(--text-2);
+    position: relative;
+  }
+  .avatar.sm { width: 26px; height: 26px; font-size: 12px; }
+  /* Working state: the pulsing ring from the motion spec. */
+  .avatar.working::after {
+    content: ""; position: absolute; inset: -3px; border-radius: 50%;
+    animation: ring 1.6s ease-out infinite;
+  }
+  @keyframes ring {
+    0% { box-shadow: 0 0 0 0 rgba(255,149,0,.45); }
+    100% { box-shadow: 0 0 0 12px rgba(255,149,0,0); }
+  }
+  #chat-who { min-width: 0; }
+  #chat-name { font-weight: 600; font-size: 15px; }
+  #chat-status { color: var(--text-3); font-size: 12px; overflow-wrap: anywhere; }
+  #chat-ctl { margin-left: auto; display: flex; gap: 8px; align-items: center; }
+
+  /* The driving banner while the operator has the wheel. */
+  #manual-box { flex: 0 0 auto; margin: 0 20px 8px; }
+  #manual-box .alert { margin: 0 0 8px; }
+  #manual-box .hb-row { display: flex; gap: 8px; align-items: center; }
+  #manual-box input { flex: 1; min-width: 0; }
+
+  #thread-scroll { flex: 1 1 auto; overflow-y: auto; min-height: 0; }
+  #thread-wrap { max-width: 760px; margin: 0 auto; padding: 4px 20px 16px; display: grid; gap: 16px; }
+  #thread { display: grid; gap: 16px; min-width: 0; }
+  /* Grok chat language: no bubbles for the bot — plain full-width turns.
+     The operator's turn is the compact unit with the small avatar. */
+  .turn { min-width: 0; display: grid; grid-template-columns: 26px minmax(0,1fr); gap: 10px; }
+  .turn .who { font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--text-3); margin-bottom: 2px; }
+  .turn .say { overflow-wrap: anywhere; white-space: pre-wrap; }
+  .turn.system { grid-template-columns: minmax(0,1fr); }
+  .turn.system .who { text-align: center; }
+  .turn.system .say { color: var(--text-3); font-size: 12px; text-align: center; }
+  .turn.enter { animation: msg-in .26s var(--ease) both; }
+  @keyframes msg-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+
+  /* A finished attempt is a run card, not speech: caption styling with a
+     status edge, and the run's whole record collapsed inside. */
+  .run-card { background: var(--panel); border: 1px solid var(--line);
+    border-left-width: 2px; border-radius: 14px; padding: 10px 14px; min-width: 0; }
+  .run-card.enter { animation: msg-in .26s var(--ease) both; }
+  .run-card.done { border-left-color: var(--ok); }
+  .run-card.blocked { border-left-color: var(--warn); }
+  .run-card.failed { border-left-color: var(--bad); }
+  .run-card.running, .run-card.queued { border-left-color: var(--accent); }
   .status { font-weight: 600; font-size: 12px; }
   .status.done { color: var(--ok); }
   .status.failed { color: var(--bad); }
   .status.blocked { color: var(--warn); }
   .status.running { color: var(--accent); }
-  .status.queued { color: var(--dim); }
+  .status.queued { color: var(--text-3); }
 
-  .alert { border-radius: 9px; padding: 12px 14px; font-size: 13px;
-    border: 1px solid var(--warn); background: #2a2413; color: #f0dda0;
-    min-width: 0; overflow-wrap: anywhere; }
-  .alert.bad { border-color: #55292d; background: #2a1618; color: #f0b6ba; }
-  .alert a { color: inherit; font-weight: 600; }
-  .alert .row { margin-top: 10px; }
+  /* Working indicator: three dots, the spec's offset pulse. */
+  #working-row { display: flex; gap: 5px; padding: 4px 0 0 36px; }
+  #working-row i { width: 7px; height: 7px; border-radius: 50%; background: var(--text-3);
+    animation: dot 1.2s ease-in-out infinite; }
+  #working-row i:nth-child(2) { animation-delay: .2s; }
+  #working-row i:nth-child(3) { animation-delay: .4s; }
+  @keyframes dot { 0%,100% { opacity: .3; } 50% { opacity: 1; } }
 
-  .muted { color: var(--dim); font-size: 12px; }
+  /* Composer: the two-row rounded block, pinned to the bottom. */
+  #composer { flex: 0 0 auto; padding: 8px 20px 14px; }
+  #composer .inner { max-width: 760px; margin: 0 auto; }
+  .composer-box {
+    display: flex; gap: 10px; align-items: flex-end;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 28px;
+    padding: 8px 8px 8px 16px;
+    transition: border-color .18s ease;
+  }
+  .composer-box:focus-within { border-color: rgba(255,255,255,.28); }
+  #composer textarea {
+    background: transparent; border: 0; border-radius: 0; padding: 8px 0;
+    min-height: 24px; max-height: 160px; resize: none; flex: 1; font-size: 15px;
+  }
+  #composer textarea:focus { border: 0; }
+  #thread-send { height: 40px; padding: 0 20px; flex: 0 0 auto; }
+  #composer .hint { color: var(--text-3); font-size: 11.5px; margin: 6px 4px 0; text-align: center; }
+  .err { color: var(--bad); font-size: 12px; margin-top: 6px; }
+
+  /* -- browser pane + divider ------------------------------------------ */
+  #browser-pane {
+    flex: 0 0 auto; width: 0; overflow: hidden; border-left: 1px solid var(--line);
+    display: flex; flex-direction: column; background: #000;
+    transition: width .42s var(--push);
+  }
+  body.split-open #browser-pane { width: min(52vw, 900px); }
+  body.dragging #browser-pane { transition: none; }
+  .pane-inner { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0;
+    min-height: 0; width: min(52vw, 900px);
+    opacity: 0; transition: opacity .18s ease .12s; }
+  body.split-open .pane-inner { opacity: 1; }
+  .pane-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
+    border-bottom: 1px solid var(--line); flex-wrap: wrap; }
+  .pane-head .title { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--text-3); }
+  #vnc-holder { flex: 1 1 auto; min-height: 0; }
+  #vnc-holder iframe { width: 100%; height: 100%; border: 0; background: #000; display: block; }
+  #divider { flex: 0 0 7px; cursor: col-resize; background: transparent; position: relative;
+    z-index: 5; margin-left: -7px; }
+  #divider::after { content: ""; position: absolute; left: 3px; top: 0; bottom: 0;
+    width: 1px; background: var(--line); }
+  @media (max-width: 900px) {
+    body.split-open #chat-pane { display: none; }
+    body.split-open #browser-pane { width: 100%; }
+    .pane-inner { width: 100%; }
+    #divider { display: none; }
+  }
+  /* The "Browser" button pulses when a task starts and the pane is closed. */
+  .pulse-once { animation: btn-pulse 1.6s ease-out 2; }
+  @keyframes btn-pulse {
+    0% { box-shadow: 0 0 0 0 rgba(255,149,0,.5); }
+    100% { box-shadow: 0 0 0 12px rgba(255,149,0,0); }
+  }
+
+  /* -- the details drawer ----------------------------------------------- */
+  #drawer {
+    flex: 0 0 auto; height: 0; overflow: hidden auto; border-top: 1px solid var(--line);
+    transition: height .36s var(--push); background: #000;
+  }
+  body.drawer-open #drawer { height: min(58vh, 660px); }
+  #drawer-pad { padding: 16px; max-width: 1080px; margin: 0 auto;
+    display: grid; grid-template-columns: minmax(0,1fr); gap: 16px; }
+  #drawer-pad > * { min-width: 0; }
+  section { background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px; min-width: 0; }
+  section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+    color: var(--text-3); margin: 0 0 4px; }
+  section .sub { color: var(--text-3); font-size: 12px; margin: 0 0 14px; overflow-wrap: anywhere; }
+  /* minmax(0,1fr) + min-width:0: a grid item defaults to min-width:auto, so it
+     refuses to shrink below its longest unbreakable token. One captcha URL in a
+     task detail stretched the whole page to ~3900px regardless of viewport. */
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line);
+    vertical-align: top; }
+  th { color: var(--text-3); font-weight: 500; font-size: 12px; white-space: nowrap; }
+  tr:last-child td { border-bottom: 0; }
+  td.right { text-align: right; white-space: nowrap; }
+  /* Long content lives in the detail column only; without this scoping a long
+     captcha URL forces every other column so narrow that "running" wraps
+     per-character. */
+  #tasks td { white-space: nowrap; }
+  #tasks td:nth-child(3) { white-space: normal; overflow-wrap: anywhere; min-width: 120px; }
+  #scheds td:first-child code { overflow-wrap: anywhere; white-space: normal; }
+  #scheds td:nth-child(3) { white-space: normal; overflow-wrap: anywhere; }
+  code { font-family: ui-monospace, "SF Mono", Menlo, monospace; font-size: 12px; color: var(--text-2); }
+
+  .rl { display: grid; grid-template-columns: repeat(auto-fill, minmax(270px, 1fr)); gap: 10px; }
+  .rc { background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px;
+    padding: 11px 12px; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+  .rc .nm { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; min-width: 0; }
+  .rc .nm code { font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
+  .rc .desc { font-size: 12px; color: var(--text-3); overflow-wrap: anywhere; }
+  .rc.enter { animation: card-in .42s var(--ease) both; }
+  @keyframes card-in { from { opacity: 0; transform: translateY(16px) scale(.98); }
+    to { opacity: 1; transform: none; } }
+  .pill.stored { color: var(--accent); border-color: rgba(255,149,0,.35); }
+
+  .alert.bad a { color: inherit; }
+  .muted { color: var(--text-3); font-size: 12px; }
   .muted.ok  { color: var(--ok); }
   .muted.bad { color: var(--bad); }
-  .empty { color: var(--dim); font-size: 13px; padding: 6px 0; }
+  .empty { color: var(--text-3); font-size: 13px; padding: 6px 0; }
   .hidden { display: none !important; }
-  details > summary { cursor: pointer; color: var(--dim); font-size: 12px; }
-  /* pre-wrap, not the default ``pre``. A result is JSON and its strings are
-     long; with white-space:pre an unbroken line sets the min-content width of
-     whatever contains it — inside a table cell that is a table 11,000 px wide.
-     Measured on the live page 2026-09-22 (scripts/ui_overflow_check.py): the
-     result <pre> alone pushed the History table to 11,741 px and the whole
-     document with it. Wrapping keeps the block inside its column; the scroll
-     stays for the vertical axis. */
-  pre { background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px;
+  details > summary { cursor: pointer; color: var(--text-3); font-size: 12px; }
+  pre { background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
     padding: 10px; overflow: auto; max-height: 260px; font-size: 12px; margin: 8px 0 0;
     white-space: pre-wrap; overflow-wrap: anywhere; max-width: 100%; }
-  /* A <details> in a cell must not be free to be wider than the cell either. */
   td details, #thread details { min-width: 0; max-width: 100%; }
   td details > summary { overflow-wrap: anywhere; }
-  iframe { width: 100%; height: 560px; border: 1px solid var(--line); border-radius: 8px; background: #000; }
   .steps { counter-reset: s; list-style: none; padding: 0; margin: 0; }
   .steps li { counter-increment: s; position: relative; padding: 0 0 14px 30px;
     min-width: 0; overflow-wrap: anywhere; }
   .steps li::before {
     content: counter(s); position: absolute; left: 0; top: 1px;
     width: 20px; height: 20px; border-radius: 50%; background: var(--panel-2);
-    border: 1px solid var(--line); color: var(--dim);
+    border: 1px solid var(--line); color: var(--text-3);
     font-size: 11px; display: grid; place-items: center;
   }
   .steps li:last-child { padding-bottom: 0; }
-  .err { color: var(--bad); font-size: 12px; margin-top: 6px; }
 
-  /* The live feed: what the run is doing, newest first. */
   .feed { max-height: 280px; overflow-y: auto; font-size: 12.5px; }
-  .feed .row-item {
-    display: flex; gap: 9px; padding: 5px 0; border-bottom: 1px solid var(--line);
-    align-items: baseline;
-  }
+  .feed .row-item { display: flex; gap: 9px; padding: 5px 0; border-bottom: 1px solid var(--line);
+    align-items: baseline; }
   .feed .row-item:last-child { border-bottom: 0; }
-  .feed .t { color: var(--dim); font-variant-numeric: tabular-nums; min-width: 52px; }
-  .feed .k {
-    font-size: 10px; text-transform: uppercase; letter-spacing: .06em; min-width: 46px;
-    color: var(--dim);
-  }
+  .feed .t { color: var(--text-3); font-variant-numeric: tabular-nums; min-width: 52px; }
+  .feed .k { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; min-width: 46px;
+    color: var(--text-3); }
   .feed .k.step  { color: var(--accent); }
   .feed .k.agent { color: #b58cf0; }
   .feed .k.gate  { color: var(--warn); }
   .feed .k.error { color: var(--bad); }
   .feed .k.operator { color: var(--ok); }
-
-  /* The thread: a transcript of turns, not a console. Modelled on the Grok
-     companion chat (see the grok-companions-flow reference): the operator's
-     turns sit right and the bot's sit left, so a conversation is readable as a
-     conversation before you read a word of it. The old left-border version made
-     every turn look like a log line, which is what it had been. */
-  #thread { display: grid; gap: 12px; max-width: 900px; }
-  #thread .turn { min-width: 0; max-width: 82%; }
-  #thread .turn.operator { justify-self: end; text-align: left; }
-  #thread .turn.operator .say {
-    background: var(--accent); color: #0d1220; border-radius: 14px 14px 4px 14px;
-    padding: 8px 12px;
-  }
-  #thread .turn:not(.operator) { justify-self: start; }
-  #thread .turn:not(.operator) .say {
-    background: var(--panel-2); border: 1px solid var(--line);
-    border-radius: 14px 14px 14px 4px; padding: 8px 12px;
-  }
-  /* A finished attempt is summarised, not quoted: it is a machine's account of
-     what happened, so it reads as a caption on the turn rather than as speech. */
-  #thread .turn.done .say { border-left: 2px solid var(--ok); }
-  #thread .turn.blocked .say { border-left: 2px solid var(--warn); }
-  #thread .turn.failed .say { border-left: 2px solid var(--bad); }
-  #thread .turn .who {
-    font-size: 11px; text-transform: uppercase; letter-spacing: .06em;
-    color: var(--dim); margin-bottom: 3px;
-  }
-  #thread .turn.operator .who { text-align: right; }
-  #thread .turn .say { overflow-wrap: anywhere; }
-  #thread .turn pre { margin-top: 6px; max-height: 180px; }
-  #thread details { max-width: 100%; }
-  #thread form { margin-top: 6px; max-width: 900px; }
-  #thread form label { display: block; margin-bottom: 4px; }
-  #thread form textarea { width: 100%; min-height: 64px; resize: vertical; }
-  #thread .row { align-items: flex-end; }
   .feed .m { flex: 1; overflow-wrap: anywhere; }
-  .feed .empty { color: var(--dim); }
+  .live-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: var(--ok);
+    animation: blink 1.6s ease-in-out infinite; }
+  @keyframes blink { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  .back-chip { font-size: 12px; padding: 4px 12px; }
 
-  /* Full-screen live view, opened on task start. */
-  #lightbox { position: fixed; inset: 0; z-index: 50; background: #000;
-    display: flex; flex-direction: column; }
-  #lightbox.hidden { display: none !important; }
-  .lb-bar { display: flex; align-items: center; gap: 10px; padding: 8px 12px;
-    background: var(--panel); border-bottom: 1px solid var(--line); }
-  .lb-body { flex: 1; min-height: 0; }
-  .lb-body iframe { width: 100%; height: 100%; border: 0; border-radius: 0; background: #000; }
-  body.lb-open { overflow: hidden; }
-
-  .switch { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--dim); }
-  .live-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok);
-    animation: pulse 1.6s ease-in-out infinite; }
-  @keyframes pulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
-  .pill.live { color: var(--ok); border-color: #24503f; }
+  @media (prefers-reduced-motion: reduce) {
+    * { animation-duration: 0ms !important; transition-duration: 0ms !important; }
+    .turn.enter, .rc.enter { transform: none; }
+  }
 </style>
 </head>
 <body>
@@ -212,184 +302,204 @@
   <span class="pill" id="p-llm">llm: …</span>
   <span class="pill" id="p-queue">queue: 0</span>
   <div class="spacer"></div>
-  <button class="ghost" id="refresh">Refresh</button>
+  <button class="ghost" id="btn-browser" type="button">Browser</button>
+  <button class="ghost" id="btn-details" type="button">Details</button>
+  <button class="ghost" id="refresh" type="button">Refresh</button>
 </header>
 
-<main>
-  <div id="banner"></div>
+<div id="banner"></div>
 
-  <!-- 1. The primary action, first: this is what the page is for. -->
-  <section id="sec-run">
-    <h2>Run a task</h2>
-    <p class="sub" id="run-sub">A recipe runs a known, deterministic flow. If its selectors break, the agent takes over automatically.</p>
-    <label for="recipe">Recipe</label>
-    <select id="recipe"></select>
-    <div id="url-wrap" class="hidden">
-      <label for="taskUrl">Start URL</label>
-      <input id="taskUrl" placeholder="https://example.com/some/page">
-      <div class="muted" style="margin-top:6px">A freeform instruction needs a page to work on.</div>
-    </div>
-    <label for="text">Instructions</label>
-    <textarea id="text" placeholder="What should it do? e.g. Post: hello world"></textarea>
-    <details>
-      <summary>Extra payload (optional JSON)</summary>
-      <input id="extra" placeholder='{"page_id": "123456789"}'>
-    </details>
-    <div class="row end" style="margin-top:14px">
-      <span class="muted" id="run-why"></span>
-      <button id="run">Queue task</button>
-    </div>
-  </section>
-
-  <section id="sec-current" class="hidden">
-    <div class="row" style="justify-content:space-between;align-items:flex-start">
-      <div>
-        <h2 id="cur-title">Running now</h2>
-        <div id="current"></div>
+<div id="workspace">
+  <section id="chat-pane">
+    <div id="chat-head">
+      <div class="avatar" id="chat-avatar">·</div>
+      <div id="chat-who">
+        <div id="chat-name">…</div>
+        <div id="chat-status"></div>
       </div>
-      <div class="row" id="cur-controls"></div>
+      <div id="chat-ctl">
+        <button class="ghost back-chip hidden" id="follow-latest" type="button">↩ live run</button>
+        <button class="ghost ctl-take" type="button">Take over</button>
+        <button class="ghost danger ctl-stop" type="button">Stop</button>
+      </div>
     </div>
-    <!-- The live view of the run. Opened the moment a task starts, because
-         "watch it work" is the point, not a separate page to go find. -->
-    <div id="live-wrap" class="hidden"></div>
-    <div class="row" style="margin-top:10px">
-      <label for="steer" style="margin:0">Change what it's doing</label>
-      <span class="muted" id="steer-hint">applies at its next step</span>
+    <div id="manual-box" class="hidden">
+      <div class="alert"><strong>You're driving.</strong> The agent waits between steps while you work in the live view.</div>
+      <div class="hb-row">
+        <input id="hb-text" placeholder="Anything to tell it before you hand back? (optional)">
+        <button class="ctl-resume" type="button">Hand back</button>
+      </div>
     </div>
-    <div class="row" style="align-items:flex-start;margin-top:6px">
-      <textarea id="steer" style="min-height:52px;flex:1"
-        placeholder="e.g. Actually, search for the company page instead"></textarea>
-      <button id="steer-send">Send</button>
+    <div id="thread-scroll">
+      <div id="thread-wrap">
+        <div id="thread"></div>
+        <div id="working-row" class="hidden"><i></i><i></i><i></i></div>
+      </div>
     </div>
-    <h2 style="margin-top:16px">What it's doing</h2>
-    <p class="sub" id="feed-sub">Step by step, newest first.</p>
-    <div id="feed" class="feed"></div>
+    <form id="composer">
+      <div class="inner">
+        <div class="err hidden" id="composer-err"></div>
+        <div class="composer-box">
+          <textarea id="thread-text" rows="1"
+            placeholder="Message this bot — Enter to send, Shift+Enter for a new line"></textarea>
+          <button id="thread-send" type="button">Send</button>
+        </div>
+        <div class="hint" id="composer-hint"></div>
+      </div>
+    </form>
   </section>
 
-  <div id="lightbox" class="hidden">
-    <div class="lb-bar">
-      <span class="muted" id="lb-label">Live browser</span>
-      <div class="spacer"></div>
-      <button class="ghost" id="lb-open">Open in new tab</button>
-      <button class="ghost" id="lb-close">Close</button>
+  <div id="divider" title="Drag to resize · double-click to reset"></div>
+
+  <section id="browser-pane">
+    <div class="pane-inner">
+      <div class="pane-head">
+        <span class="title">Live browser</span>
+        <span class="muted" id="pane-label"></span>
+        <span class="pill accent hidden" id="pane-paused">paused — you're driving</span>
+        <div class="spacer"></div>
+        <button class="ghost ctl-take" type="button">Take over</button>
+        <button class="ghost danger ctl-stop" type="button">Stop</button>
+        <button class="ghost" id="pane-popout" type="button">Open in tab</button>
+        <button class="ghost" id="pane-close" type="button">Close</button>
+      </div>
+      <div id="vnc-holder"></div>
     </div>
-    <div class="lb-body" id="lb-body"></div>
+  </section>
+</div>
+
+<div id="drawer">
+  <div id="drawer-pad">
+    <section id="sec-run">
+      <h2>Run a task</h2>
+      <p class="sub">A recipe runs a known, deterministic flow. If its selectors break, the agent takes over automatically.</p>
+      <label for="recipe">Recipe</label>
+      <select id="recipe"></select>
+      <div id="url-wrap" class="hidden">
+        <label for="taskUrl">Start URL</label>
+        <input id="taskUrl" placeholder="https://example.com/some/page">
+        <div class="muted" style="margin-top:6px">A freeform instruction needs a page to work on.</div>
+      </div>
+      <label for="text">Instructions</label>
+      <textarea id="text" placeholder="What should it do? e.g. Post: hello world"></textarea>
+      <details>
+        <summary>Extra payload (optional JSON)</summary>
+        <input id="extra" placeholder='{"page_id": "123456789"}'>
+      </details>
+      <div class="row end" style="margin-top:14px">
+        <span class="muted" id="run-why"></span>
+        <button id="run" type="button">Queue task</button>
+      </div>
+    </section>
+
+    <section id="sec-current" class="hidden">
+      <div class="row" style="justify-content:space-between;align-items:flex-start">
+        <div style="min-width:0">
+          <h2>Running now</h2>
+          <div id="current"></div>
+        </div>
+      </div>
+      <h2 style="margin-top:16px">What it's doing</h2>
+      <p class="sub" id="feed-sub">Step by step, newest first.</p>
+      <div id="feed" class="feed"></div>
+    </section>
+
+    <section id="sec-browser">
+      <h2>Browser &amp; sign-in</h2>
+      <p class="sub">
+        The agent drives one real, logged-in browser. Step in yourself for a
+        captcha, a 2FA code or an account warning — it stops at those on purpose.
+      </p>
+      <ol class="steps">
+        <li>
+          <div class="row">
+            <button class="ghost" id="open-vnc" type="button">Watch in a new tab</button>
+            <span class="muted">the same live view, full page</span>
+          </div>
+        </li>
+        <li>
+          <div class="muted" style="margin-bottom:6px">
+            This bot can hold several identities and run one at a time. Only the
+            running one is on screen — a Chrome profile is single-writer, and
+            switching restarts the browser onto the other login.
+          </div>
+          <div id="accounts"></div>
+        </li>
+        <li>
+          <div class="row">
+            <input id="loginUrl" value="https://x.com/login" aria-label="Login URL">
+            <button class="ghost" id="send-login" type="button">Go to this page</button>
+          </div>
+          <div class="muted" style="margin-top:6px">Sign in once. The profile persists, so this is not needed again.</div>
+        </li>
+        <li>
+          <div class="row">
+            <button class="ghost" id="restart-browser" type="button">Restart the browser</button>
+            <span class="muted" id="browser-state">checking…</span>
+          </div>
+          <div class="muted" style="margin-top:6px">
+            Closing the window is fine — the next task reopens it. This is for
+            when you want it back <em>now</em>, on a blank page.
+          </div>
+        </li>
+      </ol>
+    </section>
+
+    <section id="sec-tasks">
+      <h2>History</h2>
+      <div class="row" style="margin-bottom:10px">
+        <button class="ghost" data-filter="" type="button">All</button>
+        <button class="ghost" data-filter="blocked" type="button">Needs me</button>
+        <button class="ghost" data-filter="failed" type="button">Failed</button>
+        <button class="ghost" data-filter="done" type="button">Done</button>
+        <span class="spacer"></span>
+        <span class="muted" id="task-count"></span>
+      </div>
+      <table>
+        <thead><tr><th>Status</th><th>Recipe</th><th>Detail</th><th>Agent</th><th>Age</th><th></th></tr></thead>
+        <tbody id="tasks"></tbody>
+      </table>
+      <div class="row end" style="margin-top:8px">
+        <button class="ghost hidden" id="show-all" type="button">Show older</button>
+      </div>
+    </section>
+
+    <section id="sec-recipes">
+      <h2>Recipes</h2>
+      <p class="sub">
+        What this bot can be asked to do. Recipes are shared with your other bots
+        and edited in one place — <a id="roster-link" href="/" style="color:inherit">the roster</a> —
+        so a change here would be a change everywhere.
+      </p>
+      <div id="recipes" class="rl"></div>
+    </section>
+
+    <section id="sec-sched">
+      <h2>Schedules</h2>
+      <p class="sub">Run a recipe on a cron. Schedules fire while this pod is up.</p>
+      <div class="row" style="align-items:flex-end">
+        <div style="flex:1;min-width:150px">
+          <label for="schedRecipe">Recipe</label>
+          <select id="schedRecipe"></select>
+        </div>
+        <div style="flex:1;min-width:130px">
+          <label for="schedCron">Cron (5-field)</label>
+          <input id="schedCron" placeholder="0 9 * * 1-5">
+        </div>
+        <div style="flex:1;min-width:130px">
+          <label for="schedText">Instructions</label>
+          <input id="schedText" placeholder="optional">
+        </div>
+        <button id="addSched" type="button">Add</button>
+      </div>
+      <div class="err hidden" id="sched-err"></div>
+      <table style="margin-top:14px">
+        <thead><tr><th>ID</th><th>Cron</th><th>Next</th><th>On</th><th></th></tr></thead>
+        <tbody id="scheds"></tbody>
+      </table>
+    </section>
   </div>
-
-  <!-- 2. The browser, as a numbered flow, because the order is the confusing part. -->
-  <section id="sec-browser">
-    <h2>Browser</h2>
-    <p class="sub">
-      The agent drives one real, logged-in browser. Watch it here, and step in
-      yourself for a captcha, a 2FA code or an account warning — the agent stops
-      at those on purpose and never retries them.
-    </p>
-    <ol class="steps">
-      <li>
-        <div class="row">
-          <button class="ghost" id="open-vnc">Watch the browser</button>
-          <span class="muted">opens the live view in a new tab</span>
-        </div>
-      </li>
-      <li>
-        <div class="muted" style="margin-bottom:6px">
-          This bot can hold several identities and run one at a time. Only the
-          running one is on screen — a Chrome profile is single-writer, and
-          switching restarts the browser onto the other login.
-        </div>
-        <div id="accounts"></div>
-      </li>
-      <li>
-        <div class="row">
-          <input id="loginUrl" value="https://x.com/login" aria-label="Login URL">
-          <button class="ghost" id="send-login">Go to this page</button>
-        </div>
-        <div class="muted" style="margin-top:6px">Sign in once. The profile persists, so this is not needed again.</div>
-      </li>
-      <li>
-        <div class="row">
-          <button class="ghost" id="toggle-embed">Show the browser on this page</button>
-        </div>
-      </li>
-      <li>
-        <div class="row">
-          <button class="ghost" id="restart-browser">Restart the browser</button>
-          <span class="muted" id="browser-state">checking…</span>
-        </div>
-        <div class="muted" style="margin-top:6px">
-          Closing the window is fine — the next task reopens it. This is for
-          when you want it back <em>now</em>, on a blank page.
-        </div>
-      </li>
-    </ol>
-    <div id="embed-wrap" class="hidden" style="margin-top:12px"></div>
-  </section>
-
-  <section id="sec-tasks">
-    <h2>History</h2>
-    <div class="row" style="margin-bottom:10px">
-      <button class="ghost" data-filter="">All</button>
-      <button class="ghost" data-filter="blocked">Needs me</button>
-      <button class="ghost" data-filter="failed">Failed</button>
-      <button class="ghost" data-filter="done">Done</button>
-      <span class="spacer"></span>
-      <span class="muted" id="task-count"></span>
-    </div>
-    <table>
-      <thead><tr><th>Status</th><th>Recipe</th><th>Detail</th><th>Agent</th><th>Age</th><th></th></tr></thead>
-      <tbody id="tasks"></tbody>
-    </table>
-    <div class="row end" style="margin-top:8px">
-      <button class="ghost hidden" id="show-all">Show older</button>
-    </div>
-  </section>
-
-  <!-- The retry conversation. Opened from a History row; hidden until then,
-       because it is only meaningful for one line of work at a time. -->
-  <section id="sec-thread" class="hidden">
-    <h2>Talk to it</h2>
-    <p class="sub" id="thread-sub"></p>
-    <div id="thread"></div>
-  </section>
-
-  <!-- Read-only on purpose. The library is shared by every bot, so there is one
-       editor for it and it lives on the roster — a second editor here would be
-       N ways for N bots to write the one file. -->
-  <section id="sec-recipes">
-    <h2>Recipes</h2>
-    <p class="sub">
-      What this bot can be asked to do. Recipes are shared with your other bots
-      and edited in one place — <a id="roster-link" href="/">the roster</a> —
-      so a change here would be a change everywhere.
-    </p>
-    <div id="recipes" class="rl"></div>
-  </section>
-
-  <section id="sec-sched">
-    <h2>Schedules</h2>
-    <p class="sub">Run a recipe on a cron. Schedules fire while this pod is up.</p>
-    <div class="row" style="align-items:flex-end">
-      <div style="flex:1;min-width:150px">
-        <label for="schedRecipe">Recipe</label>
-        <select id="schedRecipe"></select>
-      </div>
-      <div style="flex:1;min-width:130px">
-        <label for="schedCron">Cron (5-field)</label>
-        <input id="schedCron" placeholder="0 9 * * 1-5">
-      </div>
-      <div style="flex:1;min-width:130px">
-        <label for="schedText">Instructions</label>
-        <input id="schedText" placeholder="optional">
-      </div>
-      <button id="addSched">Add</button>
-    </div>
-    <div class="err hidden" id="sched-err"></div>
-    <table style="margin-top:14px">
-      <thead><tr><th>ID</th><th>Cron</th><th>Next</th><th>On</th><th></th></tr></thead>
-      <tbody id="scheds"></tbody>
-    </table>
-  </section>
-</main>
+</div>
 
 <script>
 const $ = (id) => document.getElementById(id);
@@ -398,11 +508,14 @@ let state = null;          // last snapshot from /api/state
 let recipeList = [];
 let filter = "";
 let showAll = false;
-let embedOpen = false;
-let liveOpen = false;      // the live noVNC view is showing
-let liveTaskId = null;     // which task it is showing, so it is not rebuilt per poll
-let lastTaskId = null;     // last task we auto-opened for
+let lastTaskId = null;     // last task we auto-followed / auto-opened for
 let feed = [];             // newest-first activity for the running task
+let splitOpen = false;     // the browser pane is showing
+let threadId = null;
+let threadData = null;
+let pinnedThread = false;  // the operator picked a thread; follow no new runs
+let renderedTurns = new Set();  // turn ids already on screen (enter-animation diff)
+let threadPainted = false;      // first transcript paint: no entrance animation
 
 // Where this page is mounted. Empty standalone; "/b/<bot>" under a roster,
 // injected by the server that served the page. Every request the UI makes is
@@ -434,6 +547,18 @@ const ago = (ts) => {
 };
 const when = (ts) => ts ? new Date(ts * 1000).toLocaleString() : "—";
 
+// Elapsed labels NEVER appear inside set() markup: ago() changes every second,
+// which would change the sig, rewrite the node every poll, and kill whatever
+// the operator was doing inside it (this exact class of bug ate the composer
+// once). Markup carries <span data-elapsed="ts"></span>; this fills them in
+// place, outside the dedupe, on the 1 s tick and right after every render.
+function updateElapsed(root) {
+  (root || document).querySelectorAll("[data-elapsed]").forEach(el => {
+    const ts = parseFloat(el.dataset.elapsed);
+    if (ts) el.textContent = ago(ts);
+  });
+}
+
 // Write innerHTML only when it actually changed. Polling re-rendered a 50-row
 // table every few seconds, which made the page feel slow and could move a
 // button out from under the pointer mid-click.
@@ -444,17 +569,17 @@ const when = (ts) => ts ? new Date(ts * 1000).toLocaleString() : "—";
 // (data-detail / data-keep), not its position, so reordering rows cannot swap
 // two panels' states.
 function detailsOpen(root) {
-  const state = {};
+  const state_ = {};
   root.querySelectorAll("details").forEach((d, i) => {
-    if (d.open) state[d.dataset.detail || d.dataset.keep || `i${i}`] = true;
+    if (d.open) state_[d.dataset.detail || d.dataset.keep || `i${i}`] = true;
   });
-  return state;
+  return state_;
 }
 
-function restoreDetails(root, state) {
+function restoreDetails(root, state_) {
   root.querySelectorAll("details").forEach((d, i) => {
     const key = d.dataset.detail || d.dataset.keep || `i${i}`;
-    if (state[key]) d.open = true;
+    if (state_[key]) d.open = true;
   });
 }
 
@@ -480,34 +605,26 @@ function set(id, html) {
 // Where this bot's noVNC view lives, as seen from the operator's browser.
 //
 // BROWSER_BASE_URL is deployment-specific and deliberately empty in the tracked
-// manifest (see k8s/browser-agent.yaml), so it is the one setting an image-only
-// redeploy can silently wipe. Never guess "host:novnc_port" from it: the pod
-// port is not exposed (the reverse proxy serves /vnc.html instead), and that
-// guess is what produced the refused "browser.ilmal.se:6080/vnc.html".
+// manifest, so it is the one setting an image-only redeploy can silently wipe.
+// Never guess "host:novnc_port" from it: the pod port is not exposed (the
+// reverse proxy serves /vnc.html instead), and that guess is what produced the
+// refused "browser.ilmal.se:6080/vnc.html".
 //
 // The origin alone is not enough once a roster proxies several bots from one
 // domain: reached at /b/x/ the origin is the ROSTER, and origin + "/vnc.html"
 // would open the roster's viewer rather than this bot's. url_prefix is the
-// path this bot is mounted at ("/b/x"), sent by the proxy, and it is the only
-// part that differs. Empty prefix = the old one-domain-per-bot behaviour.
+// path this bot is mounted at ("/b/x"), and it is the only part that differs.
 function browserUrl() {
   if (!state) return null;
-  // The prefix applies to BOTH bases, not just the inferred one. With the
-  // roster, browser_base_url is the roster's own domain, so using it raw sent
-  // the live view to the roster's /vnc.html — the wrong window, silently.
   const prefix = state.url_prefix || "";
 
   // noVNC opens its websocket at "path" resolved against the page's DIRECTORY,
-  // and its default is "websockify" — i.e. the directory the page is in. Without
-  // a prefix that is the origin root, which is correct today. Under a roster it
-  // is not: /b/x/vnc.html would open /b/x/websockify (right) but /b/x/anything
-  // else lands wherever the default sends it, and an unprefixed page (reached by
-  // a proxy that serves vnc.html at its root) opens the ROSTER's socket instead
-  // of this bot's. Naming the path explicitly, relative to the proxy's own
-  // mount, is what makes both shapes open the same bot's screen.
+  // and its default is "websockify" — i.e. the directory the page is in. Under
+  // a roster that default reaches the wrong socket, so the path is named
+  // explicitly, relative to the proxy's own mount, WITHOUT a leading slash.
   //
-  // autoconnect=1 because the roster's "watch it work" moment must not depend on
-  // the operator finding the Connect button.
+  // autoconnect=1 because the live view must not depend on the operator
+  // finding the Connect button.
   const sock = (prefix + "/websockify").replace(/^\//, "");
   const q = `?autoconnect=1&resize=scale&path=${encodeURIComponent(sock)}`;
   const base = (state.browser_base_url || location.origin).replace(/\/$/, "");
@@ -518,6 +635,85 @@ function browserUrl() {
 function inRoster() {
   return !!(state && state.url_prefix);
 }
+
+// -- split view --------------------------------------------------------------
+//
+// The default surface is the chat; the browser pane slides in beside it. The
+// iframe is mounted on open and torn down on close: an idle noVNC session is
+// heavy, and a rebuild drops the VNC session — so it happens only on demand.
+
+function mountVnc() {
+  const holder = $("vnc-holder");
+  if (holder.firstChild) return;
+  const url = browserUrl();
+  if (!url) return;
+  holder.innerHTML =
+    `<iframe src="${esc(url)}" title="live browser view" allow="clipboard-read; clipboard-write"></iframe>`;
+}
+
+function openSplit(pulse) {
+  if (!splitOpen) {
+    splitOpen = true;
+    document.body.classList.add("split-open");
+    mountVnc();
+  }
+  updateBrowserBtn();
+  if (pulse) {
+    const b = $("btn-browser");
+    b.classList.remove("pulse-once");
+    void b.offsetWidth;             // restart the animation
+    b.classList.add("pulse-once");
+    setTimeout(() => b.classList.remove("pulse-once"), 3400);
+  }
+}
+
+function closeSplit() {
+  if (!splitOpen) return;
+  splitOpen = false;
+  document.body.classList.remove("split-open");
+  $("vnc-holder").innerHTML = "";   // tears down the VNC session with it
+  updateBrowserBtn();
+}
+
+function updateBrowserBtn() {
+  $("btn-browser").textContent = splitOpen ? "Hide browser" : "Browser";
+}
+
+$("btn-browser").onclick = () => splitOpen ? closeSplit() : openSplit(false);
+$("pane-close").onclick = closeSplit;
+$("pane-popout").onclick = () => { const u = browserUrl(); if (u) window.open(u, "_blank", "noopener"); };
+
+// Divider drag. The pane keeps its CSS width while idle (so the open/close
+// transition stays declarative); dragging pins an inline px width and disables
+// the transition for the duration.
+(() => {
+  const divider = $("divider"), pane = $("browser-pane");
+  let startX = 0, startW = 0;
+  divider.addEventListener("pointerdown", (e) => {
+    if (!splitOpen) return;
+    startX = e.clientX; startW = pane.getBoundingClientRect().width;
+    divider.setPointerCapture(e.pointerId);
+    document.body.classList.add("dragging");
+  });
+  divider.addEventListener("pointermove", (e) => {
+    if (!divider.hasPointerCapture(e.pointerId)) return;
+    const ws = $("workspace").getBoundingClientRect();
+    const w = Math.min(Math.max(ws.right - e.clientX, 300), ws.width * 0.78);
+    pane.style.width = w + "px";
+  });
+  const end = (e) => {
+    if (!divider.hasPointerCapture(e.pointerId)) return;
+    divider.releasePointerCapture(e.pointerId);
+    document.body.classList.remove("dragging");
+  };
+  divider.addEventListener("pointerup", end);
+  divider.addEventListener("pointercancel", end);
+  divider.addEventListener("dblclick", () => { pane.style.width = ""; });
+})();
+
+$("btn-details").onclick = () => document.body.classList.toggle("drawer-open");
+
+// -- header pills / banner ---------------------------------------------------
 
 function renderPills() {
   const st = state;
@@ -541,6 +737,9 @@ function renderPills() {
   llm.title = st.llm_status === "ready"
     ? "The fallback can reach the model."
     : "Escalations will fail: the agent has no working model.";
+
+  $("chat-name").textContent = st.profile;
+  $("chat-avatar").textContent = (st.profile || "·").charAt(0).toUpperCase();
 }
 
 function renderBanner() {
@@ -553,7 +752,8 @@ function renderBanner() {
     // The only state that needs a person right now, so it leads the page.
     set("banner", `<div class="alert"><strong>Needs you.</strong> ` +
       blocked.slice(0, 3).map(t => esc(t.recipe) + " — " + esc(t.detail)).join("<br>") +
-      `<div class="row">${open}, clear it, then Retry below.</div></div>`);
+      `<div class="row">${open}, clear it, then answer it in the chat.
+        <button class="ghost" type="button" data-talk="${esc(blocked[0].thread_id || blocked[0].id)}">Open the conversation</button></div></div>`);
     return;
   }
   if (st.llm_status === "no-key" || st.llm_status === "unreachable") {
@@ -587,26 +787,133 @@ function renderRunGate() {
   why.textContent = reason;
 }
 
+// -- the current run + takeover controls -------------------------------------
+
 function renderCurrent() {
   const c = state.current;
   $("sec-current").classList.toggle("hidden", !c);
-  // The live view belongs to a running task: closing it with no task left would
-  // leave a dead frame on screen.
-  if (!c) { closeLive(); lastTaskId = null; return; }
+  const working = !!(c && (c.status === "running" || c.status === "queued"));
+  $("chat-avatar").classList.toggle("working", working);
+  $("working-row").classList.toggle("hidden", !working);
+
+  if (!c) {
+    lastTaskId = null;
+    set("current", `<div class="muted">Nothing running.</div>`);
+    renderControls();
+    return;
+  }
   const ctl = c.control || {};
   set("current", `<code>${esc(c.id)}</code> · ` +
     `<span class="status ${esc(c.status)}">${esc(c.status)}</span> · ${esc(c.recipe)} · ` +
-    `<span data-elapsed="${c.started_at ?? ""}">${ago(c.started_at)}</span> ago` +
-    (c.amended_count ? ` · <span class="muted">instruction changed ${c.amended_count}×</span>` : "") +
-    (ctl.paused ? ` · <span class="status blocked">paused</span>` : ""));
-  renderCurrent2();
+    `<span data-elapsed="${c.started_at ?? ""}"></span> ago` +
+    (c.amended_count ? ` · <span class="muted">instruction changed ${c.amended_count}×</span>` : ""));
+  updateElapsed($("sec-current"));
 
-  // Pressing a task opens its live view immediately — no second step to find it.
+  // A new run takes over the chat and opens the browser beside it — watching
+  // it work is the point, and steering it is what the chat is now for.
   if (lastTaskId !== c.id) {
     lastTaskId = c.id;
-    openLive({ taskId: c.id, label: c.recipe + " · " + c.id });
+    // A pinned thread (the operator is reading history) is not yanked away —
+    // the "live run" chip is the way back. The browser pane opens regardless.
+    if (!pinnedThread) openThread(c.thread_id || c.id, { force: true });
+    openSplit(true);
   }
+  renderControls();
 }
+
+// One source of truth (state.current.control), rendered into whichever header
+// is on screen: the chat header always, the pane head only in split view.
+function renderControls() {
+  const c = state && state.current;
+  const running = !!(c && (c.status === "running" || c.status === "queued"));
+  const paused = !!(c && c.control && c.control.paused);
+
+  document.querySelectorAll(".ctl-take").forEach(b => {
+    b.classList.toggle("hidden", !running || paused);
+  });
+  document.querySelectorAll(".ctl-stop").forEach(b => {
+    b.classList.toggle("hidden", !running);
+  });
+  $("manual-box").classList.toggle("hidden", !paused);
+  $("pane-paused").classList.toggle("hidden", !paused);
+
+  $("composer-hint").textContent = running
+    ? "This steers the running attempt — it re-plans with what you say."
+    : "This starts the next attempt, told what the last one tried.";
+  $("thread-send").textContent = running ? "Send" : "Send";
+  const ta = $("thread-text");
+  if (!ta.value) {
+    ta.placeholder = running
+      ? "Steer it — e.g. actually, search for the company page instead"
+      : "Give this bot something to do — e.g. find me a flight to Tokyo in March";
+  }
+
+  // Following: show the way back when the operator is reading an older thread.
+  const live = c ? (c.thread_id || c.id) : (state.tasks[0] ? state.tasks[0].thread_id : null);
+  $("follow-latest").classList.toggle("hidden", !pinnedThread || !live || threadId === live);
+}
+
+async function controlAction(taskId, verb, body) {
+  return api(`/api/tasks/${taskId}/${verb}`, {
+    method: "POST",
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+}
+
+function act(fn) {
+  return Promise.resolve(fn()).then(() => refresh())
+    .catch(e => set("banner", `<div class="alert bad">${esc(e.message)}</div>`));
+}
+
+document.addEventListener("click", (ev) => {
+  const t = ev.target;
+  const f = t.dataset ? t.dataset.filter : undefined;
+  if (f !== undefined) { filter = f; showAll = false; renderTasks(); return; }
+
+  const talk = t.dataset && t.dataset.talk;
+  if (talk) { openThread(talk, { pin: true }); return; }
+
+  const tog = t.dataset && t.dataset.toggle, del = t.dataset && t.dataset.del;
+  if (tog) act(() => api(`/api/schedules/${tog}/toggle`, { method: "POST" }));
+  if (del) act(() => api(`/api/schedules/${del}`, { method: "DELETE" }));
+
+  // Account controls are delegated: renderAccounts replaces that subtree on
+  // every poll, so a bound handler would be destroyed by the next refresh.
+  const sw = t.dataset && t.dataset.switch;
+  if (sw) { switchAccount(sw); return; }
+  const drop = t.dataset && t.dataset.drop;
+  if (drop) { removeAccount(drop); return; }
+  if (t.id === "acct-add") {
+    const name = ($("acct-name").value || "").trim().toLowerCase();
+    if (!name) return;
+    const email = ($("acct-email").value || "").trim();
+    accountAction("/api/accounts", { name, email }, `Could not add ${name}`);
+    return;
+  }
+
+  const id = state && state.current && state.current.id;
+  if (!id) return;
+  if (t.classList.contains("ctl-take")) {
+    act(() => controlAction(id, "pause"));
+  }
+  if (t.classList.contains("ctl-stop")) act(() => controlAction(id, "stop"));
+  if (t.classList.contains("ctl-resume")) {
+    const text = $("hb-text").value.trim();
+    act(async () => {
+      if (text) await controlAction(id, "steer", { instructions: text });
+      await controlAction(id, "resume");
+      $("hb-text").value = "";
+    });
+  }
+});
+
+$("follow-latest").onclick = () => {
+  const c = state && state.current;
+  const live = c ? (c.thread_id || c.id) : (state.tasks[0] ? state.tasks[0].thread_id : null);
+  if (live) openThread(live);
+};
+
+// -- history ------------------------------------------------------------------
 
 function renderTasks() {
   const all = state.tasks;
@@ -621,14 +928,11 @@ function renderTasks() {
     : "";
 
   set("tasks", shown.length ? shown.map(t => {
-    // Anything, not just a failure: "the run was far from perfect" is usually a
-    // *done* run, and a finished run is exactly what needs reading back.
     const canTalk = t.status !== "queued" && t.status !== "running";
     const hasResult = t.result && Object.keys(t.result).length;
     const isCurrent = !!(state.current && state.current.id === t.id);
     // A saved run from before the last restart. The record is on disk, so the
-    // row is real; the pod it ran in is not, so anything that would reach into
-    // a live process has to be marked as read-only.
+    // row is real; the pod it ran in is not.
     const old = !!t.archived;
     return `<tr${isCurrent ? ' class="is-current"' : ""}>
       <td><span class="status ${esc(t.status)}">${esc(t.status)}</span>${old
@@ -637,68 +941,188 @@ function renderTasks() {
       <td>${esc(t.detail)}${isCurrent ? ` <span class="live-dot"></span>` : ""}${hasResult ? `<details data-detail="${esc(t.id)}">
         <summary>result</summary><pre>${esc(JSON.stringify(t.result, null, 2))}</pre></details>` : ""}</td>
       <td>${t.used_agent ? "yes" : "—"}</td>
-      <td class="muted"><span data-elapsed="${t.created_at}">${ago(t.created_at)}</span> ago</td>
+      <td class="muted"><span data-elapsed="${t.created_at}"></span> ago</td>
       <td>${canTalk
-        ? `<button class="ghost" data-talk="${esc(t.thread_id || t.id)}"
-             title="${isCurrent || t.status === "running"
-               ? "Every step, every decision, and a box to steer it"
-               : "Read every step and decision, and say what to do differently"}"
-             >${old ? "Read" : isCurrent || t.status === "running" ? "Watch" : "Read"}</button>`
+        ? `<button class="ghost" type="button" data-talk="${esc(t.thread_id || t.id)}"
+             title="Open the conversation in the chat">${old ? "Read" : isCurrent ? "Watch" : "Open"}</button>`
         : ""}</td>
     </tr>`;
   }).join("") : `<tr><td colspan="6"><div class="empty">` +
     (filter ? "Nothing with that status." : "No tasks yet.") + `</div></td></tr>`);
+  updateElapsed($("tasks"));
 }
 
-// -- live view -------------------------------------------------------------
+$("show-all").onclick = () => { showAll = true; renderTasks(); };
+
+// -- the chat transcript ------------------------------------------------------
 //
-// Opening a task opens the browser view of it, immediately. The iframe is the
-// same noVNC page the "Watch the browser" button uses; it is created once per
-// task and then left alone, because rebuilding it would drop the VNC session
-// and force a reconnect on every poll.
+// The main surface. One thread shows at a time; attempts, the operator's
+// messages and the bot's outcome messages interleave oldest-first, so the pane
+// reads as one conversation. The composer is static HTML — it is NEVER part of
+// any set() render, which is what keeps typing alive across polls.
 
-function openLive(opts) {
-  const info = opts || {};
-  if (info.taskId) liveTaskId = info.taskId;
-  $("lb-label").textContent = info.label || "Live browser";
-  if (!liveOpen) {
-    liveOpen = true;
-    document.body.classList.add("lb-open");
-    $("lightbox").classList.remove("hidden");
-    // Mounted on open, not on poll: a reconnect is expensive.
-    $("lb-body").innerHTML =
-      `<iframe src="${esc(browserUrl())}" title="live browser view" allow="clipboard-read; clipboard-write"></iframe>`;
+function openThread(id, opts = {}) {
+  if (!id) return;
+  if (opts.pin) pinnedThread = true;
+  else if (opts.force) pinnedThread = false;
+  if (threadId !== id) {
+    threadId = id;
+    threadData = null;
+    renderedTurns = new Set();
+    threadPainted = false;
   }
-  renderCurrent2();
+  loadThread();
+  renderControls();
 }
 
-function closeLive() {
-  if (!liveOpen) return;
-  liveOpen = false;
-  document.body.classList.remove("lb-open");
-  $("lightbox").classList.add("hidden");
-  $("lb-body").innerHTML = "";   // tears down the VNC session with it
-  renderCurrent2();
+async function loadThread() {
+  if (!threadId) return;
+  if (document.hidden) return;   // a hidden tab needs no updates
+  try { threadData = await api(`/api/threads/${threadId}`); } catch (e) { return; }
+  renderThread();
 }
 
-// Re-render just the current-task block, without a state fetch.
-function renderCurrent2() {
+function renderThread() {
+  if (!threadData) return;
+  const running = !!(state && state.current && threadData.attempts
+    .some(a => a.id === state.current.id));
   const c = state && state.current;
-  if (!c) return;
-  const ctl = c.control || {};
-  set("cur-controls",
-    `<button class="ghost" id="c-live">${liveOpen ? "Hide" : "Show"} live view</button>` +
-    (ctl.paused
-      ? `<button class="ghost" id="c-pause">Resume</button>`
-      : `<button class="ghost" id="c-pause">Pause</button>`) +
-    `<button class="ghost" id="c-stop">Stop</button>`);
+  const onLive = c && (c.thread_id || c.id) === threadId;
+  // A deterministic recipe has no instruction to change, so a message on one
+  // hands the work to the agent instead.
+  const last = threadData.attempts[threadData.attempts.length - 1];
+  const deterministic = last && last.reads_instruction === false;
+  $("chat-status").textContent = running
+    ? "running — what you type steers it"
+    : onLive && deterministic
+      ? `${last.recipe} runs the same steps whatever it is told; your message becomes an agent run`
+      : `${(threadData.attempts || []).length} attempt(s) — the next message becomes the next attempt`;
+
+  // Interleave messages with attempts, oldest first. Sorted by time rather
+  // than by position: attempts and messages can arrive out of order (the
+  // opening instruction is recorded at submit, the attempt at finish), and a
+  // positional rule silently drops turns when they do.
+  const items = [];
+  (threadData.messages || []).forEach(m => items.push({ at: m.at, kind: "msg", m }));
+  (threadData.attempts || []).forEach(a => items.push({ at: a.created_at, kind: "att", a }));
+  // A message and the attempt it caused can share a timestamp to the
+  // fraction; the message goes first, because an attempt is the answer to
+  // whatever was said just before it.
+  items.sort((x, y) => (x.at || 0) - (y.at || 0) ||
+    (x.kind === "msg" ? -1 : 1));
+
+  let stagger = 0;
+  const turns = items.map(it => {
+    if (it.kind === "msg") {
+      const m = it.m;
+      const key = "m:" + m.id;
+      const fresh = !threadPainted && !renderedTurns.has(key);
+      renderedTurns.add(key);
+      const enter = fresh ? ` class-extra enter` : "";
+      const delay = fresh ? ` style="animation-delay:${Math.min(stagger++ * 40, 400)}ms"` : "";
+      if (m.role === "operator") {
+        return `<div class="turn${enter ? " enter" : ""}" data-turn="${esc(m.id)}"${delay}>
+          <div class="avatar sm" title="you">Y</div>
+          <div><div class="who">you · <span data-elapsed="${m.at}"></span> ago</div>
+          <div class="say">${esc(m.text)}</div></div></div>`;
+      }
+      if (m.role === "system") {
+        return `<div class="turn system${enter ? " enter" : ""}" data-turn="${esc(m.id)}"${delay}>
+          <div><div class="who">system</div><div class="say">${esc(m.text)}</div></div></div>`;
+      }
+      // The bot's own turns — outcome messages it posts when a run finishes,
+      // blocks, or fails.
+      return `<div class="turn${enter ? " enter" : ""}" data-turn="${esc(m.id)}"${delay}>
+        <div class="avatar sm" title="${esc(state.profile)}">${esc((state.profile || "·").charAt(0).toUpperCase())}</div>
+        <div><div class="who">${esc(state.profile)} · <span data-elapsed="${m.at}"></span> ago</div>
+        <div class="say">${esc(m.text)}</div></div></div>`;
+    }
+    const a = it.a;
+    const key = "a:" + a.id;
+    const fresh = !threadPainted && !renderedTurns.has(key);
+    renderedTurns.add(key);
+    // Everything, not the last few: the point of keeping a run is to read it
+    // afterwards. Collapsed so a long run does not push the conversation off
+    // the screen; set() carries the open/closed state across rewrites.
+    const feedHtml = (a.activity || []).map(e =>
+      `<div class="muted"><span class="t">${new Date(e.at * 1000).toLocaleTimeString()}</span>
+        <span class="k ${esc(e.kind)}">${esc(e.kind)}</span> ${esc(e.text)}</div>`).join("");
+    const decided = (a.decisions || []).map(d =>
+      `<div class="muted"><span class="k ${esc(d.kind)}">${esc(d.kind)}</span> ${esc(d.text)}</div>`).join("");
+    return `<div class="turn" data-turn="a-${esc(a.id)}"${fresh ? ` style="animation-delay:${Math.min(stagger++ * 40, 400)}ms"` : ""}>
+      <div class="avatar sm" title="${esc(state.profile)}">${esc((state.profile || "·").charAt(0).toUpperCase())}</div>
+      <div class="run-card ${esc(a.status)}${fresh ? " enter" : ""}">
+        <div class="who">attempt ${a.attempt} · <span class="status ${esc(a.status)}">${esc(a.status)}</span> · <span data-elapsed="${a.created_at}"></span> ago</div>
+        <div class="say">${esc(a.detail || "")}</div>
+        ${decided ? `<details data-keep="d${esc(a.id)}"><summary>what it decided (${(a.decisions || []).length})</summary>${decided}</details>` : ""}
+        ${feedHtml ? `<details data-keep="a${esc(a.id)}"><summary>every step (${(a.activity || []).length})</summary>${feedHtml}</details>` : ""}
+        ${a.used_agent ? `<div class="muted">finished via the agent fallback</div>` : ""}
+      </div></div>`;
+  });
+
+  // NOTE: the "enter" class above is written into markup via the ternaries;
+  // the enter delay style rides the same attribute. Both are one-shot: the
+  // second render finds the ids in renderedTurns and omits them, so the sig
+  // stabilises and the node is not rewritten again.
+  set("thread", turns.join("") || `<div class="empty">Nothing here yet — say something below.</div>`);
+  updateElapsed($("thread"));
+  threadPainted = true;
+  const sc = $("thread-scroll");
+  sc.scrollTop = sc.scrollHeight;
 }
+
+// -- composer -----------------------------------------------------------------
+//
+// Static in the HTML on purpose. Re-rendering the composer with the transcript
+// is what once made this page unusable: every poll replaced the textarea,
+// which dropped the draft, the caret and the selection.
+
+async function sendThread() {
+  const el = $("thread-text"), err = $("composer-err");
+  const text = el.value.trim();
+  err.classList.add("hidden");
+  if (!text) { el.focus(); return; }
+  if (!threadData || !(threadData.attempts || []).length) {
+    // No attempt to attach to: the only way to start work is the run form.
+    document.body.classList.add("drawer-open");
+    $("sec-run").scrollIntoView({ behavior: "smooth", block: "start" });
+    return;
+  }
+  try {
+    const res = await api(`/api/tasks/${threadData.attempts[threadData.attempts.length - 1].id}/say`,
+      { method: "POST", body: JSON.stringify({ text }) });
+    el.value = "";
+    autosize();
+    await loadThread();
+    await refresh();
+    if (res && res.ran && res.task) {
+      set("banner", `<div class="alert">Queued attempt ${esc(res.task.attempt)} with your instruction.</div>`);
+    }
+  } catch (e) {
+    err.textContent = String(e.message || e).slice(0, 300);
+    err.classList.remove("hidden");
+  }
+}
+
+function autosize() {
+  const ta = $("thread-text");
+  ta.style.height = "auto";
+  ta.style.height = Math.min(ta.scrollHeight, 160) + "px";
+}
+
+$("thread-send").onclick = sendThread;
+$("thread-text").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendThread(); }
+});
+$("thread-text").addEventListener("input", autosize);
+
+// -- the drawer's sections ----------------------------------------------------
 
 function renderFeed() {
   const cur = state && state.current;
   const live = !!(cur && (cur.status === "running" || cur.status === "queued"));
   $("feed-sub").innerHTML = live
-    ? `<span class="live-dot" style="display:inline-block"></span> Live — updates every second.`
+    ? `<span class="live-dot"></span> Live — updates every second.`
     : "The last run's steps, newest first.";
   set("feed", feed.length ? feed.map(e => `<div class="row-item">
       <span class="t">${new Date(e.at * 1000).toLocaleTimeString()}</span>
@@ -715,16 +1139,10 @@ function renderScheds() {
       <td class="muted">${when(x.next_run_at)}</td>
       <td>${x.enabled ? "yes" : "no"}</td>
       <td class="row">
-        <button class="ghost" data-toggle="${esc(x.id)}">${x.enabled ? "Disable" : "Enable"}</button>
-        <button class="ghost" data-del="${esc(x.id)}">Delete</button>
+        <button class="ghost" type="button" data-toggle="${esc(x.id)}">${x.enabled ? "Disable" : "Enable"}</button>
+        <button class="ghost" type="button" data-del="${esc(x.id)}">Delete</button>
       </td>
     </tr>`).join("") : `<tr><td colspan="5"><div class="empty">No schedules.</div></td></tr>`);
-}
-
-function render() {
-  renderPills(); renderBanner(); renderRunGate();
-  renderCurrent(); renderFeed(); renderTasks(); renderScheds();
-  renderBrowserState(state.browser_running); renderAccounts();
 }
 
 // The accounts this bot holds, and which one is running. `state.accounts` is
@@ -736,7 +1154,7 @@ function renderAccounts() {
   if (!box) return;
   const a = state.accounts;
   const list = (a && a.accounts) || [];
-  if (!list.length) { box.innerHTML = `<div class="muted">No accounts yet.</div>`; return; }
+  if (!list.length) { set("accounts", `<div class="muted">No accounts yet.</div>`); return; }
 
   const rows = list.map(acc => {
     const running = acc.active;
@@ -750,31 +1168,28 @@ function renderAccounts() {
         : `<span class="pill">signed in</span>`;
     const label = acc.display_label || acc.name;
     const who = acc.email ? `<span class="muted"> — ${esc(acc.email)}</span>` : "";
-    const act = running
+    const act_ = running
       ? `<span class="muted">on screen</span>`
-      : `<button class="ghost" data-switch="${esc(acc.name)}">Switch to this</button>`;
+      : `<button class="ghost" type="button" data-switch="${esc(acc.name)}">Switch to this</button>`;
     // Never offered for the running account: the browser holds that directory
     // open, and the API refuses it. Not rendering the button says so sooner.
     const del = running || list.length < 2
       ? ""
-      : `<button class="ghost" data-drop="${esc(acc.name)}" title="Remove this account from the list">Remove</button>`;
+      : `<button class="ghost" type="button" data-drop="${esc(acc.name)}" title="Remove this account from the list">Remove</button>`;
     return `<tr>
       <td>${esc(label)}${who}</td>
       <td>${state_}</td>
-      <td class="right">${act} ${del}</td>
+      <td class="right">${act_} ${del}</td>
     </tr>`;
   }).join("");
 
-  // minmax(0,1fr) rather than 1fr: a grid track's automatic minimum is its
-  // content, so a long email in a cell makes the whole table overflow its card
-  // instead of wrapping. This is the same reason it is used elsewhere here.
-  set("accounts", `<table style="display:table;grid-template-columns:minmax(0,1fr) auto auto">
+  set("accounts", `<table>
     <tbody>${rows}</tbody>
   </table>
   <div class="row" style="margin-top:8px">
     <input id="acct-name" placeholder="new-account" aria-label="New account name" style="max-width:180px">
     <input id="acct-email" placeholder="email (a note, not a login)" aria-label="Account email" style="max-width:240px">
-    <button class="ghost" id="acct-add">Add an account</button>
+    <button class="ghost" id="acct-add" type="button">Add an account</button>
   </div>
   <div class="muted" style="margin-top:6px">
     Adding one does not switch to it. Use "Go to this page" below on the new
@@ -824,6 +1239,32 @@ function renderBrowserState(running, url) {
   el.className = running ? "muted ok" : "muted bad";
 }
 
+let rosterUrl = null;
+
+function renderRecipes() {
+  const cards = recipeList.map((r, i) => `<div class="rc${i < 12 ? " enter" : ""}" style="animation-delay:${i * 50}ms">
+    <div class="nm"><code>${esc(r.name)}</code>${
+      r.origin === "stored" ? `<span class="pill stored">composed</span>` : ""}</div>
+    <div class="desc">${esc(r.description)}</div>
+  </div>`).join("");
+  set("recipes", cards || `<div class="empty">No recipes.</div>`);
+
+  // Where the roster lives, from the bot's own point of view. Reached at /b/x/
+  // the origin is the ROSTER already, so the link is just "/" — but a bot served
+  // on its own domain (browser_base_url) needs the roster's, and url_prefix is
+  // the path the roster proxies this bot under, so stripping it off the base
+  // gives the roster's own root.
+  if (rosterUrl === null) {
+    const prefix = state.url_prefix || "";
+    const base = (state.browser_base_url || location.origin).replace(/\/$/, "");
+    rosterUrl = prefix && base.endsWith(prefix) ? base.slice(0, -prefix.length) || "/" : "/";
+    const link = $("roster-link");
+    if (link) link.href = rosterUrl;
+  }
+}
+
+// -- state + polling ----------------------------------------------------------
+
 async function refresh() {
   let st;
   try { st = await api("/api/state"); }
@@ -845,42 +1286,40 @@ async function refresh() {
     }
     renderRecipes();
   }
-  render();
-}
+  renderPills(); renderBanner(); renderRunGate();
+  renderCurrent(); renderFeed(); renderTasks(); renderScheds();
+  renderBrowserState(state.browser_running); renderAccounts();
 
-let rosterUrl = null;
-
-function renderRecipes() {
-  const cards = recipeList.map(r => `<div class="rc">
-    <div class="nm"><code>${esc(r.name)}</code>${
-      r.origin === "stored" ? `<span class="pill stored">composed</span>` : ""}</div>
-    <div class="desc">${esc(r.description)}</div>
-  </div>`).join("");
-  set("recipes", cards || `<div class="empty">No recipes.</div>`);
-
-  // Where the roster lives, from the bot's own point of view. Reached at /b/x/
-  // the origin is the ROSTER already, so the link is just "/" — but a bot served
-  // on its own domain (browser_base_url) needs the roster's, and url_prefix is
-  // the path the roster proxies this bot under, so stripping it off the base
-  // gives the roster's own root. Guessing instead is how the bot page produced a
-  // refused link to its own :6080 before; see liveSrc above.
-  if (rosterUrl === null) {
-    const prefix = state.url_prefix || "";
-    const base = (state.browser_base_url || location.origin).replace(/\/$/, "");
-    rosterUrl = prefix && base.endsWith(prefix) ? base.slice(0, -prefix.length) || "/" : "/";
-    const link = $("roster-link");
-    if (link) link.href = rosterUrl;
+  // First paint with no thread pinned: open the live run, or the newest thread.
+  if (!threadId) {
+    const newest = state.current
+      ? (state.current.thread_id || state.current.id)
+      : (state.tasks[0] ? state.tasks[0].thread_id : null);
+    if (newest) openThread(newest);
   }
 }
 
-// -- actions ---------------------------------------------------------------
-
-async function act(fn) {
-  try { await fn(); await refresh(); }
-  catch (e) { set("banner", `<div class="alert bad">${esc(e.message)}</div>`); }
+async function poll() {
+  if (document.hidden) return;
+  await refresh();
 }
 
-$("refresh").onclick = refresh;
+// The activity feed is a separate, faster poll than the state snapshot: the
+// operator watching a run wants its steps as they happen, not every 4 s.
+async function pollFeed() {
+  if (document.hidden) return;
+  if (!(state && state.current)) { feed = []; renderFeed(); return; }
+  try {
+    const a = await api("/api/activity");
+    // Newest first: the interesting line is always at the top.
+    feed = (a.entries || []).slice().reverse();
+    renderFeed();
+  } catch (e) { /* the state poll already surfaces transport errors */ }
+}
+
+// -- actions ------------------------------------------------------------------
+
+$("refresh").onclick = () => poll();
 
 $("run").onclick = () => act(async () => {
   const p = {};
@@ -890,21 +1329,21 @@ $("run").onclick = () => act(async () => {
   if (url) p.url = url;
   const extra = $("extra").value.trim();
   if (extra) Object.assign(p, JSON.parse(extra));
-  await api("/api/tasks", { method: "POST",
+  const res = await api("/api/tasks", { method: "POST",
     body: JSON.stringify({ recipe: $("recipe").value, payload: p }) });
   $("text").value = ""; $("extra").value = "";
+  if (res && res.id) openThread(res.thread_id || res.id, { force: true });
 });
 
 $("recipe").onchange = renderRunGate;
 $("taskUrl").oninput = renderRunGate;
-$("taskUrl").oninput = renderRunGate;
 
-$("open-vnc").onclick = () => window.open(browserUrl(), "_blank", "noopener");
+$("open-vnc").onclick = () => { const u = browserUrl(); if (u) window.open(u, "_blank", "noopener"); };
 
 // Closing the window used to leave the bot unable to recover, so this is the
 // button that makes the recovery visible instead of implicit: restart stops the
-// session and starts a fresh one on a blank page, which is what /api/browser/
-// restart does. The label reports what the server says, not what we hoped.
+// session and starts a fresh one on a blank page. The label reports what the
+// server says, not what we hoped.
 $("restart-browser").onclick = () => act(async () => {
   const btn = $("restart-browser");
   btn.disabled = true;
@@ -921,18 +1360,6 @@ $("restart-browser").onclick = () => act(async () => {
 $("send-login").onclick = () => act(async () => {
   await api("/api/login", { method: "POST", body: JSON.stringify({ url: $("loginUrl").value }) });
 });
-
-$("toggle-embed").onclick = () => {
-  embedOpen = !embedOpen;
-  const wrap = $("embed-wrap");
-  $("toggle-embed").textContent = embedOpen
-    ? "Hide the on-page browser" : "Show the browser on this page";
-  wrap.classList.toggle("hidden", !embedOpen);
-  // Created on demand: an embedded noVNC session is heavy, so it must not load
-  // until it is asked for.
-  if (embedOpen) wrap.innerHTML = `<iframe src="${esc(browserUrl())}" title="browser view"></iframe>`;
-  else wrap.innerHTML = "";
-};
 
 $("addSched").onclick = () => act(async () => {
   const cron = $("schedCron").value.trim();
@@ -955,255 +1382,14 @@ $("addSched").onclick = () => act(async () => {
   $("schedCron").value = ""; $("schedText").value = "";
 });
 
-document.addEventListener("click", (ev) => {
-  const f = ev.target.dataset.filter;
-  if (f !== undefined) { filter = f; showAll = false; renderTasks(); return; }
-
-  const talk = ev.target.dataset.talk, t = ev.target.dataset.toggle, d = ev.target.dataset.del;
-  if (talk) { openThread(talk); return; }
-  if (t) act(() => api(`/api/schedules/${t}/toggle`, { method: "POST" }));
-  if (d) act(() => api(`/api/schedules/${d}`, { method: "DELETE" }));
-});
-
-// -- the retry conversation ------------------------------------------------
-//
-// A retry used to be a button that re-ran the identical instruction, so a
-// blocked task had nothing to do but be retried unchanged. This panel is the
-// replacement: the thread's attempts, what was said between them, and one box
-// that means "try it this way instead".
-
-let threadId = null;
-let threadData = null;
-
-function openThread(id) {
-  threadId = id;
-  $("sec-thread").classList.remove("hidden");
-  loadThread();
-  $("sec-thread").scrollIntoView({ behavior: "smooth", block: "start" });
-}
-
-function closeThread() {
-  threadId = null;
-  threadData = null;
-  $("sec-thread").classList.add("hidden");
-}
-
-async function loadThread() {
-  if (!threadId) return;
-  if (document.hidden) return;   // a hidden tab needs no updates
-  try { threadData = await api(`/api/threads/${threadId}`); } catch (e) { return; }
-  renderThread();
-}
-
-function renderThread() {
-  if (!threadData) return;
-  const running = !!(state && state.current && threadData.attempts
-    .some(a => a.id === state.current.id));
-  // A deterministic recipe has no instruction to change, so a message on one
-  // hands the work to the agent instead. Say so here rather than after they hit
-  // send: "it will try again with this" was a promise the old code could not
-  // keep on these recipes, which is exactly why the message looked ignored.
-  const last = threadData.attempts[threadData.attempts.length - 1];
-  const deterministic = last && last.reads_instruction === false;
-  set("thread-sub", `Attempts at one piece of work. ` +
-    (running
-      ? `This one is still running — what you type steers it.`
-      : deterministic
-        ? `<code>${esc(last.recipe)}</code> runs the same steps whatever it is told,
-           so your message becomes an <strong>agent run</strong> on this thread
-           instead of a re-run.`
-        : `The next thing you type becomes the next attempt, which is told what the
-           earlier ones already tried.`));
-
-  // Interleave the operator's turns with the attempts, oldest first, so the
-  // panel reads as one conversation. Sorted by time rather than by "messages
-  // that landed before each attempt": attempts and messages can now arrive out
-  // of order (the opening instruction is recorded at submit, the attempt at
-  // finish), and a positional rule silently drops turns when they do.
-  const age = (ts) => `<span data-elapsed="${ts}">${ago(ts)}</span> ago`;
-  const items = [];
-  (threadData.messages || []).forEach(m => items.push({ at: m.at, kind: "msg", m }));
-  (threadData.attempts || []).forEach(a => items.push({ at: a.created_at, kind: "att", a }));
-  // A message and the attempt it caused can share a timestamp to the
-  // fraction; the message goes first, because an attempt is the answer to
-  // whatever was said just before it.
-  items.sort((x, y) => (x.at || 0) - (y.at || 0) ||
-    (x.kind === "msg" ? -1 : 1));
-
-  const turns = items.map(it => {
-    if (it.kind === "msg") {
-      const m = it.m;
-      const mine = m.role === "operator";
-      return `<div class="turn ${mine ? "operator" : "bot"}">
-        <div class="who">${mine ? "you" : esc(m.role)} · ${age(m.at)}</div>
-        <div class="say">${esc(m.text)}</div></div>`;
-    }
-    const a = it.a;
-    // Everything, not the last few: the point of keeping a run is to read it
-    // afterwards, and "the last 8 lines" is exactly the part that hid the
-    // decision that went wrong. Kept inside a collapsed <details> so a long run
-    // does not push the conversation off the screen.
-    const feed = (a.activity || []).map(e =>
-      `<div class="muted"><span class="t">${new Date(e.at * 1000).toLocaleTimeString()}</span>
-        <span class="k ${esc(e.kind)}">${esc(e.kind)}</span> ${esc(e.text)}</div>`).join("");
-    const decided = (a.decisions || []).map(d =>
-      `<div class="muted"><span class="k ${esc(d.kind)}">${esc(d.kind)}</span> ${esc(d.text)}</div>`).join("");
-    return `<div class="turn ${esc(a.status)}">
-      <div class="who">attempt ${a.attempt} · <span class="status ${esc(a.status)}">${esc(a.status)}</span> · ${age(a.created_at)}</div>
-      <div class="say">${esc(a.detail || "")}</div>
-      ${decided ? `<details data-keep="d${esc(a.id)}"><summary>what it decided (${(a.decisions || []).length})</summary>${decided}</details>` : ""}
-      ${feed ? `<details data-keep="a${esc(a.id)}"><summary>every step (${(a.activity || []).length})</summary>${feed}</details>` : ""}
-      ${a.used_agent ? `<div class="muted">finished via the agent fallback</div>` : ""}
-    </div>`;
-  });
-
-  // The transcript is its own node, so rewriting it cannot touch what the
-  // operator is typing. The composer is written ONCE, below, and only its
-  // wording ever changes — see setComposer.
-  set("thread", turns.join("") || `<p class="sub">Nothing here yet.</p>`);
-  setComposer(running);
-}
-
-// The composer is built once and then only re-labelled. Re-rendering it with the
-// transcript is what made this page unusable: every poll replaced the textarea,
-// which dropped the draft, the caret and the selection, and the focus() below
-// re-stole the caret every 2 s so nothing could be typed at all.
-function setComposer(running) {
-  if (!$("thread-form")) {
-    $("thread").insertAdjacentHTML("beforeend", `<form id="thread-form">
-      <label for="thread-text" id="thread-label"></label>
-      <textarea id="thread-text"></textarea>
-      <div class="row" style="margin-top:8px">
-        <button id="thread-send" type="button"></button>
-        <span class="spacer"></span>
-        <button class="ghost" id="thread-close" type="button">Close</button>
-      </div>
-      <div class="err hidden" id="thread-err"></div>
-    </form>`);
-    $("thread-send").onclick = sendThread;
-    $("thread-close").onclick = closeThread;
-    $("thread-text").addEventListener("keydown", e => {
-      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) { e.preventDefault(); sendThread(); }
-    });
-  }
-  set("thread-label", running ? "Steer it" : "Say what to do differently");
-  set("thread-send", running ? "Send" : "Try again with this");
-  // Placeholder only while empty, so an in-progress draft is never overwritten
-  // by a poll that happened to change the running state.
-  const ta = $("thread-text");
-  if (!ta.value) {
-    ta.placeholder = running
-      ? "Change the instruction — it re-plans with this."
-      : "It will try again with this, and be told what the last attempt tried.";
-  }
-}
-
-async function sendThread() {
-  const el = $("thread-text"), err = $("thread-err");
-  const text = el.value.trim();
-  err.classList.add("hidden");
-  if (!text) { el.focus(); return; }
-  try {
-    const res = await api(`/api/tasks/${threadData.attempts[threadData.attempts.length - 1].id}/say`,
-      { method: "POST", body: JSON.stringify({ text }) });
-    el.value = "";
-    await loadThread();
-    await refresh();
-    if (res && res.ran) {
-      set("banner", `<div class="alert">Queued attempt ${esc(res.task.attempt)} with your instruction.</div>`);
-    }
-  } catch (e) {
-    err.textContent = String(e.message || e).slice(0, 300);
-    err.classList.remove("hidden");
-  }
-}
-
-setInterval(loadThread, 2000);
-$("show-all").onclick = () => { showAll = true; renderTasks(); };
-
 // Elapsed time ticks locally: no request, and the rest of the page is untouched.
-setInterval(() => {
-  document.querySelectorAll("[data-elapsed]").forEach(el => {
-    const ts = parseFloat(el.dataset.elapsed);
-    if (ts) el.textContent = ago(ts);
-  });
-}, 1000);
+setInterval(() => { if (!document.hidden) updateElapsed(); }, 1000);
 
-// The activity feed is a separate, faster poll than the state snapshot: the
-// operator watching a run wants its steps as they happen, not every 4 s, and
-// the feed is tiny compared to the state payload.
-async function pollFeed() {
-  if (document.hidden) return;
-  if (!(state && state.current)) { feed = []; renderFeed(); return; }
-  try {
-    const a = await api("/api/activity");
-    // Newest first: the interesting line is always at the top.
-    feed = (a.entries || []).slice().reverse();
-    renderFeed();
-  } catch (e) { /* the state poll already surfaces transport errors */ }
-}
-
-async function poll() {
-  // A hidden tab needs no updates and should not spend the pod's attention.
-  if (document.hidden) return;
-  try { await refresh(); } catch (e) { /* banner already reports it */ }
-}
 setInterval(poll, 4000);
 setInterval(pollFeed, 1200);
+setInterval(() => { if (!document.hidden) loadThread(); }, 2000);
 
-// -- live control ----------------------------------------------------------
-
-async function control(taskId, verb, body) {
-  return api(`/api/tasks/${taskId}/${verb}`, {
-    method: "POST",
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
-}
-
-document.addEventListener("click", (ev) => {
-  // The account controls are delegated, not bound: renderAccounts replaces that
-  // whole subtree on every poll, so a bound handler would be destroyed by the
-  // next refresh. Read the target first, before any early return — these exist
-  // with no task running, which is exactly when an operator adds an account.
-  const sw = ev.target.dataset && ev.target.dataset.switch;
-  if (sw) { switchAccount(sw); return; }
-  const drop = ev.target.dataset && ev.target.dataset.drop;
-  if (drop) { removeAccount(drop); return; }
-  if (ev.target.id === "acct-add") {
-    const name = ($("acct-name").value || "").trim().toLowerCase();
-    if (!name) return;
-    const email = ($("acct-email").value || "").trim();
-    accountAction("/api/accounts", { name, email }, `Could not add ${name}`);
-    return;
-  }
-
-  const id = state && state.current && state.current.id;
-  if (!id) return;
-  if (ev.target.id === "c-pause") {
-    const paused = !!(state.current.control || {}).paused;
-    act(() => control(id, paused ? "resume" : "pause"));
-  }
-  if (ev.target.id === "c-stop") act(() => control(id, "stop"));
-  if (ev.target.id === "c-live") liveOpen ? closeLive() : openLive({});
-  if (ev.target.id === "lb-close") closeLive();
-  if (ev.target.id === "lb-open") window.open(browserUrl(), "_blank", "noopener");
-});
-
-$("steer-send").onclick = () => act(async () => {
-  const id = state.current.id;
-  const text = $("steer").value.trim();
-  if (!text) return;
-  await control(id, "steer", { instructions: text });
-  $("steer").value = "";
-});
-
-// Editing the instruction of a task that has already finished is a retry with
-// new text — the same box, so "change it and go again" needs no second form.
-$("steer").addEventListener("keydown", (ev) => {
-  if (ev.key === "Enter" && (ev.metaKey || ev.ctrlKey)) $("steer-send").click();
-});
-
-refresh();
+poll();
 </script>
 </body>
 </html>
