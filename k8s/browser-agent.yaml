@@ -123,7 +123,7 @@ spec:
         - { key: node.kubernetes.io/disk-pressure, operator: Exists }
       containers:
         - name: agent
-          image: localhost:5000/browser-agent:24e1185
+          image: localhost:5000/browser-agent:803a7d9
           imagePullPolicy: IfNotPresent
           ports:
             - { name: api, containerPort: 8000 }
