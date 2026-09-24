@@ -552,18 +552,16 @@ def test_learned_specs_are_valid_json_a_reload_can_read(learned):
 
 
 class _GateStub:
-    """Stands in for LayaGate.choose: records the question, returns a verdict."""
+    """Stands in for LayaGate.same_task: records each question, returns a verdict."""
 
     calls: list[dict] = []
-    answer: tuple[int | None, float] = (None, 0.0)
+    answer: tuple[bool, float] = (False, 0.0)
 
     def __init__(self, _settings):
         pass
 
-    async def choose(self, question, lines, state_text):
-        _GateStub.calls.append(
-            {"question": question, "lines": lines, "state": state_text}
-        )
+    async def same_task(self, saved, request):
+        _GateStub.calls.append({"saved": saved, "request": request})
         return _GateStub.answer
 
 
@@ -587,32 +585,94 @@ def _trusted(store):
     return spec
 
 
-async def test_the_gate_matches_a_few_trusted_recipes(tmp_path, monkeypatch):
+#: The fixture recipe's entry URL is ``https://example.com/search``, so a request
+#: that could legitimately be asking for it names that URL. The URL precondition
+#: is what the gate call is downstream of, so every "the gate is asked" case has
+#: to name it — a request that does not is refused before Laya is consulted.
+_NAMES_THE_URL = "find me a flight from stockholm on https://example.com/search"
+
+
+async def test_the_gate_matches_a_trusted_recipe_that_names_the_same_url(
+    tmp_path, monkeypatch
+):
     s = _settings_with_learned(tmp_path, monkeypatch)
     store = recipe_store.learned_store_for(s)
     _trusted(store)
     _GateStub.calls = []
-    _GateStub.answer = (0, 0.9)
+    _GateStub.answer = (True, 0.9)
     monkeypatch.setattr("browser_agent.laya_gate.LayaGate", _GateStub)
 
     from browser_agent.router import learned_match
 
-    name = await learned_match("find me a flight from stockholm", "plan.task", s)
+    name = await learned_match(_NAMES_THE_URL, "plan.task", s)
     assert name == "learned-search-abc123"
     call = _GateStub.calls[0]
-    assert call["lines"] == ["find a flight from stockholm"]
-    assert "New request: find me a flight from stockholm" == call["state"]
+    assert call["saved"] == "find a flight from stockholm"
+    assert call["request"] == _NAMES_THE_URL
+
+
+async def test_a_request_naming_a_different_url_is_never_matched(tmp_path, monkeypatch):
+    """The live bug, 2026-09-24: "Go to https://www.iana.org/about and tell me
+    what IANA is responsible for" was routed to an example-domains recipe, and
+    that page was scraped and reported as the answer to a question about a
+    different page. A learned recipe's effect is the page it navigates to, so a
+    request naming a different URL is refused *before* Laya is consulted — the
+    model cannot be asked a question the URL already answers.
+    """
+    s = _settings_with_learned(tmp_path, monkeypatch)
+    _trusted(recipe_store.learned_store_for(s))
+    _GateStub.calls = []
+    _GateStub.answer = (True, 0.99)  # even a maximally confident gate cannot match
+    monkeypatch.setattr("browser_agent.laya_gate.LayaGate", _GateStub)
+
+    from browser_agent.router import learned_match
+
+    other = "Go to https://www.iana.org/about and tell me what IANA is responsible for."
+    assert await learned_match(other, "plan.task", s) is None
+    assert _GateStub.calls == [], "laya was asked about a request naming another page"
+
+
+async def test_a_host_only_entry_url_is_named_by_its_host(tmp_path, monkeypatch):
+    # A URL with no path is named by its host alone, so a request that writes a
+    # different page on that same host still names it — the gate then decides.
+    s = _settings_with_learned(tmp_path, monkeypatch)
+    store = recipe_store.learned_store_for(s)
+    save_learned_spec(
+        store,
+        dict(_LEARNED_SPEC, entry_url="https://example.com", unverified=False, replays=2),
+    )
+    _GateStub.calls = []
+    _GateStub.answer = (True, 0.9)
+    monkeypatch.setattr("browser_agent.laya_gate.LayaGate", _GateStub)
+
+    from browser_agent.router import learned_match
+
+    asked = "find a flight from stockholm on https://example.com/flights"
+    assert await learned_match(asked, "plan.task", s) == _LEARNED_SPEC["name"]
+    assert len(_GateStub.calls) == 1
 
 
 async def test_the_gate_declines_below_the_confidence_floor(tmp_path, monkeypatch):
     s = _settings_with_learned(tmp_path, monkeypatch)
     _trusted(recipe_store.learned_store_for(s))
-    _GateStub.answer = (0, 0.4)  # the recorded flat-probability failure shape
+    _GateStub.calls = []
+    _GateStub.answer = (True, 0.4)  # a hedged yes is not a match
     monkeypatch.setattr("browser_agent.laya_gate.LayaGate", _GateStub)
 
     from browser_agent.router import learned_match
 
-    assert await learned_match("something else entirely", "plan.task", s) is None
+    assert await learned_match(_NAMES_THE_URL, "plan.task", s) is None
+
+
+async def test_a_confident_no_declines(tmp_path, monkeypatch):
+    s = _settings_with_learned(tmp_path, monkeypatch)
+    _trusted(recipe_store.learned_store_for(s))
+    _GateStub.answer = (False, 0.97)
+    monkeypatch.setattr("browser_agent.laya_gate.LayaGate", _GateStub)
+
+    from browser_agent.router import learned_match
+
+    assert await learned_match(_NAMES_THE_URL, "plan.task", s) is None
 
 
 async def test_the_gate_is_not_asked_without_a_trusted_recipe(tmp_path, monkeypatch):
@@ -623,7 +683,7 @@ async def test_the_gate_is_not_asked_without_a_trusted_recipe(tmp_path, monkeypa
 
     from browser_agent.router import learned_match
 
-    assert await learned_match("find a flight", "plan.task", s) is None
+    assert await learned_match(_NAMES_THE_URL, "plan.task", s) is None
     assert _GateStub.calls == [], "laya was asked to match nothing trusted"
 
 
@@ -640,8 +700,7 @@ async def test_the_gate_is_not_asked_for_a_named_recipe(tmp_path, monkeypatch):
 
 
 async def test_too_many_candidates_are_not_ranked(tmp_path, monkeypatch):
-    # Past ~10 options Laya's confidence is uncalibrated; the honest answer is
-    # "cannot match", not a guess.
+    # Past the cap the honest answer is "cannot match", not a guess.
     s = _settings_with_learned(tmp_path, monkeypatch)
     store = recipe_store.learned_store_for(s)
     for i in range(11):
@@ -653,7 +712,7 @@ async def test_too_many_candidates_are_not_ranked(tmp_path, monkeypatch):
 
     from browser_agent.router import learned_match
 
-    assert await learned_match("anything", "plan.task", s) is None
+    assert await learned_match(_NAMES_THE_URL, "plan.task", s) is None
     assert _GateStub.calls == []
 
 

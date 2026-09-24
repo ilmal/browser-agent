@@ -128,6 +128,32 @@ class LayaGate:
         self.stats["confirms"] += 1
         return p >= 0.5, max(p, 1.0 - p)
 
+    async def same_task(self, saved: str, request: str) -> tuple[bool, float]:
+        """Is ``request`` asking for the same task as the saved text ``saved``?
+
+        This is the learned-match question, asked as a yes/no rather than as a
+        choice among the saved tasks, and the head matters: a choice over a
+        *single* option reports that option's own probability, which is ~1.0 by
+        construction. So a one-candidate match could never decline and a
+        two-candidate match could never pass — measured live 2026-09-24, the
+        choice head answered conf **1.00** for "Go to https://www.iana.org/about
+        and tell me what IANA is responsible for" against an example-domains
+        recipe (a wrong recipe, run and reported as that request's answer), and
+        conf **0.54** for a *correct* reworded match. The caller then gets a
+        wrong answer under a floor that never fires.
+
+        ``noul``'s confidence is the honest distance-from-coin-flip, so the
+        floor means what it says. It is asked *per candidate* so no fixed option
+        set can bias the answer, and it still confounds "same URL" with "same
+        task" — two requests on one page but asking different things can read as
+        a match — which is why the caller pre-filters on the entry URL, a fact
+        about the request that needs no model at all.
+        """
+        return await self.yes_no(
+            "Is the new request asking for the same task as the saved task?",
+            f"Saved task: {saved}\nNew request: {request}",
+        )
+
     async def choose(
         self, question: str, lines: list[str], state_text: str
     ) -> tuple[int | None, float]:
