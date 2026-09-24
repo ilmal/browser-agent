@@ -158,6 +158,31 @@ def _task_text(task: Task) -> str:
 _ANSWER_KEYS = ("answer", "result", "agent_result", "text", "value", "summary")
 
 
+#: Header of every history brief. It must not claim more than the body says: the
+#: list is *every* earlier attempt, successful ones included, so the old "Do not
+#: repeat a step that already failed this way" was wrong twice — it described a
+#: failure list over a mixed one, and the point of the brief is context (what was
+#: already established), not only prohibition.
+_HISTORY_HEADER = (
+    "Earlier attempts at this same task, for context. Do not repeat a step that "
+    "already failed; build on one that worked:"
+)
+
+
+def history_brief(lines: list[str]) -> str:
+    """The thread brief handed to a new attempt: what the earlier ones did.
+
+    One definition with two readers — ``TaskRunner.history`` builds the lines
+    from the live tasks and ``api._say_to_archived`` from the archive. The text
+    used to be duplicated in both and would have drifted the first time either
+    was edited; the empty case returns "" so a caller never sets a dangling
+    "Earlier attempts:" prompt.
+    """
+    if not lines:
+        return ""
+    return _HISTORY_HEADER + "\n" + "\n".join(lines)
+
+
 def _answer_from(result: Any) -> str:
     """The answer inside a recipe's result envelope, as one line.
 
@@ -534,12 +559,7 @@ class TaskRunner:
                          f"{t.detail or 'no detail'}")
             for entry in t.activity[-3:]:
                 lines.append(f"    · {entry.get('text', '')}")
-        if not lines:
-            return ""
-        return (
-            "Earlier attempts at this same task, for context. Do not repeat a "
-            "step that already failed this way:\n" + "\n".join(lines)
-        )
+        return history_brief(lines)
 
     # -- live control ------------------------------------------------------
 

@@ -34,6 +34,7 @@ from .tasks import (
     TaskStatus,
     _task_text,
     get_recipe_or_none,
+    history_brief,
     list_recipes,
     recipe_reads_instruction,
 )
@@ -744,12 +745,7 @@ def _archived_brief(thread_id: str, at: float) -> str:
                      f"{r.detail or 'no detail'}")
         for entry in r.activity[-3:]:
             lines.append(f"    · {entry.get('text', '')}")
-    if not lines:
-        return ""
-    return (
-        "Earlier attempts at this same task, for context. Do not repeat a "
-        "step that already failed this way:\n" + "\n".join(lines)
-    )
+    return history_brief(lines)
 
 
 async def _say_to_archived(task_id: str, req: SayRequest) -> dict[str, Any]:

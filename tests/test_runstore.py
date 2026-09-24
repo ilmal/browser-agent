@@ -264,3 +264,20 @@ def test_a_resubmit_from_a_record_gets_no_brief_when_nothing_is_in_memory(runner
     )
     assert "history" not in nxt.payload
     assert nxt.attempt == 4
+
+
+def test_the_brief_header_does_not_claim_the_list_is_failures():
+    """One definition, two readers — live tasks and the archive.
+
+    The header used to say "Do not repeat a step that already failed this way"
+    over a list that includes *successful* attempts, which is why the live
+    follow-up showed a "done" step under a failures-only instruction. A brief is
+    context first; the prohibition is only half of it.
+    """
+    from browser_agent.tasks import history_brief
+
+    assert history_brief([]) == ""
+    out = history_brief(["- attempt 1 (plan.task) ended done: plan succeeded"])
+    assert out.endswith("- attempt 1 (plan.task) ended done: plan succeeded")
+    assert "build on one that worked" in out
+    assert "already failed this way" not in out
