@@ -9,7 +9,6 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
-import re
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -32,8 +31,8 @@ from .tasks import (
     AGENT_RECIPE,
     TaskRunner,
     TaskStatus,
+    _start_url_for,
     _task_text,
-    get_recipe_or_none,
     history_brief,
     list_recipes,
     recipe_reads_instruction,
@@ -556,31 +555,6 @@ def _recipe_reads_payload(name: str) -> bool:
     recipes, the game — runs the same code whatever it is told.
     """
     return recipe_reads_instruction(name)
-
-
-_URL_RE = re.compile(r"https?://[^\s<>\"')]+")
-
-
-def _start_url_for(text: str, task: Any) -> str:
-    """Where the redirected agent run should begin.
-
-    Order matters. The operator naming a URL in their message is the strongest
-    signal there is — "go to https://duckduckgo.com instead" is an instruction,
-    not a hint — so it wins. Otherwise fall back to wherever the previous
-    attempt actually was. Without this the agent run failed immediately with
-    "freeform tasks need a start url in the payload", which is a redirect the
-    operator asked for and did not get.
-    """
-    for candidate in (text, task.detail or ""):
-        found = _URL_RE.search(candidate or "")
-        if found:
-            return found.group(0).rstrip(".,;")
-    for source in (task.result or {}, task.payload):
-        url = source.get("url") if isinstance(source, dict) else None
-        if isinstance(url, str) and url.startswith("http"):
-            return url
-    entry = getattr(get_recipe_or_none(task.recipe), "entry_url", "") or ""
-    return entry if entry.startswith("http") else ""
 
 
 class SayRequest(BaseModel):

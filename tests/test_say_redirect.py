@@ -43,6 +43,25 @@ def _task(api, *, payload, detail="", result=None, recipe="minesweeper.play"):
 
 
 # -- _start_url_for, the fallback chain ------------------------------------
+#
+# One definition, in tasks.py, read by both the control plane's say() and the
+# freeform runner. The API re-exports it, so these read through the module under
+# test while asserting the chain that both callers share.
+
+
+def test_the_freeform_runner_reads_the_url_out_of_the_prose(api_mod):
+    """The reported refusal: a task that names its own start page was rejected.
+
+    "Go to https://example.com and tell me what it is for" was answered with
+    "freeform tasks need a start url in the payload" — the payload had no `url`,
+    and the prose that plainly carried one was never read. plan.task reads the
+    same sentence happily, so the same operator's words worked or failed by
+    which recipe they happened to reach.
+    """
+    task = _task(api_mod, payload={}, recipe="agent.task")
+    assert api_mod._start_url_for(
+        "Go to https://example.com and tell me what it is for", task
+    ) == "https://example.com"
 
 
 def test_the_url_the_operator_names_wins(api_mod):

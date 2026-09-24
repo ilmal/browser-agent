@@ -17,6 +17,7 @@ import asyncio
 import contextlib
 import json
 import logging
+import re
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -143,6 +144,43 @@ PLAN_RECIPE = "plan.task"
 def _task_text(task: Task) -> str:
     """The instruction as the caller wrote it, whichever field they used."""
     return str(task.payload.get("task") or task.payload.get("text") or "").strip()
+
+
+_URL_RE = re.compile(r"https?://[^\s<>\"')]+")
+
+
+def _start_url_for(text: str, task: Task) -> str:
+    """Where a freeform agent run should begin.
+
+    Order matters. The operator naming a URL in their message is the strongest
+    signal there is — "go to https://duckduckgo.com instead" is an instruction,
+    not a hint — so it wins. Otherwise fall back to wherever the previous
+    attempt actually was.
+
+    This lives here rather than in the control plane because the *refusal* it
+    prevents lives here: ``_run_freeform`` reads only ``payload["url"]``, so a
+    task submitted with its url in the prose ("Go to https://x and tell me what
+    it is") was refused with "freeform tasks need a start url in the payload"
+    while ``plan.task`` read the very same prose happily. Two readers, one
+    definition — the API's say() path and this one.
+
+    A URL the operator names must beat one the previous attempt left in the
+    payload, or a redirect would be recorded and then quietly ignored.
+    """
+    for candidate in (text, task.detail or ""):
+        found = _URL_RE.search(candidate or "")
+        if found:
+            return found.group(0).rstrip(".,;")
+    # The explicit fields are taken at face value, not filtered to http: a value
+    # someone wrote into `url` deliberately is not a guess, whereas a regex over
+    # prose can only ever match http(s). Only a blank page is refused, and a
+    # sentinel like "about:blank#start" is a real start point.
+    for source in (task.result or {}, task.payload):
+        url = source.get("url") if isinstance(source, dict) else None
+        if isinstance(url, str) and url.strip() and url.strip() != "about:blank":
+            return url.strip()
+    entry = (getattr(get_recipe_or_none(task.recipe), "entry_url", "") or "").strip()
+    return entry if entry and entry != "about:blank" else ""
 
 
 #: Keys whose value is the answer the operator actually asked for. A recipe
@@ -930,7 +968,18 @@ class TaskRunner:
         # a blank page and no site to work on. The documented `url` payload was
         # never read and the session was never navigated, so freeform could only
         # ever operate on whatever page happened to be open.
-        url = (task.payload.get("url") or recipe.entry_url or "").strip()
+        #
+        # The prose counts as a caller-supplied url. Reading only the payload
+        # refused "Go to https://example.com and tell me what it is for" — a task
+        # that names its own start page — while plan.task read the same sentence
+        # happily. _start_url_for is the one definition of where a run begins;
+        # it prefers a url the operator named over a stale one in the payload.
+        #
+        # task/goal/text are all the instruction, because the agent reads `goal`
+        # first (agent.py): a payload that carried its url only in `goal` was
+        # invisible to `_task_text` alone.
+        intent = _task_text(task) or str(task.payload.get("goal") or "")
+        url = _start_url_for(intent, task).strip()
         if not url or url == "about:blank":
             task.status = TaskStatus.FAILED
             task.detail = "freeform tasks need a start url in the payload"

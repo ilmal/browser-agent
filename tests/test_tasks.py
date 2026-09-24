@@ -357,6 +357,34 @@ async def test_freeform_requires_a_start_url(runner_factory):
 
 
 @pytest.mark.asyncio
+async def test_freeform_reads_the_start_url_out_of_the_prose(runner_factory, site):
+    """The reported refusal: the task named its own page and was rejected.
+
+    "Go to https://example.com and tell me what it is for" came back
+    "freeform tasks need a start url in the payload" — the payload had no `url`,
+    and the sentence that plainly carried one was never read. plan.task extracts
+    a URL from the same prose, so the same operator's words worked or failed by
+    which recipe they happened to reach. Both now go through _start_url_for.
+    """
+    make, site_url = runner_factory
+
+    seen = {}
+
+    async def agent(session, url, payload):
+        seen["url"] = url
+        return {"agent_result": "a placeholder page"}
+
+    runner = make(agent_runner=agent)
+    task = runner.submit(
+        AGENT_RECIPE, {"goal": f"Go to {site_url}/ok and tell me what the page is for"}
+    )
+    finished = await _drain(runner, task.id)
+
+    assert finished.status is TaskStatus.DONE, finished.detail
+    assert seen["url"] == f"{site_url}/ok", "the url in the prose was not used"
+
+
+@pytest.mark.asyncio
 async def test_freeform_amendment_reruns_the_agent_with_the_new_text(runner_factory, site):
     """Changing the instruction mid-run must not just end the task.
 
