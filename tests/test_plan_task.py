@@ -996,6 +996,37 @@ async def test_risky_step_with_done_when_runs(runner_factory, site):
     assert done.used_agent is False
 
 
+async def test_final_gate_runs_for_a_navigate_only_plan(runner_factory, site):
+    """A plan whose only step is a navigate is still asked the overall question.
+
+    This is the shape a learned recipe for a *question* task has ("open X and
+    tell me what it is"), and gating the final check on a mutation let it report
+    DONE with nothing having verified the page — which is what made a promotion
+    (and therefore auto-routing) meaningless. A confident no must fall back.
+    """
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/form",
+        "steps": [{"action": "navigate", "goal": "open it", "text": f"{site_url}/form"}],
+    }
+    agent_calls = {"n": 0}
+
+    async def agent(session, url, payload):
+        agent_calls["n"] += 1
+        return {"agent": True}
+
+    runner = make(
+        agent_runner=agent,
+        planner=FakePlanner(plan),
+        laya=FakeLaya(yes=False, conf=0.95),
+    )
+    task = runner.submit("plan.task", {"task": "open the form and submit it"})
+    done = await _drain(runner, task.id)
+
+    assert done.used_agent is True
+    assert agent_calls["n"] == 1
+
+
 async def test_final_gate_confident_no_falls_back_to_agent(runner_factory, site):
     """Finish-insist: every step passed its own gates, but the gate says the
     OVERALL task is not satisfied — fail into the fallback with the page where

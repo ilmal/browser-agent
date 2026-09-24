@@ -296,17 +296,23 @@ def test_the_xpath_is_the_last_resort_selector():
     assert spec["steps"][0]["selector"] == "xpath=/html/body/div[3]/button"
 
 
-def test_a_trailing_done_is_not_a_step_and_mid_run_done_disqualifies():
-    # Done at the end is how every successful run finishes; it is not replayable
-    # work. Done in the middle means the run continued past it, which we cannot
-    # reproduce — so that run is not harvested.
+def test_a_trailing_done_becomes_an_extract_and_mid_run_done_disqualifies():
+    # Done at the end is how every successful run finishes, and it carried the
+    # answer the agent reached — so it becomes one final extract step that reads
+    # the page the recipe just reached. Without it a question task's recipe
+    # replayed the navigation and reported the plan envelope instead of an
+    # answer. Done in the middle means the run continued past it, which we
+    # cannot reproduce — so that run is not harvested.
     ok = _run(
         _step(_Action(navigate={"url": "https://example.com"})),
         _step(_Action(done={"text": "finished"})),
     )
     spec = harvest(ok, entry_url="https://example.com", goal="g")
     assert spec is not None
-    assert [s["action"] for s in spec["steps"]] == ["navigate"]
+    assert [s["action"] for s in spec["steps"]] == ["navigate", "extract"]
+    # The page it just navigated to is the answer's source; the recorded
+    # sentence is not stored, so the answer can never be a stale paraphrase.
+    assert spec["steps"][1]["selector"] == "body"
 
     mid = _run(
         _step(_Action(done={"text": "looks done"})),
@@ -314,6 +320,31 @@ def test_a_trailing_done_is_not_a_step_and_mid_run_done_disqualifies():
               [_Element(attributes={"id": "next"})]),
     )
     assert harvest(mid, entry_url="https://example.com", goal="g") is None
+
+
+def test_an_action_shaped_run_ends_on_page_state_not_an_extract():
+    # A run that ends without saying anything — the last action is the click,
+    # and the run simply stops — is an action task ("book the flight"). Its
+    # outcome IS the page state, so no extract step is invented for it.
+    history = _run(
+        _step(_Action(navigate={"url": "https://example.com"})),
+        _step(_Action(click={"index": 5}), [_Element(attributes={"id": "go"})]),
+    )
+    spec = harvest(history, entry_url="https://example.com", goal="g")
+    assert spec is not None
+    assert [s["action"] for s in spec["steps"]] == ["navigate", "click"]
+
+
+def test_an_extract_run_becomes_a_page_read_too():
+    # ``extract`` ends a run the same way done does — the agent stopped to
+    # report what it read — so the faithful replay reads the page as well.
+    history = _run(
+        _step(_Action(navigate={"url": "https://example.com"})),
+        _step(_Action(extract={"query": "the heading"})),
+    )
+    spec = harvest(history, entry_url="https://example.com", goal="g")
+    assert spec is not None
+    assert [s["action"] for s in spec["steps"]] == ["navigate", "extract"]
 
 
 def test_a_type_step_with_no_text_is_not_harvested():
@@ -624,3 +655,71 @@ async def test_too_many_candidates_are_not_ranked(tmp_path, monkeypatch):
 
     assert await learned_match("anything", "plan.task", s) is None
     assert _GateStub.calls == []
+
+
+# -- a re-harvest must not reset an earned promotion ------------------------
+
+
+def test_a_reharvest_does_not_reset_an_earned_promotion(tmp_path, monkeypatch):
+    """The recipe name hashes the instruction, so re-running the same prose
+    re-harvests the same recipe — and the harvest always reports a pristine
+    candidate. Writing that over a spec the replays already promoted is what
+    kept ``trusted_learned()`` empty, so the router could never see one: measured
+    live, a recipe promoted at 02:48:09 was reset by a re-harvest at 02:48:31.
+    """
+    monkeypatch.setenv("AGENT_PROFILE", "pytest")
+    monkeypatch.setenv("LEARNED_RECIPES_DIR", str(tmp_path / "learned"))
+    monkeypatch.setenv("PROFILES_ROOT", "/tmp/never")
+    monkeypatch.setenv("DATA_ROOT", "/tmp/never")
+    from browser_agent.config import load_settings
+    from browser_agent.recipe_store import learned_store_for
+    from browser_agent.tasks import TaskRunner
+
+    settings = load_settings()
+    store = learned_store_for(settings)
+    # A recipe that has earned its promotion.
+    record_replay(store, _LEARNED_SPEC["name"], ok=True)
+    save_learned_spec(store, dict(_LEARNED_SPEC, unverified=False, replays=2))
+    assert store.trusted_learned(), "the fixture must actually be trusted"
+
+    runner = TaskRunner(settings, session=None)
+    # A fresh harvest of the same instruction: pristine counts, and a *better*
+    # step list (the answer step F1 now appends).
+    fresh = dict(
+        _LEARNED_SPEC,
+        steps=[{"action": "navigate", "text": "https://example.com/search"},
+               {"action": "extract", "goal": "answer", "selector": "body"}],
+        unverified=True,
+        replays=0,
+    )
+    runner._maybe_learn({"learned_recipe": fresh})
+
+    stored = store.get(_LEARNED_SPEC["name"])
+    # The earned promotion survives ...
+    assert stored["replays"] == 2
+    assert stored["unverified"] is False
+    # ... and the re-harvest still did its job, replacing the steps.
+    assert [s["action"] for s in stored["steps"]] == ["navigate", "extract"]
+    assert store.trusted_learned(), "the promotion was reset by a re-harvest"
+
+
+def test_a_first_harvest_is_still_unverified(tmp_path, monkeypatch):
+    # The merge must not invent a promotion: with nothing stored, a fresh spec
+    # is exactly as unverified as the harvest says it is.
+    monkeypatch.setenv("AGENT_PROFILE", "pytest")
+    monkeypatch.setenv("LEARNED_RECIPES_DIR", str(tmp_path / "learned"))
+    monkeypatch.setenv("PROFILES_ROOT", "/tmp/never")
+    monkeypatch.setenv("DATA_ROOT", "/tmp/never")
+    from browser_agent.config import load_settings
+    from browser_agent.recipe_store import learned_store_for
+    from browser_agent.tasks import TaskRunner
+
+    settings = load_settings()
+    store = learned_store_for(settings)
+    runner = TaskRunner(settings, session=None)
+    runner._maybe_learn({"learned_recipe": dict(_LEARNED_SPEC)})
+
+    stored = store.get(_LEARNED_SPEC["name"])
+    assert stored["replays"] == 0
+    assert stored["unverified"] is True
+    assert store.trusted_learned() == []

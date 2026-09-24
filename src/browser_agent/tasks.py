@@ -932,13 +932,33 @@ class TaskRunner:
         store = learned_store_for(self.settings)
         if store is None:
             return
+        # A re-harvest of the same instruction is the same recipe — the name
+        # hashes the instruction, and the harvest always reports a pristine
+        # candidate (``unverified: True, replays: 0``). Writing that over a spec
+        # that has already been replayed cleanly would reset a promotion the
+        # replays earned: measured live, a recipe promoted at 02:48:09 was reset
+        # by a re-harvest at 02:48:31, so the router — which only ever routes a
+        # *trusted* learned recipe — could never see one. The store is the
+        # authority on promotion, so its earned counts win; the freshly harvested
+        # steps still replace the old ones, which is the point of re-harvesting.
+        prior = store.get(str(spec.get("name") or ""))
+        if isinstance(prior, dict) and int(prior.get("replays") or 0) > int(
+            spec.get("replays") or 0
+        ):
+            spec["replays"] = int(prior["replays"])
+            spec["unverified"] = bool(prior.get("unverified"))
         try:
             save_learned_spec(store, spec)
             log.info("learned recipe stored: %s", spec.get("name"))
+            # Say what the recipe's own state is, not what a new one's would be:
+            # a promoted recipe re-learned is ready now, and telling the operator
+            # it still needs replays would be wrong about the recipe they have.
+            if spec.get("unverified"):
+                state = f"needs {store.learned_min_replays()} clean replays before it is reused"
+            else:
+                state = f"replays cleanly ({int(spec.get('replays') or 0)}×); it can be reused"
             self.activity.note(
-                "info",
-                f"learned a recipe for this task: {spec.get('name')} "
-                f"(needs {store.learned_min_replays()} clean replays before it is reused)",
+                "info", f"learned a recipe for this task: {spec.get('name')} ({state})"
             )
         except RecipeError as exc:
             # Not every successful run is representable as a plan (a scroll, a

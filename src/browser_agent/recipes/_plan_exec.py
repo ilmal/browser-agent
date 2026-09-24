@@ -316,7 +316,6 @@ async def run_plan(
     page = await session.goto(plan.entry_url)
     extracts: dict[str, str] = {}
     executed = 0
-    mutated = False
     # Stuck-loop latches (ported from jev-ultrafast / SystemOneHarness):
     # consecutive click/type actions that change nothing, and the same action
     # on the same page state twice, both mean the plan is grinding — fail into
@@ -366,8 +365,6 @@ async def run_plan(
             f"step {i + 1} ok ({time.monotonic() - t0:.1f}s): {outcome}",
             step=i + 1,
         )
-        if mutates:
-            mutated = True
         if mutates and fp_before is not None:
             fp_after = await _fingerprint(page)
             no_change = no_change + 1 if fp_after == fp_before else 0
@@ -401,7 +398,14 @@ async def run_plan(
     # job — the agent fallback gets the original task with the page already
     # where the plan left it, which is exactly the repair position. Unsure
     # never punishes: the per-step gates already passed.
-    if mutated and laya.enabled:
+    #
+    # It fires for ANY executed step, not only a click/type. A navigate is the
+    # entire body of a learned recipe for a question task ("open X and tell me
+    # what it is"), and gating only mutations let such a recipe report DONE with
+    # nothing having checked that the page satisfies the task — which made its
+    # promotion meaningless, since the promotion is what lets the router reuse
+    # it. Asking is what "replayed cleanly" is supposed to mean.
+    if executed and laya.enabled:
         verdict, conf = await laya.yes_no(
             f"Does the page now satisfy the overall task '{task_text}'?",
             await state_text(page),

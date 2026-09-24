@@ -222,6 +222,30 @@ def _step_from(
     return step
 
 
+#: The final ``extract`` step a run that ended by *saying* something earns. The
+#: goal becomes the key in the plan's ``extracts`` envelope, and
+#: ``tasks._answer_from`` renders that envelope as the thread note — so this one
+#: step is what turns "steps_executed: 1; final_url: …" into the answer.
+_ANSWER_STEP_GOAL = "answer"
+
+
+def _terminal_text(name: str, params: dict[str, Any]) -> str:
+    """The text a terminal action carried, or "".
+
+    ``done``'s ``text`` is the agent's closing sentence — the answer it reached —
+    and ``extract``'s ``query`` is what it set out to read from the page. Both
+    mean the run ended by producing text *about* the page rather than by leaving
+    the page in a state, so the faithful replay ends by reading the page too.
+    """
+    if not isinstance(params, dict):
+        return ""
+    for key in ("text", "query", "extracted_content", "content"):
+        value = params.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
 def slug_for(goal: str) -> str:
     """A recipe name for a goal: readable, and valid for the store."""
     low = re.sub(r"[^a-z0-9]+", "-", (goal or "").lower()).strip("-")
@@ -285,6 +309,24 @@ def _harvest(
                 # we cannot reproduce that.
                 if item is not items[-1] or i != len(actions) - 1:
                     return None
+                # The run ended by *saying* something — the answer to a question
+                # ("open X and tell me what it is") rather than a page state it
+                # left behind. Dropping it is what made a replay report
+                # "steps_executed: 1; final_url: …" while the agent that earned
+                # it reported the answer, so the faithful replay ends the same
+                # way: an extract step reads the page it just navigated to.
+                #
+                # Reading the live page at replay, never the recorded sentence,
+                # is deliberate — the answer is the page's own text, so it cannot
+                # go stale and is never the agent's paraphrase presented as this
+                # run's result. ``body`` is spelled out rather than left to
+                # ``exec_step``'s default because a *saved* recipe must name its
+                # selector (``plan_model`` refuses a selectorless extract), and
+                # the whole page is the honest target for "tell me what it is".
+                if _terminal_text(name, params):
+                    steps.append(
+                        {"action": "extract", "goal": _ANSWER_STEP_GOAL, "selector": "body"}
+                    )
                 continue
             elem = elements[i] if i < len(elements) else None
             typed = str(params.get("text") or "") if isinstance(params, dict) else ""
