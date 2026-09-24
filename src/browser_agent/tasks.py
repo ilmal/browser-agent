@@ -145,6 +145,40 @@ def _task_text(task: Task) -> str:
     return str(task.payload.get("task") or task.payload.get("text") or "").strip()
 
 
+#: Keys whose value is the answer the operator actually asked for. A recipe
+#: returns a small envelope (``{"plan": ..., "extracts": {...}, "final_url":
+#: ...}``) and dumping that into the thread buries the one line the operator
+#: wants under a page of JSON — the same mistake as rendering a raw HTTP body.
+_ANSWER_KEYS = ("answer", "result", "text", "value", "summary")
+
+
+def _answer_from(result: Any) -> str:
+    """The answer inside a recipe's result envelope, as one line.
+
+    Falls back to the whole thing when nothing recognisable is in it, because
+    an unhelpful message still beats a silent one — but a dict that names an
+    answer reports that and nothing else.
+    """
+    if not isinstance(result, dict):
+        return str(result)
+    if "extracts" in result and isinstance(result["extracts"], dict):
+        parts = [f"{k}: {v}" for k, v in result["extracts"].items()]
+        if parts:
+            return "; ".join(parts)
+    for key in _ANSWER_KEYS:
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    # A one-key envelope (``{"title": "Example Domain"}``) IS the answer; the
+    # key is a label, not information the operator needs back.
+    scalars = [(k, v) for k, v in result.items() if isinstance(v, (str, int, float))]
+    if len(result) == 1 and scalars:
+        return str(scalars[0][1])
+    if scalars:
+        return "; ".join(f"{k}: {v}" for k, v in scalars)
+    return json.dumps(result, ensure_ascii=False, default=str)
+
+
 def _outcome_text(task: Task) -> str | None:
     """The bot's one-line report for a finished attempt.
 
@@ -154,12 +188,7 @@ def _outcome_text(task: Task) -> str | None:
     the dedupe compares against what is actually in the thread.
     """
     if task.status is TaskStatus.DONE:
-        body = ""
-        if task.result:
-            if isinstance(task.result, dict):
-                body = json.dumps(task.result, ensure_ascii=False, default=str)
-            else:
-                body = str(task.result)
+        body = _answer_from(task.result) if task.result else ""
         body = body or task.detail or "finished"
         text = f"Done: {body}"
     elif task.status is TaskStatus.BLOCKED:

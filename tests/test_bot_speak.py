@@ -85,7 +85,20 @@ def _runner(settings, threads: Any = None) -> TaskRunner:
 
 def test_done_text_carries_the_result():
     t = _task(TaskStatus.DONE, result={"title": "Example Domain"}, detail="recipe succeeded")
-    assert _outcome_text(t) == 'Done: {"title": "Example Domain"}'
+    assert _outcome_text(t) == "Done: Example Domain"
+
+
+def test_done_text_reads_the_extracts_out_of_a_plan_envelope():
+    # The shape plan.task actually returns. Dumping this envelope into the
+    # thread is what buried "Example Domains" under a page of JSON.
+    result = {
+        "plan": {"entry_url": "https://example.com", "steps": []},
+        "steps_executed": 2,
+        "extracts": {"read the main heading": "Example Domain"},
+        "final_url": "https://example.com",
+    }
+    t = _task(TaskStatus.DONE, result=result, detail="plan succeeded")
+    assert _outcome_text(t) == "Done: read the main heading: Example Domain"
 
 
 def test_done_text_falls_back_to_detail():
@@ -97,6 +110,11 @@ def test_done_text_is_capped():
     t = _task(TaskStatus.DONE, result={"blob": "x" * 5000})
     out = _outcome_text(t)
     assert len(out) <= 300 and out.startswith("Done:")
+
+
+def test_done_text_reports_an_answer_key_over_the_envelope():
+    t = _task(TaskStatus.DONE, result={"answer": "yes", "url": "https://x.se"}, detail="ok")
+    assert _outcome_text(t) == "Done: yes"
 
 
 def test_blocked_text_asks_for_a_human():
@@ -135,7 +153,7 @@ def test_hook_posts_one_bot_message(settings):
     runner._speak_outcome(t)  # the finally can pass a terminal task twice
     assert len(store.msgs) == 1
     assert store.msgs[0].role == "bot"
-    assert store.msgs[0].text == 'Done: {"did": "it"}'
+    assert store.msgs[0].text == "Done: it"
 
 
 def test_hook_posts_for_each_new_outcome(settings):
@@ -144,7 +162,7 @@ def test_hook_posts_for_each_new_outcome(settings):
     runner = _runner(settings, threads=store)
     runner._speak_outcome(_task(TaskStatus.DONE, result={"a": 1}))
     runner._speak_outcome(_task(TaskStatus.FAILED, detail="selector moved"))
-    assert [m.text for m in store.msgs] == ['Done: {"a": 1}', "Failed: selector moved"]
+    assert [m.text for m in store.msgs] == ["Done: 1", "Failed: selector moved"]
 
 
 def test_hook_survives_a_broken_store(settings):
@@ -284,7 +302,7 @@ async def test_a_real_done_run_posts_done(runner_factory, site):
     runner = make(threads=store)
     task = runner.submit("test.speak-ok", {})
     await _drain(runner, task.id)
-    assert [m.text for m in store.msgs] == ['Done: {"did": "the thing"}']
+    assert [m.text for m in store.msgs] == ["Done: the thing"]
 
 
 @pytest.mark.asyncio
