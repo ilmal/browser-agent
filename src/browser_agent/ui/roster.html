@@ -1110,6 +1110,15 @@ function closeSplit() {
 
 function originPill(r) {
   if (r.origin === "stored") return `<span class="pill stored">composed</span>`;
+  // A learned recipe is the agent's own hypothesis from one run, not a
+  // composition and not something shipped. Until it has replayed cleanly it is
+  // offered on the strength of one run, and the operator is entitled to know
+  // that before picking it over running the task again.
+  if (r.origin === "learned") {
+    return r.unverified
+      ? `<span class="pill">learned · untested</span>`
+      : `<span class="pill stored">learned · ${r.replays ?? 0}× ok</span>`;
+  }
   if (Object.keys(r.overrides || {}).length) return `<span class="pill over">edited</span>`;
   return `<span class="pill">as shipped</span>`;
 }

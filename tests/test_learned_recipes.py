@@ -405,6 +405,51 @@ def test_a_failed_replay_neither_promotes_nor_punishes(learned, monkeypatch):
     assert learned.trusted_learned() == []
 
 
+def test_a_learned_recipe_is_reported_as_learned_not_stored(learned, monkeypatch):
+    """The panel must not call a hypothesis a composition.
+
+    ``unverified`` had no consumer anywhere: the API labelled every learned
+    recipe "stored", so the UI drew the same "composed" pill it draws for a
+    recipe the operator wrote by hand, and the harvest's own promise — "it is
+    offered, never auto-routed" — had no surface to be offered on. A recipe the
+    agent formed from one run was either presented as trusted or not shown at
+    all.
+    """
+    monkeypatch.setenv("AGENT_PROFILE", "pytest")
+    monkeypatch.setenv("LEARNED_RECIPES_DIR", str(learned.directory))
+    monkeypatch.setenv("PROFILES_ROOT", "/tmp/never")
+    monkeypatch.setenv("DATA_ROOT", "/tmp/never")
+    from browser_agent import tasks
+    from browser_agent.config import load_settings
+    from browser_agent.recipe_store import learned_store_for
+
+    # Through the same store the loader reads: a second RecipeStore on the same
+    # directory has its own mtime cache, so writing through one and listing
+    # through the other is the staleness the production path is careful about.
+    store = learned_store_for(load_settings())
+    save_learned_spec(store, _LEARNED_SPEC)
+
+    def _row():
+        # list_recipes() re-reads the library, so the row is always current.
+        return next(
+            r for r in tasks.list_recipes() if r["name"] == "learned-search-abc123"
+        )
+
+    row = _row()
+    assert row["origin"] == "learned", "a learned recipe was reported as composed"
+    assert row["unverified"] is True
+    assert row["replays"] == 0
+    # And after enough clean replays it stops being untested, on the same field
+    # the pill reads.
+    record_replay(store, "learned-search-abc123", ok=True)
+    record_replay(store, "learned-search-abc123", ok=True)
+    row = _row()
+    assert row["unverified"] is False
+    assert row["replays"] == 2
+    # The proof it is actually reusable, not just labelled so.
+    assert [s["name"] for s in store.trusted_learned()] == ["learned-search-abc123"]
+
+
 def test_a_selectorless_learned_spec_is_refused(learned):
     bad = dict(_LEARNED_SPEC, steps=[{"action": "click", "goal": "press it"}])
     with pytest.raises(Exception, match="needs a `selector`"):

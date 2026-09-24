@@ -358,7 +358,18 @@ def list_recipes() -> list[dict[str, str]]:
             "name": r.name,
             "description": r.description,
             "entry_url": r.entry_url,
-            "origin": "stored" if r.name in _STORED_NAMES else "builtin",
+            # A learned recipe is a different artifact from an operator's: it is
+            # a hypothesis the agent formed from one run, not a deliberate
+            # composition. Reporting it as "stored" made the panel call it
+            # "composed" and hid that it is still untested — the recipe was
+            # offered as trusted or was not offered at all.
+            "origin": (
+                "learned" if getattr(r, "origin", "") == "learned"
+                else "stored" if r.name in _STORED_NAMES
+                else "builtin"
+            ),
+            "unverified": bool(getattr(r, "unverified", False)),
+            "replays": int(getattr(r, "replays", 0) or 0),
             # Surfaced so the thread panel can promise the right thing: on a
             # recipe that is told nothing, a message redirects the attempt to
             # the agent rather than re-running the same deterministic code.

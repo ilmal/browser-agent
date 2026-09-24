@@ -554,6 +554,11 @@ async def list_recipe_config() -> dict[str, Any]:
             "description": r["description"],
             "entry_url": r["entry_url"],
             "origin": "stored" if name in stored else r["origin"],
+            # A learned recipe is a hypothesis the agent formed from one run, so
+            # the panel has to be able to say "untested" rather than present it
+            # as a composed recipe the operator wrote.
+            "unverified": bool(r.get("unverified")),
+            "replays": int(r.get("replays") or 0),
             "overridable": list(recipe_store.OVERRIDABLE.get(name, ())),
             "overrides": overrides.get(name, {}),
             "defaults": defaults.get(name, {}),

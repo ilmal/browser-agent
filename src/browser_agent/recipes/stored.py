@@ -49,6 +49,11 @@ class StoredRecipe:
         #: "learned" when the agent wrote it, absent when a human did. The runner
         #: reads it to decide whether a run counts toward the recipe's promotion.
         self.origin: str = str(spec.get("origin") or "")
+        #: A learned recipe starts unverified and is offered rather than
+        #: auto-routed. The counts travel with the spec so the panel can say
+        #: "untested" instead of presenting a hypothesis as a composed recipe.
+        self.unverified: bool = bool(spec.get("unverified"))
+        self.replays: int = int(spec.get("replays") or 0)
         self._settings = settings
         self._laya = laya
         self._picker = picker
@@ -60,6 +65,8 @@ class StoredRecipe:
         self.entry_url = str(spec.get("entry_url") or "")
         self.steps = list(spec.get("steps") or [])
         self.origin = str(spec.get("origin") or "")
+        self.unverified = bool(spec.get("unverified"))
+        self.replays = int(spec.get("replays") or 0)
 
     def _deps(self, settings: Settings) -> None:
         if self._settings is None:

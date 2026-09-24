@@ -1272,7 +1272,9 @@ let rosterUrl = null;
 function renderRecipes() {
   const cards = recipeList.map((r, i) => `<div class="rc${i < 12 ? " enter" : ""}" style="animation-delay:${i * 50}ms">
     <div class="nm"><code>${esc(r.name)}</code>${
-      r.origin === "stored" ? `<span class="pill stored">composed</span>` : ""}</div>
+      r.origin === "stored" ? `<span class="pill stored">composed</span>`
+      : r.origin === "learned" ? `<span class="pill">learned${r.unverified ? " · untested" : ""}</span>`
+      : ""}</div>
     <div class="desc">${esc(r.description)}</div>
   </div>`).join("");
   set("recipes", cards || `<div class="empty">No recipes.</div>`);
