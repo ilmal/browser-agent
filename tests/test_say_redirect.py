@@ -53,7 +53,8 @@ def test_the_freeform_runner_reads_the_url_out_of_the_prose(api_mod):
     """The reported refusal: a task that names its own start page was rejected.
 
     "Go to https://example.com and tell me what it is for" was answered with
-    "freeform tasks need a start url in the payload" — the payload had no `url`,
+    "freeform tasks need a url in the payload or the task text" — the payload
+    had no `url`,
     and the prose that plainly carried one was never read. plan.task reads the
     same sentence happily, so the same operator's words worked or failed by
     which recipe they happened to reach.

@@ -352,7 +352,7 @@ async def test_freeform_requires_a_start_url(runner_factory):
     finished = await _drain(runner, task.id)
 
     assert finished.status is TaskStatus.FAILED
-    assert "start url" in finished.detail
+    assert "freeform tasks need a url" in finished.detail
     assert finished.used_agent is False
 
 
@@ -361,7 +361,8 @@ async def test_freeform_reads_the_start_url_out_of_the_prose(runner_factory, sit
     """The reported refusal: the task named its own page and was rejected.
 
     "Go to https://example.com and tell me what it is for" came back
-    "freeform tasks need a start url in the payload" — the payload had no `url`,
+    "freeform tasks need a url in the payload or the task text" — the payload
+    had no `url`,
     and the sentence that plainly carried one was never read. plan.task extracts
     a URL from the same prose, so the same operator's words worked or failed by
     which recipe they happened to reach. Both now go through _start_url_for.

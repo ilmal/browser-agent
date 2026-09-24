@@ -160,8 +160,8 @@ def _start_url_for(text: str, task: Task) -> str:
     This lives here rather than in the control plane because the *refusal* it
     prevents lives here: ``_run_freeform`` reads only ``payload["url"]``, so a
     task submitted with its url in the prose ("Go to https://x and tell me what
-    it is") was refused with "freeform tasks need a start url in the payload"
-    while ``plan.task`` read the very same prose happily. Two readers, one
+    it is") was refused with "freeform tasks need a url" while ``plan.task``
+    read the very same prose happily. Two readers, one
     definition — the API's say() path and this one.
 
     A URL the operator names must beat one the previous attempt left in the
@@ -1013,7 +1013,7 @@ class TaskRunner:
         url = _start_url_for(intent, task).strip()
         if not url or url == "about:blank":
             task.status = TaskStatus.FAILED
-            task.detail = "freeform tasks need a start url in the payload"
+            task.detail = "freeform tasks need a url in the payload or the task text"
             return
 
         for _attempt in range(MAX_AMENDMENTS + 1):

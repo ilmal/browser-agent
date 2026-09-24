@@ -361,7 +361,7 @@ async def create_farm(req: CreateFarm) -> dict[str, Any]:
     if req.recipe not in known:
         raise HTTPException(400, f"unknown recipe {req.recipe}")
     if not req.url.strip() and not known[req.recipe]["entry_url"]:
-        raise HTTPException(400, f"recipe {req.recipe} needs a start url in the payload")
+        raise HTTPException(400, f"recipe {req.recipe} needs a url in the request")
 
     reg = registry.load(settings.registry_path)
     bots: dict[str, registry.Bot] = {}
