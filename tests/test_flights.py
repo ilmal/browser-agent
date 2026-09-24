@@ -89,6 +89,18 @@ def test_parse_market_handles_the_benchmark_prompt():
     assert (o.lower(), d.lower()) == ("stockholm", "seattle")
 
 
+def test_parse_market_stops_at_the_connector_after_the_destination():
+    o, d = parse_market(
+        "Find flights from Stockholm to London departing in December for 4 days"
+    )
+    assert (o.lower(), d.lower()) == ("stockholm", "london")
+
+
+def test_parse_market_multiword_destination_before_a_connector():
+    o, d = parse_market("flights from stockholm to new york around december 10 for 1 week")
+    assert (o.lower(), d.lower()) == ("stockholm", "new york")
+
+
 def test_parse_cells_reads_the_real_grid_labels():
     labels = [
         "SEK 5,075, low price, Jan 14 to Jan 21",

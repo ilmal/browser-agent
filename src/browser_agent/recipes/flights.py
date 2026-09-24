@@ -255,10 +255,16 @@ def parse_market(text: str) -> tuple[str | None, str | None]:
     Handles "from X to Y", "X to Y", "X-Y". Deliberately greedy only up to the
     preposition that ends the phrase, so "from stockholm to seattle in january"
     yields ("stockholm", "seattle").
+
+    The terminators are the words a person puts *between* the destination and
+    the dates, and they must be enumerated: the destination group is lazy and
+    expands until a terminator matches, so with only ``in``/``for`` listed,
+    "London departing in December" glued the next word into the place name and
+    resolved to ``unknown place 'London departing'`` (measured live 09-24).
     """
     m = re.search(
         r"from\s+([A-Za-zÀ-ɏ ]+?)\s+to\s+([A-Za-zÀ-ɏ ]+?)"
-        r"(?:\s+in\b|\s+for\b|\s*,|\s*$)",
+        r"(?:\s+(?:in|for|on|around|during|departing|leaving|returning)\b|\s*,|\s*$)",
         text, re.I,
     )
     if m:
