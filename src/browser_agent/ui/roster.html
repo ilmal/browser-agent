@@ -339,6 +339,10 @@
         </div>
         <label for="c-notes">Notes (optional)</label>
         <textarea id="c-notes" placeholder="Which account it signs into, and what to do when it hits a wall."></textarea>
+        <label for="c-bg">Background (optional)</label>
+        <textarea id="c-bg" placeholder="Who this user is — age, city, preferences, anything the bot should know while working as them."></textarea>
+        <label for="c-login">Login notes (optional)</label>
+        <textarea id="c-login" placeholder="Which site, which account, 2FA quirks — what you need to sign this identity in by hand."></textarea>
         <div class="row end" style="margin-top:14px">
           <span class="muted" id="c-why"></span>
           <button type="button" class="ghost" id="cancel-create">Cancel</button>
@@ -975,8 +979,35 @@ function msgRow(profile, m) {
   return `<div class="t-row ${cls}">${rowLabel(profile, "msg", m)}<div class="body">${esc(m.text)}</div></div>`;
 }
 
+// A recipe's result is an envelope (``{plan, extracts, …}``) and the answer is
+// inside it, so putting ``result`` on screen directly renders "[object Object]".
+// This is the same flattening the pod's own note does — keep the two in step.
+function answerFrom(result) {
+  if (result == null) return "";
+  if (typeof result !== "object") return String(result);
+  const ex = result.extracts;
+  if (ex && typeof ex === "object" && !Array.isArray(ex)) {
+    const parts = Object.entries(ex).map(([k, v]) => `${k}: ${v}`);
+    if (parts.length) return parts.join("; ");
+  }
+  for (const k of ["answer", "result", "agent_result", "text", "value", "summary"]) {
+    const v = result[k];
+    if (typeof v === "string" && v.trim()) return v.trim();
+  }
+  const scalars = Object.entries(result).filter(([, v]) =>
+    typeof v === "string" || typeof v === "number");
+  if (Object.keys(result).length === 1 && scalars.length) return String(scalars[0][1]);
+  if (scalars.length) return scalars.map(([k, v]) => `${k}: ${v}`).join("; ");
+  return JSON.stringify(result);
+}
+
+// A done attempt reports the answer; any other outcome reports why.
+function attemptSnippet(a) {
+  return (a.status === "done" ? answerFrom(a.result) : "") || a.detail || "";
+}
+
 function attRow(profile, a) {
-  const snip = a.result || a.detail || "";
+  const snip = attemptSnippet(a);
   const body = snip
     ? `<details><summary>what happened</summary><pre>${esc(snip)}</pre></details>`
     : "";
@@ -1022,17 +1053,18 @@ function upsertRows(profile, th) {
       if (!ex) { makeRow(key, e.at, html); added = true; }
       else {
         // attempts change in place: a status flip must not re-append the row
-        const sig = e.a.status + "|" + (e.a.result || "") + "|" + (e.a.detail || "");
+        const snip = attemptSnippet(e.a);
+        const sig = e.a.status + "|" + snip;
         const node = ex.el;
         const inner = node.querySelector(".stx");
         if (node.dataset.asig !== sig && inner) {
           node.dataset.asig = sig;
           inner.textContent = e.a.status || "";
           const d = node.querySelector("details");
-          if (d && (e.a.result || e.a.detail)) {
+          if (d && snip) {
             if (!d.querySelector("pre")) {
-              d.insertAdjacentHTML("beforeend", `<pre>${esc(e.a.result || e.a.detail)}</pre>`);
-            } else { d.querySelector("pre").textContent = e.a.result || e.a.detail || ""; }
+              d.insertAdjacentHTML("beforeend", `<pre>${esc(snip)}</pre>`);
+            } else { d.querySelector("pre").textContent = snip; }
           }
         }
       }
@@ -1411,10 +1443,11 @@ document.addEventListener("click", async (ev) => {
       await api("/api/bots", { method: "POST", body: JSON.stringify({
         profile, name: $("c-name").value.trim(), job: $("c-job").value.trim(),
         notes: $("c-notes").value.trim(),
+        background: $("c-bg").value.trim(), login_notes: $("c-login").value.trim(),
       })});
       banner("ok", `<b>${esc(profile)}</b> created. Its pod is starting — sign in once over
         <a href="${liveUrl(profile)}" target="_blank" rel="noopener">its live view</a>, then it is ready.`);
-      ["c-profile", "c-name", "c-job", "c-notes"].forEach(id => $(id).value = "");
+      ["c-profile", "c-name", "c-job", "c-notes", "c-bg", "c-login"].forEach(id => $(id).value = "");
       $("create-form").classList.add("hidden"); $("show-create").classList.remove("hidden");
       refresh();
     } catch (e) {

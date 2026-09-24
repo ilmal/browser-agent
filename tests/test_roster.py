@@ -335,6 +335,37 @@ def test_create_passes_the_name_and_job_through_to_the_pod(hub_env, fake_cluster
     assert res.json()["bot"]["display_name"] == "LinkedIn outreach"
 
 
+def test_create_can_carry_the_login_and_background(hub_env, fake_cluster, tmp_path: Path):
+    """An environment is created WITH its login and background.
+
+    A farm frames its task around the identity ("You are <name>. <background>"),
+    so a bot made with only a name and a job is framed as a bare name and the
+    operator has to re-open it to say who it is. Create is where the logging is
+    described, so the two fields belong on the create path, not only the edit
+    form.
+    """
+    from fastapi.testclient import TestClient
+
+    hub = _hub_with(hub_env, fake_cluster, tmp_path)
+    with TestClient(hub.app) as client:
+        res = client.post("/api/bots", headers={"Authorization": "Bearer test-token"},
+                          json={"profile": "ada", "name": "Ada Lovelace",
+                                "job": "Reply to threads as me",
+                                "background": "Ada, 34, lives in Malmö, writes about maths.",
+                                "login_notes": "Hacker News; login ada@example.com, no 2FA."})
+        assert res.status_code == 200, res.text
+
+    bot = res.json()["bot"]
+    assert "Malmö" in bot["background"]
+    assert "ada@example.com" in bot["login_notes"]
+    # And the roster read back agrees — the create path persisted them.
+    with TestClient(hub.app) as client:
+        listed = client.get("/api/bots", headers={"Authorization": "Bearer test-token"}).json()
+    ada = next(b for b in listed["bots"] if b["profile"] == "ada")
+    assert "Malmö" in ada["background"]
+    assert "ada@example.com" in ada["login_notes"]
+
+
 def test_delete_drops_the_roster_entry_and_spares_the_pvc(hub_env, fake_cluster, tmp_path: Path):
     """Remove is not "log this bot out".
 
@@ -391,6 +422,36 @@ def test_delete_of_an_unknown_bot_is_404_and_touches_nothing(hub_env, fake_clust
         assert res.status_code == 404
 
     assert not fake_cluster["log"].exists()
+
+
+def test_the_room_flattens_an_attempt_result_instead_of_showing_a_dict(hub_env):
+    """A recipe's result is an envelope, so rendering it raw shows "[object
+    Object]".
+
+    The pod's own note goes through ``tasks._answer_from``; the room's attempt
+    row is a second consumer of the same value and must flatten it too, or the
+    "what happened" disclosure is unreadable exactly when the run succeeded.
+    """
+    roster = Path(__file__).resolve().parents[1] / "src" / "browser_agent" / "ui" / "roster.html"
+    html = roster.read_text()
+    assert "function answerFrom(" in html
+    assert "function attemptSnippet(" in html
+    # The attempt row must read through the snippet, never the raw result.
+    assert "a.result || a.detail" not in html
+    assert "e.a.result || e.a.detail" not in html
+    assert "attemptSnippet(a)" in html
+    assert "attemptSnippet(e.a)" in html
+
+
+def test_the_create_form_takes_the_login_and_background(hub_env):
+    """The create form must collect what the edit form collects: an environment
+    is described when it is made, not only when it is corrected."""
+    roster = Path(__file__).resolve().parents[1] / "src" / "browser_agent" / "ui" / "roster.html"
+    html = roster.read_text()
+    assert 'id="c-bg"' in html
+    assert 'id="c-login"' in html
+    assert 'c-bg": $("c-bg").value' in html or 'background: $("c-bg").value.trim()' in html
+    assert 'login_notes: $("c-login").value.trim()' in html
 
 
 def test_the_roster_offers_a_remove_control(hub_env):

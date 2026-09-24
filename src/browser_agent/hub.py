@@ -161,6 +161,11 @@ class CreateBot(BaseModel):
     name: str = ""
     job: str = ""
     notes: str = ""
+    # Login info and background are part of the environment, not a later edit:
+    # a farm frames its task around them ("You are <name>. <background>"), so a
+    # member created without one is framed as a bare name.
+    login_notes: str = ""
+    background: str = ""
 
 
 class PatchBot(BaseModel):
@@ -230,7 +235,8 @@ async def create_bot(req: CreateBot) -> dict[str, Any]:
 
     reg = registry.load(settings.registry_path)
     bot = registry.upsert(reg, req.profile, name=req.name, job=req.job,
-                          notes=req.notes, url=f"/b/{req.profile}/")
+                          notes=req.notes, login_notes=req.login_notes,
+                          background=req.background, url=f"/b/{req.profile}/")
     registry.save(settings.registry_path, reg)
     log.info("created bot %s", req.profile)
     return {"ok": True, "bot": bot.to_dict(), "kubectl": applied.stdout.strip()[:400]}
