@@ -12,12 +12,17 @@ is a recorder, so a test asserts *what was clicked* rather than waiting for it.
 from __future__ import annotations
 
 import asyncio
+from datetime import date
 from typing import Any
 
 from browser_agent.activity import Activity
 from browser_agent.minesweeper_dom import GameView
 from browser_agent.minesweeper_solver import Board, Move
-from browser_agent.recipes.minesweeper import _MAX_TIEBREAK_CANDIDATES, Minesweeper
+from browser_agent.recipes.minesweeper import (
+    _MAX_TIEBREAK_CANDIDATES,
+    Minesweeper,
+    _wants_a_win,
+)
 
 LIVE_FACE = "top-area-face zoomable hd_top-area-face-unpressed"
 WIN_FACE = "top-area-face zoomable hd_top-area-face-win"
@@ -309,6 +314,107 @@ def test_run_clamps_how_many_games_it_will_play():
     # The clamp lives in run(); assert it directly to avoid a live browser.
     games = max(1, min(99, 3))
     assert games == 3
+
+
+def test_understands_claims_a_play_and_refuses_a_reading_task():
+    """The router's predicate. Its whole job is "can this recipe do it?"."""
+    today = date(2026, 9, 23)
+    for text in (
+        "play a game of minesweeper until you win",
+        "play minesweeper",
+        "start a minesweeper game",
+        "beat minesweeper",
+    ):
+        assert Minesweeper.understands(text, today) is True, text
+    for text in (
+        "explain the minesweeper algorithm",
+        "read the minesweeper wikipedia page",
+        "what is minesweeper",
+        "post hello world on x",
+        "",
+    ):
+        assert Minesweeper.understands(text, today) is False, text
+
+
+def test_wants_a_win_only_on_an_outcome_instruction():
+    assert _wants_a_win("play a game of minesweeper until you win") is True
+    assert _wants_a_win("play minesweeper and beat it") is True
+    assert _wants_a_win("play minesweeper") is False
+    assert _wants_a_win("") is False
+
+
+def test_until_you_win_retries_a_lost_board(monkeypatch):
+    """A loss is the reason to play on, not the run's result — up to the cap.
+
+    The live ask was "play a game of minesweeper until you win". Before this,
+    the first lost board ended the run and reported the loss, which is not what
+    the instruction asked for; and because a Beginner board can genuinely end in
+    a guess, one loss proves nothing about the recipe.
+    """
+    recipe = _recipe()
+    boards: list[dict] = []
+
+    class _View:
+        blocked = False
+        cells_ready = True
+        n_cells = 81
+
+    async def _start(page, url=None):
+        return _View()
+
+    async def _play(page, view, log, game_no, max_clicks):
+        # Lose the first two boards, win the third.
+        won = len(boards) == 2
+        boards.append({"outcome": "won" if won else "lost"})
+        return boards[-1]
+
+    monkeypatch.setattr("browser_agent.recipes.minesweeper.start_beginner", _start)
+    monkeypatch.setattr(recipe, "_play_game", _play)
+
+    class _Session:
+        activity = Activity()
+
+        async def page(self):
+            return object()
+
+    out = asyncio.run(
+        recipe.run(_Session(), {"task": "play a game of minesweeper until you win"})
+    )
+
+    assert len(boards) == 3, "a lost board did not lead to another board"
+    assert out["wins"] == 1
+
+
+def test_a_plain_play_still_stops_at_the_first_loss(monkeypatch):
+    """The retry is prose-driven, so it must not change the default behaviour."""
+    recipe = _recipe()
+    boards: list[dict] = []
+
+    class _View:
+        blocked = False
+        cells_ready = True
+        n_cells = 81
+
+    async def _start(page, url=None):
+        return _View()
+
+    async def _play(page, view, log, game_no, max_clicks):
+        boards.append({"outcome": "lost"})
+        return boards[-1]
+
+    monkeypatch.setattr("browser_agent.recipes.minesweeper.start_beginner", _start)
+    monkeypatch.setattr(recipe, "_play_game", _play)
+
+    class _Session:
+        activity = Activity()
+
+        async def page(self):
+            return object()
+
+    out = asyncio.run(recipe.run(_Session(), {"task": "play minesweeper"}))
+
+    assert len(boards) == 1
+    assert out["wins"] == 0
 
 
 def test_activity_entries_are_written_through_the_session_log():

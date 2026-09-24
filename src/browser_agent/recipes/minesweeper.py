@@ -21,6 +21,8 @@ The division of labour this recipe exists to prove:
 from __future__ import annotations
 
 import logging
+import re
+from datetime import date
 from typing import Any
 
 from ..activity import activity_of
@@ -45,6 +47,14 @@ log = logging.getLogger(__name__)
 #: couple is exactly the interaction volume the site bans for.
 DEFAULT_GAMES = 1
 
+#: Boards to play when the instruction says "until you win": losses are retried
+#: rather than reported, so a run keeps going until a win or this budget. Three
+#: is the same ceiling ``run()`` has always enforced on an explicit ``games``
+#: payload — the site bans for interaction volume, and a Beginner game is ~40
+#: clicks, so a long replay streak is exactly what gets the egress IP blocked.
+#: Reaching it with no win is reported as a loss, never as a win.
+WIN_GAMES = 3
+
 #: The board's URL. Overridable because minesweeper.online moves its entry path
 #: between game modes, and a moved URL must not be a code deploy.
 DEFAULT_ENTRY_URL = "https://minesweeper.online/new-game"
@@ -52,6 +62,44 @@ DEFAULT_ENTRY_URL = "https://minesweeper.online/new-game"
 #: A ceiling on clicks per game, so a solver bug cannot turn into a click storm.
 #: A Beginner board needs ~40; 200 is generous headroom, not a target.
 MAX_CLICKS_PER_GAME = 200
+
+#: "Play minesweeper" in the operator's own words. The router's contract is that
+#: a claim means "this recipe can do it completely" — and for a Beginner board
+#: that is true: the solver plays it with no model in the loop. Until this
+#: predicate existed (2026-09-23) no sentence could reach the recipe at all; the
+#: UI's dropdown was the only way in, so "play a game of minesweeper until you
+#: win" went to plan.task, planned a Google search, and burned three attempts and
+#: 24 agent steps on a site it had picked for itself.
+_MINESWEEPER_RE = re.compile(r"\bminesweeper\b|\bmine ?sweeper\b", re.IGNORECASE)
+
+
+def _wants_a_win(text: str) -> bool:
+    """Whether the instruction asks to keep playing until a board is won.
+
+    Narrow on purpose: "until you win", "until it's won", "and win". A plain
+    "play minesweeper" plays one board, which is what the recipe has always done
+    and what the site's own ban budget allows.
+    """
+    return bool(re.search(r"\bwin\b|\bbeat\b", text or "", re.IGNORECASE))
+
+
+#: A sentence that names the game for a reason other than playing it. Kept tiny
+#: and literal: these are the forms that actually appeared, and a broader net
+#: would start refusing real plays.
+_NOT_A_PLAY_RE = re.compile(
+    r"\b(explain|describe|what is|what's|how does|how do|read about|wikipedia"
+    r"|source code|documentation|install|implement|write|solve this|help me "
+    r"understand)\b",
+    re.IGNORECASE,
+)
+
+
+#: A verb that makes the sentence an instruction to play. "play", "game",
+#: "win", or an explicit start.
+_PLAY_RE = re.compile(
+    r"\b(play|playing|game|win|won|start|begin|beating?|beat)\b",
+    re.IGNORECASE,
+)
 
 #: Ambiguous frontier cells the noul duel needs. Exactly two, because the
 #: question is binary and the measured framing is the solver's top pick against
@@ -79,6 +127,23 @@ class Minesweeper:
     def entry_url(self) -> str:
         return cfg("minesweeper.play", "entry_url", DEFAULT_ENTRY_URL)
 
+    @classmethod
+    def understands(cls, text: str, today: date) -> bool:
+        """Whether the instruction is a minesweeper game this recipe can play.
+
+        Strict in the one way that matters: it claims only a *game*, never a
+        sentence that merely mentions the word — "explain the minesweeper
+        algorithm" and "read the minesweeper Wikipedia page" are not plays, and
+        claiming them would hand a reading task to a click loop. A play verb (or
+        the word "game") has to be present alongside the game's name.
+        """
+        low = text or ""
+        if not _MINESWEEPER_RE.search(low):
+            return False
+        if _NOT_A_PLAY_RE.search(low):
+            return False
+        return bool(_PLAY_RE.search(low))
+
     @property
     def _pace(self) -> Pace:
         """The pacing, with the operator's overrides applied over the defaults.
@@ -96,8 +161,16 @@ class Minesweeper:
         )
 
     async def run(self, session: BrowserSession, payload: dict[str, Any]) -> dict[str, Any]:
-        games = int(payload.get("games") or DEFAULT_GAMES)
-        games = max(1, min(games, 3))
+        instruction = str(payload.get("task") or payload.get("text") or "")
+        # "Play a game of minesweeper until you win" is an outcome, not a count:
+        # a lost board is retried, up to WIN_GAMES, because a single loss is a
+        # legitimate way for a Beginner board to end and reporting it as the run's
+        # result is not what the operator asked for. An explicit ``games`` payload
+        # still wins over the prose, so a scheduled run that says "3" means 3.
+        until_win = _wants_a_win(instruction)
+        default_games = WIN_GAMES if until_win else DEFAULT_GAMES
+        games = int(payload.get("games") or default_games)
+        games = max(1, min(games, WIN_GAMES))
         max_clicks = cfg("minesweeper.play", "max_clicks", MAX_CLICKS_PER_GAME)
         log_ = activity_of(session)
 
@@ -123,12 +196,21 @@ class Minesweeper:
                     f"browser's user agent and the egress"
                 )
 
-            results.append(await self._play_game(page, view, log_, game_no, max_clicks))
+            outcome = await self._play_game(page, view, log_, game_no, max_clicks)
+            results.append(outcome)
 
-            if results[-1]["outcome"] == "lost":
-                # A loss is a legitimate outcome, but playing on after one
-                # spends clicks on nothing. Stop the run and report.
+            if outcome["outcome"] == "won":
                 break
+            if outcome["outcome"] == "lost":
+                if not until_win:
+                    # A loss is a legitimate outcome, but playing on after one
+                    # spends clicks on nothing. Stop the run and report.
+                    break
+                # "Until you win": a loss is the reason to play another board,
+                # not the result. The click budget (WIN_GAMES) is what stops a
+                # losing streak; reaching it is reported as the loss it is.
+                if game_no < games:
+                    log_.note("info", f"game {game_no} lost — playing another board")
 
         wins = sum(1 for r in results if r["outcome"] == "won")
         log_.note("info", f"done: {wins}/{len(results)} won")

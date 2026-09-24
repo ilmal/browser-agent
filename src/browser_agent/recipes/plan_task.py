@@ -79,8 +79,15 @@ class PlanTask:
         if not task_text:
             raise PlanRejected("plan.task needs a 'task' in the payload")
 
+        # The thread brief, when this attempt is an "iterate on it" on a thread
+        # that has already tried: what each earlier attempt did and how it ended.
+        # The runner writes it (tasks.py retry/resubmit, api.py _say_to_archived)
+        # and the agent path has always read it; the planner did not, so a retry
+        # re-decided everything from zero. That is the bug behind "not remembering
+        # between prompts" (2026-09-23).
+        history = str(payload.get("history") or "").strip()
         raw = await self._planner.plan(
-            task_text, prompt=cfg("plan.task", "planner_prompt", PROMPT)
+            task_text, prompt=cfg("plan.task", "planner_prompt", PROMPT), history=history
         )
         # Repair before rejecting, not after: a plan that fails ``_check`` on one
         # step is a model-quality hiccup, and every step it got right is work the
@@ -93,7 +100,7 @@ class PlanTask:
             plan = parse_plan(raw, max_steps=self._settings.planner_max_steps)
         except PlanRejected as exc:
             repaired = await self._planner.plan(
-                task_text, prompt=_repair_prompt(PROMPT, raw, exc)
+                task_text, prompt=_repair_prompt(PROMPT, raw, exc), history=history
             )
             plan = parse_plan(repaired, max_steps=self._settings.planner_max_steps)
         log.info(

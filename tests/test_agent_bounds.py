@@ -152,6 +152,29 @@ async def test_run_is_not_unbounded_by_default(patched):
 
 
 @pytest.mark.asyncio
+async def test_a_run_ending_on_a_browser_error_page_is_not_success(patched, monkeypatch):
+    """The page is the ground truth, not the agent's closing sentence.
+
+    Prod 2026-09-23 recorded a run marked DONE with ``result.url:
+    chrome-error://chromewebdata/``: the agent's ``final_result()`` was non-empty
+    and ``is_successful()`` was None, so the outcome was never questioned. A
+    Chrome error document cannot be a completed task, and reporting one wastes
+    the operator's trust in the archive.
+    """
+
+    class _ErrorPage:
+        url = "chrome-error://chromewebdata/"
+
+    class _ErrorSession(_Session):
+        async def page(self):
+            return _ErrorPage()
+
+    runner = agent_mod.make_agent_runner(patched)
+    with pytest.raises(RuntimeError, match="browser error page"):
+        await runner(_ErrorSession(), "https://example.com", {"goal": "scroll"})
+
+
+@pytest.mark.asyncio
 async def test_a_hung_run_ends_instead_of_blocking_the_queue(patched, monkeypatch):
     """A step that never returns must surface as a failure, not wedge the worker."""
     monkeypatch.setenv("AGENT_TIMEOUT_S", "1")

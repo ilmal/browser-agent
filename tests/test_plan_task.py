@@ -129,10 +129,17 @@ class FakePlanner:
         #: The system prompt each call was made with, so a test can assert the
         #: operator's ``planner_prompt`` override reached the model.
         self.prompts: list[str | None] = []
+        #: The thread brief each call was made with. Kept separate from
+        #: ``prompts`` because the two reach the model by different routes and a
+        #: test should be able to tell "the brief was sent" from "the prompt was
+        #: overridden" — the bug this guards against sent neither.
+        self.histories: list[str] = []
 
-    async def plan(self, task: str, *, prompt: str | None = None) -> str:
+    async def plan(self, task: str, *, prompt: str | None = None,
+                   history: str = "") -> str:
         self.calls.append(task)
         self.prompts.append(prompt)
+        self.histories.append(history)
         if self._fail:
             raise PlannerUnavailable("planner down")
         return json.dumps(self._plan)
@@ -291,9 +298,11 @@ async def test_fenced_planner_output_is_accepted(runner_factory, site):
     assert "```" in wrapped  # the chatty-model case under test
 
     class FencedPlanner(FakePlanner):
-        async def plan(self, task: str, *, prompt: str | None = None) -> str:
+        async def plan(self, task: str, *, prompt: str | None = None,
+                       history: str = "") -> str:
             self.calls.append(task)
             self.prompts.append(prompt)
+            self.histories.append(history)
             return wrapped
 
     runner = make(planner=FencedPlanner(plan_dict), laya=FakeLaya())
@@ -351,9 +360,11 @@ class RepairPlanner(FakePlanner):
         self._good = good
         self.answers = 0
 
-    async def plan(self, task: str, *, prompt: str | None = None) -> str:
+    async def plan(self, task: str, *, prompt: str | None = None,
+                   history: str = "") -> str:
         self.calls.append(task)
         self.prompts.append(prompt)
+        self.histories.append(history)
         self.answers += 1
         return json.dumps(self._bad if self.answers == 1 else self._good)
 
@@ -442,6 +453,53 @@ async def test_ui_text_field_works_as_task_alias(runner_factory, site):
     done = await _drain(runner, task.id)
     assert done.status is TaskStatus.DONE
     assert done.used_agent is False
+
+
+async def test_the_thread_brief_reaches_the_planner(runner_factory, site):
+    """The bug behind "not remembering between prompts" (2026-09-23).
+
+    ``retry``/``resubmit``/``_say_to_archived`` all write ``payload["history"]``,
+    and the agent path has always read it — but ``plan.task`` never passed it on,
+    so an "iterate on it" re-planned from scratch and re-decided what the
+    previous attempt had already settled. The live thread re-picked its game site
+    on every attempt and ended on the wrong one.
+    """
+    make, site_url = runner_factory
+    planner = FakePlanner(_happy_plan(site_url))
+    runner = make(planner=planner, laya=FakeLaya(), agent_runner=None)
+    brief = "- attempt 1 (plan.task) ended failed: step 4 failed: no element picked"
+    task = runner.submit("plan.task", {"task": "fill the form", "history": brief})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert planner.histories == [brief]
+
+
+async def test_a_first_attempt_plans_with_no_brief(runner_factory, site):
+    """No earlier attempt means no brief — and no empty section in the prompt."""
+    make, site_url = runner_factory
+    planner = FakePlanner(_happy_plan(site_url))
+    runner = make(planner=planner, laya=FakeLaya(), agent_runner=None)
+    task = runner.submit("plan.task", {"task": "fill the form"})
+    await _drain(runner, task.id)
+
+    assert planner.histories == [""]
+
+
+async def test_the_repair_call_also_carries_the_brief(runner_factory, site):
+    """The repair is a second planning attempt, so it needs the same context as
+    the first — otherwise the corrected plan is re-decided without it."""
+    make, _site = runner_factory
+    good = _happy_plan(_site)
+    bad = {"entry_url": "not-a-url", "steps": []}
+    planner = RepairPlanner(bad, good)
+    runner = make(planner=planner, laya=FakeLaya(), agent_runner=None)
+    brief = "- attempt 1 (plan.task) ended failed: no such element"
+    task = runner.submit("plan.task", {"task": "fill the form", "history": brief})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert planner.histories == [brief, brief]
 
 
 async def test_step_failure_briefs_agent_with_original_task(runner_factory, site):

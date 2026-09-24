@@ -66,34 +66,51 @@ class PlannerClient:
             "Authorization": f"Bearer {self.settings.llm_api_key}",
         }
 
-    async def plan(self, task: str, *, prompt: str | None = None) -> str:
+    async def plan(self, task: str, *, prompt: str | None = None,
+                   history: str = "") -> str:
         """One planner call, retried once on transport failure.
 
         ``prompt`` overrides the system message, which is how ``plan.task``'s
         operator-editable ``planner_prompt`` reaches the model. Omitted, the
         module literal is used, so every existing caller is unchanged.
 
+        ``history`` is the thread brief: what earlier attempts at this same task
+        tried and how each ended. It rides in the system message so the user turn
+        stays exactly the task text.
+
         Raises PlannerUnavailable after the retry also fails — the caller
         falls back to the agent, as designed.
         """
         try:
-            return await self._plan_once(task, prompt=prompt)
+            return await self._plan_once(task, prompt=prompt, history=history)
         except PlannerUnavailable as exc:
             # An llm-service roll (deploy/restart) leaves a pod that accepts
             # the connection but never answers; seen in prod 2026-09-21, where
             # the transient skipped the whole fast path for the task. One
             # bounded retry costs at most one extra timeout, then falls back.
             log.warning("planner call failed (%s); retrying once", exc)
-            return await self._plan_once(task, prompt=prompt)
+            return await self._plan_once(task, prompt=prompt, history=history)
 
-    async def _plan_once(self, task: str, *, prompt: str | None = None) -> str:
+    async def _plan_once(self, task: str, *, prompt: str | None = None,
+                         history: str = "") -> str:
         if not self.enabled:
             raise PlannerUnavailable("planner is not configured (LLM_ENABLED or LLM_API_KEY)")
+
+        system = prompt or PROMPT
+        # The brief goes in the SYSTEM message, appended after the operator's
+        # prompt. Until 2026-09-23 the planner was handed the task text alone, so
+        # an "iterate on it" retry re-planned from scratch and discarded what the
+        # earlier attempt had already established — the live thread that tried
+        # three times to reach a minesweeper site, re-deciding the site every
+        # time and ending on a tic-tac-toe page. The agent path always read the
+        # brief (agent.py); this is the plan path finally doing the same.
+        if history:
+            system = f"{system}\n\n{history}"
 
         payload = {
             "model": self.settings.planner_model,
             "messages": [
-                {"role": "system", "content": prompt or PROMPT},
+                {"role": "system", "content": system},
                 {"role": "user", "content": task},
             ],
             "temperature": 0,

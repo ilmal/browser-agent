@@ -29,11 +29,35 @@ def test_a_recipe_that_claims_the_text_is_left_alone():
 def test_an_unrelated_instruction_is_not_hijacked():
     for text in (
         "post hello world on x",
-        "play minesweeper",
         "report the page title",
         "",
     ):
         assert route(text, "plan.task", today=TODAY) == "plan.task"
+
+
+def test_playing_minesweeper_routes_to_the_recipe_that_can_play_it():
+    """The live failure this guards (2026-09-23).
+
+    "play a game of minesweeper until you win" reached ``plan.task`` — the
+    dropdown's default — because no predicate claimed it. The plan searched
+    Google, picked tic-tac-toe, and the agent spent 24 steps on a page the
+    deterministic solver was already able to beat. The recipe existed the whole
+    time; nothing routed to it.
+    """
+    assert route("play a game of minesweeper until you win", "plan.task",
+                 today=TODAY) == "minesweeper.play"
+    assert route("play minesweeper", "plan.task", today=TODAY) == "minesweeper.play"
+
+
+def test_naming_minesweeper_without_playing_it_is_not_a_play():
+    """A reading task must not be handed to a click loop."""
+    for text in (
+        "explain the minesweeper algorithm",
+        "read the minesweeper wikipedia page",
+        "what is minesweeper",
+        "help me understand minesweeper source code",
+    ):
+        assert route(text, "plan.task", today=TODAY) == "plan.task", text
 
 
 def test_partial_matches_are_not_claimed():

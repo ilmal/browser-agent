@@ -532,8 +532,23 @@ async function api(path, opts = {}) {
     if (t) { token = t; localStorage.setItem("ba_token", t); return api(path, opts); }
     throw new Error("unauthorized");
   }
-  if (!res.ok) throw new Error((await res.text()).slice(0, 300));
+  if (!res.ok) throw new Error(await errorText(res));
   return res.json();
+}
+
+// A failed request must never put a raw body into the transcript. The API
+// answers FastAPI's {"detail": "..."} shape, and slicing that string straight
+// into the thread is how "no such task" reached the operator as literal JSON
+// (2026-09-23). Pull the detail out when it is there; fall back to a short,
+// status-bearing sentence otherwise.
+async function errorText(res) {
+  let detail = "";
+  try {
+    const body = await res.json();
+    detail = typeof body?.detail === "string" ? body.detail
+      : body?.detail ? JSON.stringify(body.detail) : "";
+  } catch (_) { /* not JSON — fall through to the status line */ }
+  return (detail || `request failed (${res.status} ${res.statusText})`).slice(0, 300);
 }
 
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g,
@@ -1077,8 +1092,16 @@ function renderThread() {
 // is what once made this page unusable: every poll replaced the textarea,
 // which dropped the draft, the caret and the selection.
 
+// One send at a time. Both the button and Enter call this, and neither had a
+// guard, so a click plus a keypress — or an impatient double-click while the
+// POST was in flight — queued the same instruction twice: two attempts in the
+// thread, the second one re-running the first's work. The button is disabled
+// for the duration, which is also the visible signal that it is working.
+let threadSending = false;
+
 async function sendThread() {
-  const el = $("thread-text"), err = $("composer-err");
+  const el = $("thread-text"), err = $("composer-err"), send = $("thread-send");
+  if (threadSending) return;
   const text = el.value.trim();
   err.classList.add("hidden");
   if (!text) { el.focus(); return; }
@@ -1088,6 +1111,8 @@ async function sendThread() {
     $("sec-run").scrollIntoView({ behavior: "smooth", block: "start" });
     return;
   }
+  threadSending = true;
+  send.disabled = true;
   try {
     const res = await api(`/api/tasks/${threadData.attempts[threadData.attempts.length - 1].id}/say`,
       { method: "POST", body: JSON.stringify({ text }) });
@@ -1101,6 +1126,9 @@ async function sendThread() {
   } catch (e) {
     err.textContent = String(e.message || e).slice(0, 300);
     err.classList.remove("hidden");
+  } finally {
+    threadSending = false;
+    send.disabled = false;
   }
 }
 
@@ -1321,19 +1349,31 @@ async function pollFeed() {
 
 $("refresh").onclick = () => poll();
 
-$("run").onclick = () => act(async () => {
-  const p = {};
-  const t = $("text").value.trim();
-  if (t) p.text = t;
-  const url = $("taskUrl").value.trim();
-  if (url) p.url = url;
-  const extra = $("extra").value.trim();
-  if (extra) Object.assign(p, JSON.parse(extra));
-  const res = await api("/api/tasks", { method: "POST",
-    body: JSON.stringify({ recipe: $("recipe").value, payload: p }) });
-  $("text").value = ""; $("extra").value = "";
-  if (res && res.id) openThread(res.thread_id || res.id, { force: true });
-});
+// Same in-flight guard as the composer: this is the primary "start work"
+// button, and a double-click queued two identical runs — the queue has ONE
+// worker, so the second ran after the first, against the same site.
+$("run").onclick = () => {
+  const btn = $("run");
+  if (btn.disabled) return;
+  btn.disabled = true;
+  return act(async () => {
+    try {
+      const p = {};
+      const t = $("text").value.trim();
+      if (t) p.text = t;
+      const url = $("taskUrl").value.trim();
+      if (url) p.url = url;
+      const extra = $("extra").value.trim();
+      if (extra) Object.assign(p, JSON.parse(extra));
+      const res = await api("/api/tasks", { method: "POST",
+        body: JSON.stringify({ recipe: $("recipe").value, payload: p }) });
+      $("text").value = ""; $("extra").value = "";
+      if (res && res.id) openThread(res.thread_id || res.id, { force: true });
+    } finally {
+      btn.disabled = false;
+    }
+  });
+};
 
 $("recipe").onchange = renderRunGate;
 $("taskUrl").oninput = renderRunGate;

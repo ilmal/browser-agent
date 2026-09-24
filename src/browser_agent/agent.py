@@ -318,6 +318,18 @@ def make_agent_runner(settings: Settings):
 
         result = history.final_result()
         if result is not None:
+            # The page is the ground truth, not the agent's closing sentence.
+            # A run that ends on Chrome's own error document reported DONE with
+            # ``result.url: chrome-error://chromewebdata/`` in prod (2026-09-23):
+            # the agent's final answer was a non-empty string and
+            # ``is_successful()`` was None, so the "never silently report
+            # success" rule below was never consulted. A Chrome error page
+            # cannot be a completed task, whatever the model wrote.
+            if page.url.startswith("chrome-error://"):
+                raise RuntimeError(
+                    "agent ended on a browser error page "
+                    f"({page.url}); the last navigation failed"
+                )
             log.info("agent fallback finished")
             out: dict[str, Any] = {"agent_result": str(result), "url": page.url}
             # The recipe half of Nils's idea: a run that succeeded is the only
