@@ -375,6 +375,25 @@ class TestRefreshAndSettle:
         asyncio.run(runner.tick())
         assert len(farm.members[0].outcome) <= farms.OUTCOME_CHARS
 
+    def test_outcome_reports_the_answer_not_the_result_envelope(self, tmp_path):
+        """A done run's result is an envelope; the room must show the answer.
+
+        Same bug class as the bot's own "Done: {"plan": …}" note (0b05abb): the
+        operator wants the one line, not the recipe's whole result dict.
+        """
+        store, farm = self._started(tmp_path)
+
+        async def get_state(profile):
+            return {"tasks": [{"id": "t1", "status": "done", "result": {
+                "plan": {"entry_url": "https://example.com", "steps": []},
+                "extracts": {"heading": "Example Domain"}}}]}
+
+        runner = _make_runner(store, now=lambda: 100.0, get_state=get_state)
+        asyncio.run(runner.tick())
+        m = farm.members[0]
+        assert m.outcome == "heading: Example Domain"
+        assert "entry_url" not in m.outcome
+
     def test_queued_maps_to_started_running_to_running(self, tmp_path):
         store, farm = self._started(tmp_path)
         states = iter([

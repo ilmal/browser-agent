@@ -293,8 +293,14 @@ def _outcome_snippet(row: dict[str, Any]) -> str:
     A done run reports its result; a failed or blocked one reports why — that
     distinction is the operator's next action (nothing vs. go look at noVNC).
     """
+    from .tasks import _answer_from  # lazy: hub imports farms before tasks
+
     if row.get("status") == "done":
-        text = row.get("result") or row.get("detail") or ""
+        result = row.get("result")
+        # The result IS an envelope (``{"plan": …, "extracts": …}``); the answer
+        # is inside it. Rendering the raw dict is the same bug that made a
+        # finished bot say "Done: {"plan": {…}}" — see tasks._speak_outcome.
+        text = (_answer_from(result) if result else "") or row.get("detail") or ""
     else:
         text = row.get("detail") or ""
     return _clean(text, OUTCOME_CHARS)
