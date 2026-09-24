@@ -149,7 +149,13 @@ def _task_text(task: Task) -> str:
 #: returns a small envelope (``{"plan": ..., "extracts": {...}, "final_url":
 #: ...}``) and dumping that into the thread buries the one line the operator
 #: wants under a page of JSON — the same mistake as rendering a raw HTTP body.
-_ANSWER_KEYS = ("answer", "result", "text", "value", "summary")
+#:
+#: This list must name the key of EVERY envelope the runner can produce, because
+#: the fallback below joins every scalar with its label — so a key that is
+#: missing here does not merely lose, it makes the message *worse* than the raw
+#: JSON was. ``agent_result`` (``agent.py``) was missing exactly once and the note
+#: read ``Done: agent_result: The page at …`` until it was added.
+_ANSWER_KEYS = ("answer", "result", "agent_result", "text", "value", "summary")
 
 
 def _answer_from(result: Any) -> str:
@@ -179,6 +185,23 @@ def _answer_from(result: Any) -> str:
     return json.dumps(result, ensure_ascii=False, default=str)
 
 
+#: A thread note is a message, not a document. Long enough for a real answer,
+#: short enough that it never dominates the panel.
+_NOTE_MAX = 300
+
+
+def _cap(text: str, limit: int = _NOTE_MAX) -> str:
+    """Trim a note to ``limit``, marking the cut.
+
+    The bare ``[:300]`` this replaced cut mid-word with no sign anything was
+    dropped, so a long answer read as a garbled one — the operator could not
+    tell a truncated answer from a broken one.
+    """
+    if len(text) <= limit:
+        return text
+    return text[: limit - 1].rstrip() + "…"
+
+
 def _outcome_text(task: Task) -> str | None:
     """The bot's one-line report for a finished attempt.
 
@@ -201,7 +224,7 @@ def _outcome_text(task: Task) -> str | None:
         text = f"Failed: {detail}"
     else:
         return None
-    return " ".join(text.split())[:300]
+    return _cap(" ".join(text.split()))
 
 _REGISTRY: dict[str, Recipe] = {}
 

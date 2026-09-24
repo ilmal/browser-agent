@@ -110,11 +110,22 @@ def test_done_text_is_capped():
     t = _task(TaskStatus.DONE, result={"blob": "x" * 5000})
     out = _outcome_text(t)
     assert len(out) <= 300 and out.startswith("Done:")
+    # The cut is marked: a bare [:300] left a long answer looking garbled.
+    assert out.endswith("…")
 
 
 def test_done_text_reports_an_answer_key_over_the_envelope():
     t = _task(TaskStatus.DONE, result={"answer": "yes", "url": "https://x.se"}, detail="ok")
     assert _outcome_text(t) == "Done: yes"
+
+
+def test_done_text_reads_the_agent_result_without_its_label():
+    # The shape agent.py actually returns. `agent_result` was missing from
+    # _ANSWER_KEYS, so the fallback joined the label to the value and the note
+    # read "Done: agent_result: The page at … https://example.com/".
+    result = {"agent_result": "The page is a documentation placeholder.", "url": "https://example.com/"}
+    t = _task(TaskStatus.DONE, result=result, detail="agent succeeded")
+    assert _outcome_text(t) == "Done: The page is a documentation placeholder."
 
 
 def test_blocked_text_asks_for_a_human():
