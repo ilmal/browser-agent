@@ -33,6 +33,30 @@ from .tasks import iter_recipes
 log = logging.getLogger(__name__)
 
 
+def claim(text: str, *, today: date | None = None) -> str | None:
+    """The first recipe whose ``understands`` claims the text, or None.
+
+    This is ``route`` without a fallback: a name comes back **only** when some
+    hand-authored predicate actually claimed the sentence, which is the
+    distinction ``route``'s return value cannot make (it returns ``requested``
+    both when that recipe claims and when nothing does).
+    """
+    day = today or date.today()
+    for recipe in iter_recipes():
+        claims = getattr(recipe, "understands", None)
+        if not callable(claims):
+            continue
+        try:
+            if claims(text, day):
+                return recipe.name
+        except Exception:
+            # A predicate is third-party-ish code (a stored recipe could grow
+            # one). A recipe that cannot decide must not cost the run: skip it
+            # and let the next claimant, or the requested recipe, answer.
+            log.exception("router: %s.understands() raised; skipping", recipe.name)
+    return None
+
+
 def route(
     text: str,
     requested: str,
@@ -60,22 +84,13 @@ def route(
     if not text:
         return requested
     day = today or date.today()
-    for recipe in iter_recipes():
-        claims = getattr(recipe, "understands", None)
-        if not callable(claims):
-            continue
-        try:
-            if claims(text, day):
-                if recipe.name != requested:
-                    log.info(
-                        "router: %r -> %s (asked for %s)", text[:80], recipe.name, requested
-                    )
-                return recipe.name
-        except Exception:
-            # A predicate is third-party-ish code (a stored recipe could grow
-            # one). A recipe that cannot decide must not cost the run: skip it
-            # and let the next claimant, or the requested recipe, answer.
-            log.exception("router: %s.understands() raised; skipping", recipe.name)
+    found = claim(text, today=day)
+    if found is not None:
+        if found != requested:
+            log.info(
+                "router: %r -> %s (asked for %s)", text[:80], found, requested
+            )
+        return found
     # No hand-authored recipe claimed it. A learned one may, but only for a
     # request the operator did not aim at a specific deterministic recipe: if
     # they picked one by name, that pick is the instruction.

@@ -217,6 +217,44 @@ async def test_a_claiming_message_reroutes_on_an_archived_thread_too(api_mod):
 
 
 @pytest.mark.asyncio
+async def test_a_play_ask_on_a_minesweeper_thread_replays_the_recipe(api_mod):
+    """The live regression 2026-09-25, second half: the thread was already minesweeper.play.
+
+    route() returns ``requested`` both when that recipe claims the text and when
+    nothing does, so the say fell through to the escalate-to-agent rule and the
+    ask "play a game of minesweeper on a site you can reach" was handed to the
+    freeform agent — which browsed the open web and stalled. A deterministic
+    recipe asked (again) to do its own job re-runs itself; escalation is for
+    text no recipe claims.
+    """
+    task = _task(api_mod, payload={}, recipe="minesweeper.play")
+    out = await _say(api_mod, task, "play a game of minesweeper on a site you can reach")
+
+    nxt = out["task"]
+    assert nxt["recipe"] == "minesweeper.play", "the recipe's own ask was escalated away"
+    assert nxt["attempt"] == 2
+    assert nxt["thread_id"] == task.thread_id
+
+
+@pytest.mark.asyncio
+async def test_an_override_no_recipe_claims_still_escalates(api_mod):
+    """The other half of the same rule: "don't use that site" is not a play.
+
+    No recipe claims it, so the escalate-to-agent rule must still fire with the
+    operator's URL — the self-claim branch must not swallow overrides.
+    """
+    from browser_agent.tasks import AGENT_RECIPE
+
+    task = _task(api_mod, payload={"url": "https://minesweeper.online/"},
+                 recipe="minesweeper.play")
+    out = await _say(api_mod, task, "go to https://duckduckgo.com instead")
+
+    nxt = out["task"]
+    assert nxt["recipe"] == AGENT_RECIPE
+    assert nxt["payload"]["url"] == "https://duckduckgo.com"
+
+
+@pytest.mark.asyncio
 async def test_a_message_that_names_no_url_resumes_the_last_attempt(api_mod):
     """"carry on" is not a redirect; it must not blank the start URL."""
     task = _task(

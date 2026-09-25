@@ -24,7 +24,7 @@ from .agent import make_agent_runner
 from .browser import BrowserSession, profile_exists
 from .config import Settings, load_settings
 from .escalation import detect_challenge
-from .router import learned_match, route
+from .router import claim, learned_match, route
 from .runstore import RunStore
 from .scheduler import ScheduleStore
 from .tasks import (
@@ -567,7 +567,7 @@ class SayRequest(BaseModel):
 
 
 async def _claimed_recipe(text: str, thread_recipe: str) -> str | None:
-    """The recipe a fresh say-instruction claims outright, when it differs.
+    """The recipe a fresh say-instruction should run, or None for thread logic.
 
     A message typed into a finished thread is still a new instruction, and the
     router treats it exactly like one. "play a game of minesweeper on a site you
@@ -577,13 +577,19 @@ async def _claimed_recipe(text: str, thread_recipe: str) -> str | None:
     router, not the thread the box happened to be open on, decides what a fresh
     instruction means; create_task routes prose by the same rule.
 
-    ``None`` means nothing new claims the text and the caller's own thread logic
-    applies — including the escalate-to-agent rule for recipes that read no
-    instruction, which is what keeps "don't use that site" working.
+    The thread's *own* recipe counts as a claimant too: re-asked to do its job,
+    a deterministic recipe re-runs itself. Measured live 2026-09-25, "play a
+    game of minesweeper..." typed into a ``minesweeper.play`` thread escalated
+    to the freeform agent instead — route() returns ``requested`` both when that
+    recipe claims and when nothing does, so only a direct claim check can tell
+    a re-play from an override. The escalate rule below stays for text no
+    recipe claims ("don't use that site"), which is the case it exists for.
     """
     matched = await learned_match(text, thread_recipe, settings)
     claimed = route(text, thread_recipe, learned_match=matched)
-    return None if claimed == thread_recipe else claimed
+    if claimed != thread_recipe:
+        return claimed
+    return thread_recipe if claim(text) == thread_recipe else None
 
 
 @app.get("/api/runs", dependencies=[Depends(require_token)])
