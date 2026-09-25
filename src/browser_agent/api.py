@@ -566,6 +566,26 @@ class SayRequest(BaseModel):
     kind: str = "instruction"
 
 
+async def _claimed_recipe(text: str, thread_recipe: str) -> str | None:
+    """The recipe a fresh say-instruction claims outright, when it differs.
+
+    A message typed into a finished thread is still a new instruction, and the
+    router treats it exactly like one. "play a game of minesweeper on a site you
+    can reach" names a deterministic recipe's whole job — but typed into a
+    thread whose recipe was a refused freeform attempt, it inherited
+    ``agent.task`` and died on the no-URL rule (measured live 2026-09-25). The
+    router, not the thread the box happened to be open on, decides what a fresh
+    instruction means; create_task routes prose by the same rule.
+
+    ``None`` means nothing new claims the text and the caller's own thread logic
+    applies — including the escalate-to-agent rule for recipes that read no
+    instruction, which is what keeps "don't use that site" working.
+    """
+    matched = await learned_match(text, thread_recipe, settings)
+    claimed = route(text, thread_recipe, learned_match=matched)
+    return None if claimed == thread_recipe else claimed
+
+
 @app.get("/api/runs", dependencies=[Depends(require_token)])
 async def list_runs(limit: int = 50, thread_id: str = "") -> dict[str, Any]:
     """The durable archive of finished runs, newest first.
@@ -674,6 +694,11 @@ async def say(task_id: str, req: SayRequest) -> dict[str, Any]:
 
     payload = {**task.payload, "task": text, "text": text, "goal": text}
 
+    claimed = await _claimed_recipe(text, task.recipe)
+    if claimed is not None:
+        nxt = runner.retry(task.id, payload=payload, recipe=claimed)
+        return {"task_id": nxt.id, "ran": True, "task": nxt.to_dict()}
+
     # A deterministic recipe reads no instruction: it does the same thing to the
     # same site however the operator words it, so "don't use that site" would be
     # recorded and then ignored, and the attempt would hit the same wall. Those
@@ -747,6 +772,17 @@ async def _say_to_archived(task_id: str, req: SayRequest) -> dict[str, Any]:
     history = _archived_brief(run.thread_id, run.created_at)
     if history:
         payload["history"] = history
+
+    claimed = await _claimed_recipe(text, run.recipe)
+    if claimed is not None:
+        nxt = runner.resubmit(
+            thread_id=run.thread_id,
+            attempt=run.attempt,
+            recipe=claimed,
+            payload=payload,
+            parent_id=run.task_id,
+        )
+        return {"task_id": nxt.id, "ran": True, "task": nxt.to_dict()}
 
     recipe = run.recipe
     if not _recipe_reads_payload(recipe):

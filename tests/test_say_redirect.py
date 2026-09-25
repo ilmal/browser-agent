@@ -182,6 +182,41 @@ async def test_a_recipe_that_reads_its_payload_keeps_its_own_recipe(api_mod):
 
 
 @pytest.mark.asyncio
+async def test_a_fresh_instruction_that_names_a_recipe_reroutes_to_it(api_mod):
+    """The live report 2026-09-25: a minesweeper ask typed into a dead thread.
+
+    The thread was a refused freeform attempt (agent.task, no url anywhere), so
+    inheriting its recipe meant the fresh instruction died on the same no-URL
+    rule — while the text itself is exactly what minesweeper.play understands.
+    The router decides what a new instruction means, not the thread the box
+    happened to be open on.
+    """
+    task = _task(api_mod, payload={}, recipe="agent.task")
+    out = await _say(api_mod, task, "play a game of minesweeper on a site you can reach")
+
+    nxt = out["task"]
+    assert nxt["recipe"] == "minesweeper.play"
+    assert nxt["thread_id"] == task.thread_id
+    assert nxt["attempt"] == 2
+
+
+@pytest.mark.asyncio
+async def test_a_claiming_message_reroutes_on_an_archived_thread_too(api_mod):
+    """Post-deploy the thread exists only as records; same rule either way."""
+    _archive(api_mod, recipe="agent.task", payload={})
+    assert api_mod.runner.tasks.get("old111") is None, "premise: no live task"
+
+    out = await api_mod.say(
+        "old111", api_mod.SayRequest(text="play a game of minesweeper on a site you can reach")
+    )
+
+    nxt = out["task"]
+    assert out["ran"] is True
+    assert nxt["recipe"] == "minesweeper.play"
+    assert nxt["thread_id"] == "t-old"
+
+
+@pytest.mark.asyncio
 async def test_a_message_that_names_no_url_resumes_the_last_attempt(api_mod):
     """"carry on" is not a redirect; it must not blank the start URL."""
     task = _task(
