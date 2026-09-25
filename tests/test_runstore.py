@@ -281,3 +281,29 @@ def test_the_brief_header_does_not_claim_the_list_is_failures():
     assert out.endswith("- attempt 1 (plan.task) ended done: plan succeeded")
     assert "build on one that worked" in out
     assert "already failed this way" not in out
+
+
+def test_corrections_lead_the_brief_and_can_stand_alone():
+    """Corrections override the original ask and every attempt, so they lead.
+
+    Measured 2026-09-25: the operator's "not on local host" reached the thread
+    record but not the next attempt's brief, and the bot played the local board
+    anyway. A correction that is buried under the history it overrides is not a
+    correction; and corrections-only must not emit a dangling attempts header.
+    """
+    from browser_agent.tasks import history_brief
+
+    assert history_brief([], corrections=["not on local host"]) \
+        .startswith("The operator later said")
+    assert "Earlier attempts" not in history_brief(
+        [], corrections=["not on local host"])
+    out = history_brief(
+        ["- attempt 1 (minesweeper.play) ended blocked: rate limited"],
+        corrections=["not on local host — find a real page to play on"],
+    )
+    assert out.index("standing corrections") < out.index("Earlier attempts"), (
+        "the override must be read before the history it overrides"
+    )
+    assert "not on local host — find a real page to play on" in out
+    # The plain, corrections-free form is unchanged.
+    assert history_brief(["- line"], corrections=[]).startswith("Earlier attempts")

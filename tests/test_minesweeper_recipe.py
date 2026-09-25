@@ -69,6 +69,9 @@ class ScriptedPage:
         # which is what a real page does once it is in a steady state.
         return self._payloads.pop(0) if len(self._payloads) > 1 else self._payloads[0]
 
+    async def goto(self, url, wait_until=None, timeout=None):
+        return None
+
     async def wait_for_timeout(self, ms: int) -> None:
         return None
 
@@ -133,9 +136,14 @@ class StubSettings:
     #: minesweeper guess costs one life, not the whole task.
     laya_game_min_confidence = 0.55
 
+    def __init__(self, data_root: Any = None) -> None:
+        self.data_root = str(data_root) if data_root else ""
 
-def _recipe(laya: FakeLaya | None = None) -> Minesweeper:
-    return Minesweeper(laya=laya or FakeLaya(pick_enabled=False), settings=StubSettings())
+
+def _recipe(laya: FakeLaya | None = None,
+            settings: StubSettings | None = None) -> Minesweeper:
+    return Minesweeper(laya=laya or FakeLaya(pick_enabled=False),
+                       settings=settings or StubSettings())
 
 
 def _view(grid: list[list[Any]], *, mines: int = 10, face: str = LIVE_FACE) -> GameView:
@@ -297,16 +305,206 @@ def test_tiebreak_does_not_ask_when_only_one_candidate_exists():
     assert laya.asked == []
 
 
-# ---- registration ----------------------------------------------------------
+# ---- registration, precedence, self-heal -----------------------------------
 
 
-def test_recipe_is_registered_under_its_documented_name():
+def test_recipe_is_registered_under_its_documented_name(monkeypatch):
+    from browser_agent.recipes import minesweeper as mod
     from browser_agent.tasks import get_recipe
 
+    monkeypatch.setattr(mod, "cfg", lambda *a, **k: "")
     recipe = get_recipe("minesweeper.play")
-    # The default site is the agent's own local board since minesweeper.online
-    # IP-blocked the pod's egress (2026-09-25); config overrides for live play.
-    assert recipe.entry_url == "http://localhost:8000/minesweeper.html"
+    # The default is the canonical real site. The operator rejected the local
+    # board as a play target ("not on local host — find a real page"), so a
+    # broken canonical site means self-heal, never a stand-in page.
+    assert recipe.entry_url == mod.DEFAULT_ENTRY_URL
+    assert recipe.entry_url == "https://minesweeper.online/new-game"
+
+
+def test_the_operators_config_override_beats_everything(monkeypatch, tmp_path):
+    from browser_agent import site_health
+    from browser_agent.recipes import minesweeper as mod
+
+    settings = StubSettings(data_root=tmp_path)
+    site_health.record(settings, "minesweeper.play",
+                       entry_url="https://found.example/play", note="discovered")
+    monkeypatch.setattr(mod, "cfg",
+                        lambda *a, **k: "https://operator.example/new-game")
+    recipe = _recipe(settings=settings)
+    assert recipe.entry_url == "https://operator.example/new-game"
+
+
+def test_what_the_bot_discovered_beats_the_built_in_default(monkeypatch, tmp_path):
+    from browser_agent import site_health
+    from browser_agent.recipes import minesweeper as mod
+
+    settings = StubSettings(data_root=tmp_path)
+    site_health.record(settings, "minesweeper.play",
+                       entry_url="https://found.example/play", note="discovered")
+    monkeypatch.setattr(mod, "cfg", lambda *a, **k: "")
+    recipe = _recipe(settings=settings)
+    assert recipe.entry_url == "https://found.example/play"
+
+
+def test_a_loopback_record_is_refused_even_when_written(monkeypatch, tmp_path):
+    """The operator excluded the agent's own board as a play target.
+
+    The write side refuses loopback already; this pins the read side too, so a
+    hand-edited or stale record can never smuggle localhost back in.
+    """
+    from browser_agent import site_health
+    from browser_agent.recipes import minesweeper as mod
+
+    settings = StubSettings(data_root=tmp_path)
+    site_health.record(settings, "minesweeper.play",
+                       entry_url="http://localhost:8000/minesweeper.html",
+                       note="should never be honoured")
+    assert site_health.entry_url(settings, "minesweeper.play") is None
+    monkeypatch.setattr(mod, "cfg", lambda *a, **k: "")
+    recipe = _recipe(settings=settings)
+    assert recipe.entry_url == mod.DEFAULT_ENTRY_URL
+
+
+class _HealPage:
+    """The search-then-probe page a heal walks: links once, cells per URL.
+
+    ``evaluate`` dispatches on the exact script the recipe sends, so the stub
+    cannot silently answer the wrong question.
+    """
+
+    def __init__(self, links: list[dict], cells_by_url: dict[str, int]) -> None:
+        self.links = links
+        self.cells_by_url = cells_by_url
+        self.visited: list[str] = []
+        self._url = ""
+
+    async def goto(self, url, wait_until=None, timeout=None):
+        self._url = url
+        self.visited.append(url)
+
+    @property
+    def url(self) -> str:
+        return self._url
+
+    async def evaluate(self, script, arg=None):
+        from browser_agent.recipes.minesweeper import _BOARD_PROBE, _COLLECT_LINKS
+
+        if script == _COLLECT_LINKS:
+            return self.links
+        if script == _BOARD_PROBE:
+            return self.cells_by_url.get(self._url, 0)
+        raise AssertionError(f"unexpected script: {script[:60]}")
+
+
+def test_a_blocked_site_self_heals_and_plays(monkeypatch, tmp_path):
+    """The recipe update, end to end: blocked → search → verify → record → play.
+
+    The operator's rule: a recipe whose site breaks gets updated, not abandoned
+    and not replaced with the local stand-in. This drives run() through the
+    blocked branch and pins every step of the heal.
+    """
+    from browser_agent import site_health
+    from browser_agent.recipes import minesweeper as mod
+
+    settings = StubSettings(data_root=tmp_path)
+    recipe = _recipe(settings=settings)
+    wrapped = ("https://html.duckduckgo.com/l/?uddg="
+               "https%3A%2F%2Fmines.example%2Fplay")
+    page = _HealPage(
+        links=[
+            {"href": wrapped, "text": "Play Minesweeper Online"},
+            {"href": "javascript:void(0)", "text": "junk"},
+        ],
+        cells_by_url={"https://mines.example/play": 81},
+    )
+    urls: list[str | None] = []
+    state = {"starts": 0}
+
+    class _View:
+        def __init__(self, blocked: bool) -> None:
+            self.blocked = blocked
+            self.cells_ready = not blocked
+            self.n_cells = 81
+
+    async def _start(_page, url=None):
+        state["starts"] += 1
+        urls.append(url)
+        return _View(blocked=state["starts"] == 1)
+
+    async def _play(_page, _view, _log, _game_no, _max_clicks):
+        return {"outcome": "won"}
+
+    monkeypatch.setattr(mod, "start_beginner", _start)
+    monkeypatch.setattr(recipe, "_play_game", _play)
+    monkeypatch.setattr(mod, "cfg", lambda *a, **k: "")
+
+    out = asyncio.run(recipe.run(_FakeSession(page), {"task": "play minesweeper"}))
+
+    # The canonical site was tried first, the discovered one second, and the
+    # discovery was unwrapped from the search redirect and recorded.
+    assert urls == ["https://minesweeper.online/new-game",
+                    "https://mines.example/play"]
+    assert site_health.entry_url(settings, "minesweeper.play") \
+        == "https://mines.example/play"
+    assert out["wins"] == 1
+    assert out["site"] == "https://mines.example/play"
+    assert "1 board(s) on mines.example" in out["summary"]
+    assert "1 won" in out["summary"]
+
+
+def test_no_real_alternative_escalates_instead_of_playing_local(monkeypatch, tmp_path):
+    """Honesty over a fake board: nothing qualifies → stop and ask, don't stand in.
+
+    This is the exact failure the operator rejected — attempt 6 played the
+    local board and reported "Done: wins: 0". The heal path must raise instead.
+    """
+    from browser_agent.escalation import EscalationRequired
+    from browser_agent.recipes import minesweeper as mod
+
+    settings = StubSettings(data_root=tmp_path)
+    recipe = _recipe(settings=settings)
+    page = _HealPage(
+        links=[{"href": "https://some-other.example/game", "text": "Mines"}],
+        cells_by_url={"https://some-other.example/game": 0},
+    )
+    state = {"starts": 0}
+
+    class _View:
+        blocked = True
+        cells_ready = False
+        n_cells = 0
+
+    async def _start(_page, url=None):
+        state["starts"] += 1
+        return _View()
+
+    async def _play(*_a):
+        raise AssertionError("no game may be played when nothing qualifies")
+
+    monkeypatch.setattr(mod, "start_beginner", _start)
+    monkeypatch.setattr(recipe, "_play_game", _play)
+    monkeypatch.setattr(mod, "cfg", lambda *a, **k: "")
+
+    try:
+        asyncio.run(recipe.run(_FakeSession(page), {"task": "play minesweeper"}))
+    except EscalationRequired:
+        pass
+    else:
+        raise AssertionError("a blocked site with no real alternative must escalate")
+    assert state["starts"] == 1, "the recipe replayed a blocked start"
+
+
+class _FakeSession:
+    activity = None
+
+    def __init__(self, page: Any = None) -> None:
+        from browser_agent.activity import Activity
+
+        self.activity = Activity()
+        self._page = page if page is not None else object()
+
+    async def page(self):
+        return self._page
 
 
 def test_run_clamps_how_many_games_it_will_play():

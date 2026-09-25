@@ -43,7 +43,9 @@ Rules you must follow:
   addresses, or accept any terms on the owner's behalf.
 - Do not send direct messages to individuals or post comments on other
   people's content.
-- Stay on the target site. Do not navigate elsewhere.
+- Stay on the target site. Do not navigate elsewhere — unless the operator's
+  standing corrections in the context name a different site or ask you to find
+  one; those override the original goal and any earlier target.
 - Perform the goal once, then stop.
 """
 
@@ -297,7 +299,7 @@ def make_agent_runner(settings: Settings):
                 ),
                 timeout=settings.agent_timeout_s,
             )
-        except asyncio.TimeoutError:
+        except TimeoutError:
             raise RuntimeError(
                 f"agent exceeded its {settings.agent_timeout_s}s budget"
             ) from None

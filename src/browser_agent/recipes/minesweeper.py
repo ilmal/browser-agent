@@ -24,6 +24,7 @@ import logging
 import re
 from datetime import date
 from typing import Any
+from urllib.parse import urlsplit
 
 from ..activity import activity_of
 from ..browser import BrowserSession
@@ -56,12 +57,67 @@ DEFAULT_GAMES = 1
 WIN_GAMES = 3
 
 #: The board's URL. Overridable because minesweeper.online moves its entry path
-#: between game modes, and a moved URL must not be a code deploy.
-#: The local page (served by the agent itself at /minesweeper.html) mimics the
-#: minesweeper.online DOM contract, and is the default because the real site
-#: IP-blocked this deployment's egress (2026-09-25, "Account blocked"). The
-#: config key still overrides it for play against the live site.
-DEFAULT_ENTRY_URL = "http://localhost:8000/minesweeper.html"
+#: between game modes, and a moved URL must not be a code deploy. This is the
+#: canonical real site. When it stops working (it IP-blocked this deployment's
+#: egress on 2026-09-25), the recipe does not fall back to a stand-in page — the
+#: operator was explicit: "not on local host — find a real page". Instead it
+#: searches for a real alternative that serves the board contract, verifies it,
+#: and records it (see ``site_health``), which *is* the recipe update. Precedence:
+#: the operator's config override, then what the bot itself discovered, then this
+#: default.
+DEFAULT_ENTRY_URL = "https://minesweeper.online/new-game"
+
+#: How to find a real replacement when the canonical site blocks this egress: a
+#: plain search for online minesweeper, read like a person would read it.
+_SEARCH_URL = "https://html.duckduckgo.com/html/?q=play+minesweeper+online"
+
+#: Only pages that carry this exact board contract count as replacements: a
+#: 9x9 ``cell_<x>_<y>`` grid under ``#CellsBlock`` — the same DOM the solver
+#: reads on the canonical site. Anything else would need a new adapter, which
+#: is a human decision, not something to improvise mid-run.
+_BOARD_PROBE = (
+    "() => { const b = document.querySelector('#CellsBlock');"
+    " return b ? b.querySelectorAll('[id^=cell_]').length : 0; }"
+)
+
+#: Search-result links, kept as (href, visible text) so junk can be filtered.
+_COLLECT_LINKS = (
+    "() => Array.from(document.querySelectorAll('a[href]')).map(a => ({"
+    "href: a.href, text: (a.textContent || '').trim() }))"
+)
+
+#: Hosts that are never candidates: the blocked canonical, the agent's own
+#: loopback (operator-excluded), and the search engine itself.
+_EXCLUDED_HOSTS = frozenset(
+    {"localhost", "127.0.0.1", "duckduckgo.com", "html.duckduckgo.com"}
+)
+
+#: How many distinct real hosts to try before concluding nothing qualifies.
+_MAX_CANDIDATES = 4
+
+
+def _real_url(href: str) -> str | None:
+    """A navigable http(s) URL from a search link, or None.
+
+    DuckDuckGo's HTML endpoint wraps results in ``/l/?uddg=<encoded>``; unwrap
+    that. javascript:, relative and non-http links are not pages to play on.
+    """
+    href = (href or "").strip()
+    if not href:
+        return None
+    if href.startswith("//"):
+        href = "https:" + href
+    parts = urlsplit(href)
+    if parts.scheme not in ("http", "https"):
+        return None
+    if parts.path.startswith("/l/") and parts.query:
+        from urllib.parse import parse_qs
+
+        target = parse_qs(parts.query).get("uddg", [""])[0]
+        if not target:
+            return None
+        return _real_url(target)
+    return href
 
 #: A ceiling on clicks per game, so a solver bug cannot turn into a click storm.
 #: A Beginner board needs ~40; 200 is generous headroom, not a target.
@@ -129,7 +185,15 @@ class Minesweeper:
 
     @property
     def entry_url(self) -> str:
-        return cfg("minesweeper.play", "entry_url", DEFAULT_ENTRY_URL)
+        """Where to play. The operator's explicit override (the recipe library)
+        wins over what this bot itself discovered after the canonical site
+        broke; both win over the built-in default."""
+        override = cfg("minesweeper.play", "entry_url", "")
+        if override:
+            return override
+        from ..site_health import entry_url as discovered
+
+        return discovered(self._settings, self.name) or DEFAULT_ENTRY_URL
 
     @classmethod
     def understands(cls, text: str, today: date) -> bool:
@@ -180,19 +244,37 @@ class Minesweeper:
 
         page = await session.page()
         results: list[dict[str, Any]] = []
+        url = self.entry_url
 
         for game_no in range(1, games + 1):
             log_.note("info", f"game {game_no}/{games}: starting a Beginner board")
-            view = await start_beginner(page, url=self.entry_url)
+            view = await start_beginner(page, url=url)
 
             if view.blocked:
-                # The IP block is app-side and arrives after boot. Retrying is
-                # what makes it worse, so this stops and asks for a human.
-                raise EscalationRequired(
-                    Challenge(ChallengeKind.RATE_LIMITED,
-                              "minesweeper.online blocked this egress IP (Account blocked)",
-                              page.url)
-                )
+                # The IP block is app-side and arrives after boot. Retrying the
+                # blocked site only makes it worse — but neither does giving up
+                # while a real alternative may exist. The recipe updates itself:
+                # find a real page that serves the board contract, verify it,
+                # record it, and play there. Only when no real page qualifies
+                # does this stop and ask for a human.
+                healed = await self._heal(page, log_)
+                if healed is None:
+                    raise EscalationRequired(
+                        Challenge(ChallengeKind.RATE_LIMITED,
+                                  "minesweeper.online blocked this egress IP (Account "
+                                  "blocked); searched for a real alternative but none "
+                                  "serves the board contract this recipe plays. The "
+                                  "local test board is operator-excluded. Needs a "
+                                  "different egress, or an adapter for another site.",
+                                  page.url)
+                    )
+                url = healed
+                view = await start_beginner(page, url=url)
+                if view.blocked:
+                    raise EscalationRequired(
+                        Challenge(ChallengeKind.RATE_LIMITED,
+                                  "the replacement page is blocked too", page.url)
+                    )
             if not view.cells_ready:
                 raise RuntimeError(
                     f"board never rendered: {view.n_cells} cells "
@@ -217,8 +299,82 @@ class Minesweeper:
                     log_.note("info", f"game {game_no} lost — playing another board")
 
         wins = sum(1 for r in results if r["outcome"] == "won")
-        log_.note("info", f"done: {wins}/{len(results)} won")
-        return {"games": results, "wins": wins}
+        lost = sum(1 for r in results if r["outcome"] == "lost")
+        unfinished = len(results) - wins - lost
+        host = urlsplit(url).hostname or url
+        bits = [f"{wins} won"]
+        if lost:
+            bits.append(f"{lost} lost on a guess")
+        if unfinished:
+            bits.append(f"{unfinished} unfinished")
+        summary = f"played {len(results)} board(s) on {host}: " + ", ".join(bits)
+        log_.note("info", summary)
+        # "summary" is what the thread note renders — "Done: wins: 0" told the
+        # operator nothing about where it played or why nothing was won.
+        return {"games": results, "wins": wins, "site": url, "summary": summary}
+
+    async def _heal(self, page: Any, log_: Any) -> str | None:
+        """Update the recipe after its canonical site stopped working.
+
+        The operator's rule (2026-09-25): a recipe whose site breaks gets
+        updated, not abandoned and not replaced with a stand-in. This searches
+        the real web for another playable board, keeps only pages that carry
+        the exact DOM contract the solver reads (a 9x9 ``cell_<x>_<y>`` grid
+        under ``#CellsBlock``), verifies the match with a real navigation, and
+        records the winner via ``site_health`` so every later run starts from
+        the learned answer. Returns the new URL, or None when nothing real
+        qualifies — honesty over a fake board.
+        """
+        from ..site_health import record
+
+        for url in await self._search_candidates(page):
+            try:
+                await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
+                cells = await page.evaluate(_BOARD_PROBE)
+            except Exception:
+                log_.note("error", f"candidate {url} could not be checked")
+                continue
+            if cells != 81:
+                continue
+            record(self._settings, self.name, entry_url=url,
+                   note="minesweeper.online blocked this egress IP; "
+                        f"{url} discovered and verified as a replacement")
+            log_.note("step", f"recipe updated: canonical site is blocked; "
+                              f"playing on {url}")
+            return url
+        return None
+
+    async def _search_candidates(self, page: Any) -> list[str]:
+        """Real minesweeper pages found by search, best guess first.
+
+        Navigates a search engine like a person would, collects the result
+        links, and filters to real http(s) pages — never the blocked host,
+        never the agent's own loopback (operator-excluded), one per host.
+        """
+        try:
+            await page.goto(_SEARCH_URL, wait_until="domcontentloaded", timeout=45_000)
+            found = await page.evaluate(_COLLECT_LINKS)
+        except Exception:
+            log.warning("site search failed; no candidates", exc_info=True)
+            return []
+
+        seen: set[str] = set()
+        out: list[str] = []
+        for link in found or []:
+            url = _real_url(str(link.get("href") or ""))
+            if url is None:
+                continue
+            host = urlsplit(url).hostname or ""
+            host = host[4:] if host.startswith("www.") else host
+            if not host or host in seen:
+                continue
+            if host == "minesweeper.online" or host in _EXCLUDED_HOSTS:
+                continue
+            seen.add(host)
+            out.append(url)
+            if len(out) >= _MAX_CANDIDATES:
+                break
+        return out
 
     async def _play_game(
         self, page: Any, view: GameView, log_: Any, game_no: int,

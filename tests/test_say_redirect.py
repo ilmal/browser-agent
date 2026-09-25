@@ -267,6 +267,65 @@ async def test_a_message_that_names_no_url_resumes_the_last_attempt(api_mod):
     assert out["task"]["payload"]["url"] == "https://a.example/deep"
 
 
+# -- standing corrections ----------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_operators_correction_binds_the_next_attempt(api_mod):
+    """The live failure 2026-09-25: "its really bad at context handling".
+
+    The operator typed "not on local host — find a real page to play on" into
+    the thread and the next attempt played the local board anyway, because only
+    the attempt lines reached the brief. A recorded correction that never
+    reaches the next attempt's context was never a correction — it must be in
+    payload["history"], ahead of the history it overrides.
+    """
+    task = _task(api_mod, payload={}, recipe="minesweeper.play")
+    api_mod.threads.say(task.thread_id, "operator", "instruction",
+                        "play a game of minesweeper", at=task.created_at)
+
+    out = await _say(api_mod, task, "not on local host — find a real page to play on")
+
+    brief = out["task"]["payload"]["history"]
+    assert "standing corrections" in brief
+    assert "not on local host — find a real page to play on" in brief
+    assert brief.index("standing corrections") < brief.index("Earlier attempts")
+
+
+@pytest.mark.asyncio
+async def test_the_original_ask_is_not_reported_as_a_correction(api_mod):
+    """The first instruction is what every later turn corrects *of*, not itself."""
+    task = _task(api_mod, payload={}, recipe="minesweeper.play")
+    api_mod.threads.say(task.thread_id, "operator", "instruction",
+                        "play a game of minesweeper", at=task.created_at)
+
+    out = await _say(api_mod, task, "and only one board")
+
+    brief = out["task"]["payload"]["history"]
+    assert "and only one board" in brief
+    # The ask is the goal field already; repeating it as an override muddies
+    # which words actually bind.
+    assert "play a game of minesweeper" not in brief.split("Earlier attempts")[0]
+
+
+@pytest.mark.asyncio
+async def test_a_correction_on_an_archived_thread_binds_too(api_mod):
+    """Post-restart the thread lives only in records; the rule cannot differ.
+
+    The correction is deliberately NOT filtered by the brief's attempt cutoff:
+    the say that creates this attempt has just recorded it, and dropping it
+    would re-create the exact bug above for every thread older than a deploy.
+    """
+    _archive(api_mod)
+
+    out = await api_mod.say(
+        "old111", api_mod.SayRequest(text="not on local host — find a real page"))
+
+    brief = out["task"]["payload"]["history"]
+    assert "standing corrections" in brief
+    assert "not on local host — find a real page" in brief
+
+
 # -- say() to a run that only exists as a record ---------------------------
 
 

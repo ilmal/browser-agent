@@ -206,19 +206,37 @@ _HISTORY_HEADER = (
     "already failed; build on one that worked:"
 )
 
+#: Corrections the operator made after the original ask. These are not context
+#: to weigh — they are binding. Measured 2026-09-25: the operator typed "not on
+#: local host — find a real page to play on" into a running thread and the next
+#: attempt played the local board anyway, because only the attempt lines made it
+#: into the brief. A correction that reaches the record but not the next
+#: attempt's context was never a correction at all.
+_CORRECTIONS_HEADER = (
+    "The operator later said, as standing corrections for this task (these "
+    "override the original ask and any earlier target site):"
+)
 
-def history_brief(lines: list[str]) -> str:
-    """The thread brief handed to a new attempt: what the earlier ones did.
+
+def history_brief(lines: list[str], corrections: list[str] = ()) -> str:
+    """The thread brief handed to a new attempt: corrections, then history.
 
     One definition with two readers — ``TaskRunner.history`` builds the lines
     from the live tasks and ``api._say_to_archived`` from the archive. The text
     used to be duplicated in both and would have drifted the first time either
     was edited; the empty case returns "" so a caller never sets a dangling
-    "Earlier attempts:" prompt.
+    prompt. Corrections come first because they override everything below
+    them — the original ask in the payload, and every attempt's result.
     """
-    if not lines:
+    if not corrections and not lines:
         return ""
-    return _HISTORY_HEADER + "\n" + "\n".join(lines)
+    parts: list[str] = []
+    if corrections:
+        parts.append(_CORRECTIONS_HEADER + "\n"
+                     + "\n".join(f"- {c}" for c in corrections))
+    if lines:
+        parts.append(_HISTORY_HEADER + "\n" + "\n".join(lines))
+    return "\n\n".join(parts)
 
 
 def _answer_from(result: Any) -> str:
@@ -591,12 +609,41 @@ class TaskRunner:
         task = next((t for t in self.tasks.values() if t.thread_id == thread_id), None)
         return self._thread_brief(task) if task is not None else ""
 
+    def _corrections_for(self, thread_id: str) -> list[str]:
+        """What the operator said *after* the original ask, oldest first.
+
+        The original ask is the instruction message stamped at the thread's
+        first attempt's creation; every later instruction is a standing
+        correction — "not on local host", "play until you win", "use this other
+        site". Dating, not position, is the discriminator: a thread whose first
+        attempt had no prose has no opening message, and counting positions
+        there would drop the operator's first real correction. Tolerant on
+        purpose: a thread store that is absent or misbehaves costs the
+        corrections, never the attempt.
+        """
+        if self.threads is None:
+            return []
+        try:
+            msgs = self.threads.for_thread(thread_id)
+        except Exception:
+            log.exception("thread messages for %s could not be read", thread_id)
+            return []
+        thread_tasks = [t for t in self.tasks.values() if t.thread_id == thread_id]
+        first_created = min((t.created_at for t in thread_tasks), default=0.0)
+        return [
+            m.text for m in msgs
+            if getattr(m, "kind", "") == "instruction"
+            and getattr(m, "role", "") == "operator"
+            and getattr(m, "at", 0.0) > first_created
+        ]
+
     def _thread_brief(self, task: Task) -> str:
         """What the earlier attempts in this thread tried, and why they stopped.
 
         Short on purpose: it is prepended to a prompt whose budget the actual
         instruction needs. The recipe, status and detail carry the signal; the
-        last few feed lines say where it got stuck.
+        last few feed lines say where it got stuck. Corrections are included
+        before the attempts, because they outrank all of it.
         """
         earlier = sorted(
             (t for t in self.tasks.values() if t.thread_id == task.thread_id),
@@ -608,7 +655,7 @@ class TaskRunner:
                          f"{t.detail or 'no detail'}")
             for entry in t.activity[-3:]:
                 lines.append(f"    · {entry.get('text', '')}")
-        return history_brief(lines)
+        return history_brief(lines, corrections=self._corrections_for(task.thread_id))
 
     # -- live control ------------------------------------------------------
 

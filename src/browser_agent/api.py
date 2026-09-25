@@ -738,19 +738,29 @@ def _archived_brief(thread_id: str, at: float) -> str:
 
     ``at`` is inclusive, matching the live path: ``retry`` briefs the next
     attempt with the attempt it is replacing, so the run being answered is the
-    one whose failure matters most.
+    one whose failure matters most. Corrections are filtered only against the
+    thread's *first* attempt — the original ask is the instruction dated at its
+    creation, everything later is a correction. In particular the say() that
+    triggers this brief has just recorded the operator's message, dated now,
+    and it binds the attempt that message creates; filtering against ``at``
+    instead would drop exactly the words that matter most.
     """
-    earlier = sorted(
-        (r for r in runs.list(limit=200, thread_id=thread_id) if r.created_at <= at),
-        key=lambda r: r.created_at,
-    )
+    in_thread = runs.list(limit=200, thread_id=thread_id)
+    earlier = sorted((r for r in in_thread if r.created_at <= at),
+                     key=lambda r: r.created_at)
+    first_created = min((r.created_at for r in in_thread), default=0.0)
     lines: list[str] = []
     for r in earlier:
         lines.append(f"- attempt {r.attempt} ({r.recipe}) ended {r.status}: "
                      f"{r.detail or 'no detail'}")
         for entry in r.activity[-3:]:
             lines.append(f"    · {entry.get('text', '')}")
-    return history_brief(lines)
+    corrections = [
+        m["text"] for m in runs.messages(thread_id)
+        if m.get("kind") == "instruction" and m.get("role") == "operator"
+        and m.get("text") and m.get("at", 0.0) > first_created
+    ]
+    return history_brief(lines, corrections=corrections)
 
 
 async def _say_to_archived(task_id: str, req: SayRequest) -> dict[str, Any]:
