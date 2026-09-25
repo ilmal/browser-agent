@@ -1,0 +1,138 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Minesweeper (local)</title>
+<!--
+  A local Beginner minesweeper that mimics the minesweeper.online DOM contract
+  the adapter in minesweeper_dom.py was built against (verified there live
+  2026-09-22):
+
+  * cells are `cell_<x>_<y>` — column first — under #CellsBlock;
+  * a closed cell carries `hd_closed` (adapter reads `.`);
+  * an opened safe cell carries `hd_opened hd_type<N>`, N = adjacent mines,
+    with empty text (the digit is only ever in the class);
+  * the clicked mine gets `hd_type11`, other revealed mines `hd_type10`;
+  * a flag is `hd_flag` (adapter reads `F` before anything else);
+  * `#top_area_face` carries `face-win` / `face-lose` when the game ends;
+  * no block element ever exists on this page — nothing blocks a local game.
+
+  minesweeper.online IP-blocked the pod's egress (2026-09-25), so this page is
+  the recipe's default site: always reachable, no third party, same contract.
+  `?seed=<n>` makes the mine placement deterministic so tests can assert on a
+  known board; without it the placement is random per load.
+-->
+<style>
+  body { font: 14px monospace; margin: 16px; }
+  #CellsBlock { display: grid; grid-template-columns: repeat(9, 24px); width: 216px; }
+#CellsBlock > [id^="cell_"] { width: 24px; height: 24px; box-sizing: border-box;
+  border: 1px solid #999; text-align: center; line-height: 22px;
+  user-select: none; cursor: pointer; }
+#CellsBlock > .hd_opened { border: 1px solid #ccc; background: #f5f5f5; cursor: default; }
+</style>
+</head>
+<body>
+<div id="top_area"><div id="top_area_face" class="face-regular"></div></div>
+<div id="CellsBlock"></div>
+<script>
+"use strict";
+const ROWS = 9, COLS = 9, MINES = 10;
+let mines = new Set();
+let placed = false;
+let over = false;
+let opened = 0;
+
+const idx = (x, y) => y * COLS + x;
+
+function neighbors(x, y) {
+  const out = [];
+  for (let dy = -1; dy <= 1; dy++)
+    for (let dx = -1; dx <= 1; dx++) {
+      if (!dx && !dy) continue;
+      const nx = x + dx, ny = y + dy;
+      if (nx >= 0 && nx < COLS && ny >= 0 && ny < ROWS) out.push([nx, ny]);
+    }
+  return out;
+}
+
+function build() {
+  const block = document.getElementById("CellsBlock");
+  block.innerHTML = "";
+  for (let y = 0; y < ROWS; y++)
+    for (let x = 0; x < COLS; x++) {
+      const c = document.createElement("div");
+      c.id = "cell_" + x + "_" + y;
+      c.className = "hd_closed hd_type9";
+      block.appendChild(c);
+    }
+}
+
+// Mines go down on the FIRST left click, never under it — the same guarantee
+// the real site gives, and one the solver's first read depends on.
+function place(safeX, safeY) {
+  const asked = new URLSearchParams(location.search).get("seed");
+  let state = asked !== null ? (parseInt(asked, 10) || 1) : ((Date.now() & 0x7fffffff) || 1);
+  const rnd = () => { state = (state * 1103515245 + 12345) & 0x7fffffff; return state / 0x7fffffff; };
+  mines = new Set();
+  while (mines.size < MINES) {
+    const x = Math.floor(rnd() * COLS), y = Math.floor(rnd() * ROWS);
+    if (x === safeX && y === safeY) continue;
+    mines.add(idx(x, y));
+  }
+  placed = true;
+}
+
+const count = (x, y) => neighbors(x, y).filter(([nx, ny]) => mines.has(idx(nx, ny))).length;
+
+function setFace(name) {
+  document.getElementById("top_area_face").className = name;
+}
+
+function reveal(x, y) {
+  if (over) return;
+  const c = document.getElementById("cell_" + x + "_" + y);
+  if (!c || /hd_opened|hd_flag/.test(c.className)) return;
+  if (mines.has(idx(x, y))) return lose(c);
+  const n = count(x, y);
+  c.className = "hd_opened hd_type" + n;
+  c.textContent = "";
+  opened++;
+  if (n === 0) for (const [nx, ny] of neighbors(x, y)) reveal(nx, ny);
+  if (opened === ROWS * COLS - MINES) { over = true; setFace("face-win"); }
+}
+
+function lose(clicked) {
+  over = true;
+  for (let y = 0; y < ROWS; y++)
+    for (let x = 0; x < COLS; x++) {
+      if (!mines.has(idx(x, y))) continue;
+      const c = document.getElementById("cell_" + x + "_" + y);
+      if (c === clicked) { c.className = "hd_opened hd_type11"; c.textContent = ""; }
+      else c.className = "hd_opened hd_type10";
+    }
+  setFace("face-lose");
+}
+
+document.getElementById("CellsBlock").addEventListener("click", (ev) => {
+  const c = ev.target.closest("[id^=cell_]");
+  if (!c) return;
+  const [x, y] = c.id.slice(5).split("_").map(Number);
+  if (!placed) place(x, y);
+  reveal(x, y);
+});
+
+document.getElementById("CellsBlock").addEventListener("contextmenu", (ev) => {
+  ev.preventDefault();
+  const c = ev.target.closest("[id^=cell_]");
+  if (!c || over || /hd_opened/.test(c.className)) return;
+  c.className = /hd_flag/.test(c.className) ? "hd_closed hd_type9" : "hd_closed hd_flag hd_type9";
+});
+
+// Test-only read of the mine set; the adapter judges the board from the cell
+// classes alone, so nothing in the play loop can shortcut through this.
+window.__msDebug = { mines: () => [...mines], placed: () => placed };
+
+build();
+</script>
+</body>
+</html>

@@ -57,7 +57,11 @@ WIN_GAMES = 3
 
 #: The board's URL. Overridable because minesweeper.online moves its entry path
 #: between game modes, and a moved URL must not be a code deploy.
-DEFAULT_ENTRY_URL = "https://minesweeper.online/new-game"
+#: The local page (served by the agent itself at /minesweeper.html) mimics the
+#: minesweeper.online DOM contract, and is the default because the real site
+#: IP-blocked this deployment's egress (2026-09-25, "Account blocked"). The
+#: config key still overrides it for play against the live site.
+DEFAULT_ENTRY_URL = "http://localhost:8000/minesweeper.html"
 
 #: A ceiling on clicks per game, so a solver bug cannot turn into a click storm.
 #: A Beginner board needs ~40; 200 is generous headroom, not a target.

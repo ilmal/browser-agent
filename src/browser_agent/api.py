@@ -1031,6 +1031,19 @@ async def vnc_redirect() -> HTMLResponse:
     )
 
 
+_MS_LOCAL = Path(__file__).parent / "minesweeper_local.html"
+
+
+@app.get("/minesweeper.html", response_class=HTMLResponse)
+async def minesweeper_local() -> HTMLResponse:
+    """The local Beginner board the minesweeper recipe plays by default.
+
+    minesweeper.online IP-blocked the pod's egress (2026-09-25); this page
+    mimics its DOM contract so the same solver drives either one.
+    """
+    return HTMLResponse(_MS_LOCAL.read_text())
+
+
 @app.exception_handler(Exception)
 async def unhandled(request: Request, exc: Exception) -> JSONResponse:
     log.exception("unhandled error on %s", request.url.path)

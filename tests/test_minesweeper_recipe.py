@@ -304,7 +304,9 @@ def test_recipe_is_registered_under_its_documented_name():
     from browser_agent.tasks import get_recipe
 
     recipe = get_recipe("minesweeper.play")
-    assert recipe.entry_url == "https://minesweeper.online/new-game"
+    # The default site is the agent's own local board since minesweeper.online
+    # IP-blocked the pod's egress (2026-09-25); config overrides for live play.
+    assert recipe.entry_url == "http://localhost:8000/minesweeper.html"
 
 
 def test_run_clamps_how_many_games_it_will_play():
