@@ -57,6 +57,58 @@ def test_browser_proxy_is_read_from_its_own_variable(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_the_browser_launch_bypasses_the_proxy_for_loopback(monkeypatch, tmp_path):
+    """The agent's own pages live on the pod's loopback; the proxy must not see them.
+
+    Regression 2026-09-25: with the egress SOCKS proxy set, the local board at
+    http://localhost:8000/minesweeper.html was sent to the proxy and died with
+    ERR_SOCKS_CONNECTION_FAILED before the game started.
+    """
+    monkeypatch.setenv("BROWSER_PROXY", "socks5://office-proxy.crawl.svc.cluster.local:1080")
+    monkeypatch.setenv("PROFILES_ROOT", str(tmp_path / "profiles"))
+    monkeypatch.setenv("DATA_ROOT", str(tmp_path / "data"))
+    monkeypatch.setenv("HEADLESS", "true")
+
+    seen: dict = {}
+
+    class _FakeContext:
+        def set_default_timeout(self, ms):
+            seen["timeout"] = ms
+
+        async def close(self):
+            return None
+
+    class _FakeChromium:
+        async def launch_persistent_context(self, **kw):
+            seen.update(kw)
+            return _FakeContext()
+
+    class _FakePlaywright:
+        chromium = _FakeChromium()
+
+        async def stop(self):
+            return None
+
+    class _FakePW:
+        async def start(self):
+            return _FakePlaywright()
+
+    import browser_agent.browser as browser_mod
+    from browser_agent.browser import BrowserSession
+    from browser_agent.config import load_settings
+
+    monkeypatch.setattr(browser_mod, "async_playwright", lambda: _FakePW())
+    session = BrowserSession(load_settings())
+    await session.start()
+    await session.stop()
+
+    proxy = seen.get("proxy") or {}
+    assert proxy.get("server", "").startswith("socks5://")
+    bypass = [h.strip() for h in proxy.get("bypass", "").split(",")]
+    assert "localhost" in bypass and "127.0.0.1" in bypass
+
+
+@pytest.mark.asyncio
 async def test_llm_client_ignores_ambient_proxy(settings, monkeypatch):
     """An ambient HTTP_PROXY must not be applied to the LLM request.
 

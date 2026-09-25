@@ -305,7 +305,14 @@ class BrowserSession:
         # the only place the proxy is configured — it is not exported as
         # HTTP_PROXY, which the LLM client would otherwise pick up.
         if self.settings.browser_proxy:
-            launch["proxy"] = {"server": self.settings.browser_proxy}
+            launch["proxy"] = {
+                "server": self.settings.browser_proxy,
+                # The agent's own pages (/minesweeper.html) live on the pod's
+                # loopback; without an explicit bypass Chromium sends them to
+                # the proxy and the run dies before it starts (measured
+                # 2026-09-25: ERR_SOCKS_CONNECTION_FAILED on localhost:8000).
+                "bypass": "localhost,127.0.0.1",
+            }
 
         self._context = await self._playwright.chromium.launch_persistent_context(**launch)
         self._context.set_default_timeout(30_000)
