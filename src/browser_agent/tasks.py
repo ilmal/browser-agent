@@ -30,7 +30,12 @@ from .activity import Activity
 from .browser import BrowserSession
 from .config import Settings
 from .control import Amended, Cancelled, Control
-from .escalation import EscalationRequired, detect_challenge, looks_logged_out
+from .escalation import (
+    ChallengeKind,
+    EscalationRequired,
+    detect_challenge,
+    looks_logged_out,
+)
 from .llm import LLMClient
 from .plan_model import PlanRejected, StepFailure
 
@@ -1154,10 +1159,23 @@ class TaskRunner:
         task.detail = f"too many amendments ({MAX_AMENDMENTS}) without a plan that ran"
 
     async def _block(self, task: Task, challenge) -> None:
-        """Record a blocker and hand it to a human. Never retried automatically."""
+        """Record a blocker and hand it to a human. Never retried automatically.
+
+        A rate-limit class block is also written down permanently for the
+        recipe (2026-09-26): the next run of anything this recipe does must
+        route around that host instead of walking into the same wall. Captcha
+        and sign-in escalations are deliberately not memorized — those are the
+        human-takeover flow working, not a venue that stopped serving us.
+        """
         task.status = TaskStatus.BLOCKED
         task.detail = challenge.describe()
         log.warning("task %s BLOCKED: %s", task.id, task.detail)
+        if challenge.kind == ChallengeKind.RATE_LIMITED:
+            from .site_health import host_of, record_blocked
+
+            record_blocked(self.settings, task.recipe,
+                           host=host_of(challenge.url),
+                           reason=challenge.detail, url=challenge.url)
         from .notify import notify_escalation
 
         await notify_escalation(self.settings, challenge, takeover_url(self.settings))

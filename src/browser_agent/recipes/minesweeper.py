@@ -245,6 +245,30 @@ class Minesweeper:
         page = await session.page()
         results: list[dict[str, Any]] = []
         url = self.entry_url
+        override = bool(cfg("minesweeper.play", "entry_url", ""))
+
+        # Obstacle memory, consulted before anything is navigated (2026-09-26).
+        # Every block and every rejected replacement is written down for good,
+        # so a venue this bot has already written off is never walked into
+        # again: the run goes straight to looking for a genuinely new venue,
+        # and when search yields nothing new it stops in seconds carrying the
+        # whole history, instead of re-playing a doomed path for minutes. The
+        # operator's explicit override outranks the memory — a changed egress
+        # or a lifted ban is the operator's hand, and the memory only ever
+        # narrows what the bot chooses on its own.
+        if not override:
+            from ..site_health import blocked_hosts, host_of
+
+            if host_of(url) in blocked_hosts(self._settings, self.name):
+                log_.note(
+                    "info",
+                    f"{host_of(url)} is remembered-blocked; searching only for "
+                    f"venues this bot has not already ruled out",
+                )
+                healed = await self._heal(page, log_)
+                if healed is None:
+                    raise self._exhausted(page.url)
+                url = healed
 
         for game_no in range(1, games + 1):
             log_.note("info", f"game {game_no}/{games}: starting a Beginner board")
@@ -254,23 +278,25 @@ class Minesweeper:
                 # The IP block is app-side and arrives after boot. Retrying the
                 # blocked site only makes it worse — but neither does giving up
                 # while a real alternative may exist. The recipe updates itself:
-                # find a real page that serves the board contract, verify it,
-                # record it, and play there. Only when no real page qualifies
-                # does this stop and ask for a human.
+                # the block is written down first (so this sighting counts even
+                # if the heal succeeds elsewhere), then it finds a real page
+                # that serves the board contract, verifies it, records it, and
+                # plays there. Only when no real page qualifies does this stop
+                # and ask for a human.
+                from ..site_health import host_of, record_blocked
+
+                record_blocked(self._settings, self.name, host=host_of(url),
+                               reason="the site served its block page "
+                                      "(Account blocked)", url=url)
                 healed = await self._heal(page, log_)
                 if healed is None:
-                    raise EscalationRequired(
-                        Challenge(ChallengeKind.RATE_LIMITED,
-                                  "minesweeper.online blocked this egress IP (Account "
-                                  "blocked); searched for a real alternative but none "
-                                  "serves the board contract this recipe plays. The "
-                                  "local test board is operator-excluded. Needs a "
-                                  "different egress, or an adapter for another site.",
-                                  page.url)
-                    )
+                    raise self._exhausted(page.url)
                 url = healed
                 view = await start_beginner(page, url=url)
                 if view.blocked:
+                    record_blocked(self._settings, self.name, host=host_of(url),
+                                   reason="the replacement served its block "
+                                          "page too", url=url)
                     raise EscalationRequired(
                         Challenge(ChallengeKind.RATE_LIMITED,
                                   "the replacement page is blocked too", page.url)
@@ -313,6 +339,33 @@ class Minesweeper:
         # operator nothing about where it played or why nothing was won.
         return {"games": results, "wins": wins, "site": url, "summary": summary}
 
+    def _exhausted(self, url: str) -> EscalationRequired:
+        """The stop for "every venue this bot knows about is written off".
+
+        The message IS the memory — which hosts blocked this egress and how
+        often, how many searched replacements were probed and rejected — so
+        the escalation carries the whole history and the operator decides
+        with everything in view, once, instead of re-deriving it each run.
+        """
+        from ..site_health import blocked_hosts
+
+        blocked: list[str] = []
+        rejected = 0
+        for host, b in sorted(blocked_hosts(self._settings, self.name).items()):
+            if b.get("kind") == "rejected":
+                rejected += 1
+            else:
+                blocked.append(f"{host} (seen {b.get('count', 1)}x)")
+        msg = ("every venue is written off: " + ", ".join(blocked)) if blocked \
+            else "no playable venue is known"
+        if rejected:
+            msg += (f"; {rejected} searched replacement(s) probed and rejected "
+                    f"(no board contract)")
+        msg += (". The local test board is operator-excluded. Needs a different "
+                "egress, or an adapter for another site.")
+        return EscalationRequired(
+            Challenge(ChallengeKind.RATE_LIMITED, msg, url))
+
     async def _heal(self, page: Any, log_: Any) -> str | None:
         """Update the recipe after its canonical site stopped working.
 
@@ -322,10 +375,11 @@ class Minesweeper:
         the exact DOM contract the solver reads (a 9x9 ``cell_<x>_<y>`` grid
         under ``#CellsBlock``), verifies the match with a real navigation, and
         records the winner via ``site_health`` so every later run starts from
-        the learned answer. Returns the new URL, or None when nothing real
-        qualifies — honesty over a fake board.
+        the learned answer. A candidate without the contract is written down
+        as rejected, so the next search never re-probes it. Returns the new
+        URL, or None when nothing real qualifies — honesty over a fake board.
         """
-        from ..site_health import record
+        from ..site_health import host_of, record, record_blocked
 
         for url in await self._search_candidates(page):
             try:
@@ -335,6 +389,10 @@ class Minesweeper:
                 log_.note("error", f"candidate {url} could not be checked")
                 continue
             if cells != 81:
+                record_blocked(self._settings, self.name, host=host_of(url),
+                               kind="rejected",
+                               reason="searched as a replacement but its page "
+                                      "has no 9x9 board contract", url=url)
                 continue
             record(self._settings, self.name, entry_url=url,
                    note="minesweeper.online blocked this egress IP; "
@@ -348,9 +406,12 @@ class Minesweeper:
         """Real minesweeper pages found by search, best guess first.
 
         Navigates a search engine like a person would, collects the result
-        links, and filters to real http(s) pages — never the blocked host,
-        never the agent's own loopback (operator-excluded), one per host.
+        links, and filters to real http(s) pages — never a host this bot has
+        written down as blocked or rejected (obstacle memory), never the
+        agent's own loopback (operator-excluded), one per host.
         """
+        from ..site_health import blocked_hosts
+
         try:
             await page.goto(_SEARCH_URL, wait_until="domcontentloaded", timeout=45_000)
             found = await page.evaluate(_COLLECT_LINKS)
@@ -358,6 +419,7 @@ class Minesweeper:
             log.warning("site search failed; no candidates", exc_info=True)
             return []
 
+        remembered = blocked_hosts(self._settings, self.name)
         seen: set[str] = set()
         out: list[str] = []
         for link in found or []:
@@ -368,7 +430,7 @@ class Minesweeper:
             host = host[4:] if host.startswith("www.") else host
             if not host or host in seen:
                 continue
-            if host == "minesweeper.online" or host in _EXCLUDED_HOSTS:
+            if host in remembered or host in _EXCLUDED_HOSTS:
                 continue
             seen.add(host)
             out.append(url)

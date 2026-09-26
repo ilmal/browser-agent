@@ -856,13 +856,22 @@ function renderBanner() {
       return;
     }
     const shown = blocked.slice(0, 3);
+    // N identical rows are one fact, not N problems: collapse same-text
+    // details into one line with a count, so three copies of the same block
+    // read as one obstacle instead of a wall.
+    const uniq = [];
+    for (const t of shown) {
+      const last = uniq[uniq.length - 1];
+      if (last && last.detail === t.detail && last.recipe === t.recipe) last.n += 1;
+      else uniq.push({ recipe: t.recipe, detail: t.detail, n: 1 });
+    }
     set("banner", `<div class="alert">` +
       `<div class="alert-head"><strong class="alert-title">Needs you — ` +
       `${blocked.length} task${blocked.length === 1 ? "" : "s"} waiting</strong>` +
       `<button class="ghost" id="banner-hide" type="button" ` +
       `title="Hide this until the list of waiting tasks changes">Hide</button></div>` +
-      shown.map(t => `<div class="alert-line" title="${esc(t.detail)}">` +
-        `${esc(t.recipe)} — ${esc(t.detail)}</div>`).join("") +
+      uniq.map(t => `<div class="alert-line" title="${esc(t.detail)}">` +
+        `${esc(t.recipe)} — ${esc(t.detail)}${t.n > 1 ? ` <b>×${t.n}</b>` : ""}</div>`).join("") +
       (blocked.length > shown.length
         ? `<div class="alert-line">+ ${blocked.length - shown.length} more</div>` : "") +
       `<div class="row"><button class="ghost" type="button" ` +
