@@ -12,10 +12,15 @@
   :root {
     --bg: #000000; --panel: #1C1C1E; --panel-2: #2C2C2E; --line: rgba(255,255,255,0.08);
     --text: #FFFFFF; --text-2: rgba(255,255,255,0.70); --text-3: #8E8E93;
-    --accent: #FF9500; --ok: #30D158; --warn: #FF9F0A; --bad: #FF453A;
+    --accent: #FF9500; --ok: #30D158; --warn: #FFD60A; --bad: #FF453A;
+    /* readable-on-dark tints — one value per semantic, shared with roster.html */
+    --tint-ok: #b5f0ca; --tint-warn: #ffd9a0; --tint-bad: #ffb4ad;
+    --tint-danger-hover: #ff8077; --tint-agent: #b58cf0;
     --radius: 12px;
     --push: cubic-bezier(0.32, 0.72, 0, 1);   /* iOS push — panels, split */
     --ease: cubic-bezier(0.22, 1, 0.36, 1);   /* message + card entrances */
+    color-scheme: dark;
+    scrollbar-width: thin; scrollbar-color: rgba(255,255,255,.22) transparent;
   }
   * { box-sizing: border-box; }
   html, body { height: 100%; }
@@ -34,10 +39,10 @@
     font-size: 12px; padding: 3px 9px; border-radius: 999px; white-space: nowrap;
     background: var(--panel); color: var(--text-3); border: 1px solid var(--line);
   }
-  .pill.ok { color: var(--ok); border-color: rgba(48,209,88,.35); }
-  .pill.warn { color: var(--warn); border-color: rgba(255,159,10,.35); }
-  .pill.bad { color: var(--bad); border-color: rgba(255,69,58,.35); }
-  .pill.accent { color: var(--accent); border-color: rgba(255,149,0,.4); }
+  .pill.ok { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 35%, transparent); }
+  .pill.warn { color: var(--warn); border-color: color-mix(in srgb, var(--warn) 35%, transparent); }
+  .pill.bad { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, transparent); }
+  .pill.accent { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
   .spacer { flex: 1; }
 
   button {
@@ -52,16 +57,18 @@
     border: 1px solid var(--line); font-weight: 500;
   }
   button.ghost:hover { color: var(--text); filter: none; border-color: rgba(255,255,255,.2); }
-  button.ghost.danger { color: var(--bad); border-color: rgba(255,69,58,.35); }
+  button.ghost.danger { color: var(--bad); border-color: color-mix(in srgb, var(--bad) 35%, transparent); }
   button:disabled { opacity: .4; cursor: not-allowed; }
   .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
   .row.end { justify-content: flex-end; }
   label { display: block; font-size: 12px; color: var(--text-3); margin: 12px 0 4px; }
   input, textarea, select {
     width: 100%; background: var(--panel); color: var(--text);
-    border: 1px solid var(--line); border-radius: 10px; padding: 8px 12px; font: inherit;
+    border: 1px solid var(--line); border-radius: 14px; padding: 8px 12px; font: inherit;
   }
   input:focus, textarea:focus, select:focus { outline: none; border-color: rgba(255,255,255,.35); }
+  :where(button, a, [role="button"], summary, [tabindex]):focus-visible {
+    outline: 2px solid rgba(255,255,255,.55); outline-offset: 2px; border-radius: inherit; }
   textarea { min-height: 72px; resize: vertical; }
 
   /* The workspace: chat always, browser beside it when open. */
@@ -71,14 +78,18 @@
   #banner { flex: 0 0 auto; padding: 0 16px; }
   #banner:empty { padding: 0; }
   .alert { border-radius: 12px; padding: 10px 14px; font-size: 13px; margin: 10px 0;
-    border: 1px solid rgba(255,159,10,.4); background: rgba(255,159,10,.1); color: #ffd9a0;
+    border: 1px solid color-mix(in srgb, var(--warn) 40%, transparent);
+    background: color-mix(in srgb, var(--warn) 10%, transparent); color: var(--tint-warn);
     min-width: 0; overflow-wrap: anywhere; }
-  .alert.bad { border-color: rgba(255,69,58,.4); background: rgba(255,69,58,.1); color: #ffc2be; }
+  .alert.bad { border-color: color-mix(in srgb, var(--bad) 40%, transparent);
+    background: color-mix(in srgb, var(--bad) 10%, transparent); color: var(--tint-bad); }
   .alert a { color: inherit; font-weight: 600; }
   .alert .row { margin-top: 8px; }
 
   /* -- chat pane: the main surface ------------------------------------ */
-  #chat-pane { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0; }
+  #chat-pane { flex: 1 1 auto; display: flex; flex-direction: column; min-height: 0;
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px; }
   #chat-head {
     display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
     padding: 12px 20px 8px; flex: 0 0 auto;
@@ -96,8 +107,8 @@
     animation: ring 1.6s ease-out infinite;
   }
   @keyframes ring {
-    0% { box-shadow: 0 0 0 0 rgba(255,149,0,.45); }
-    100% { box-shadow: 0 0 0 12px rgba(255,149,0,0); }
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 45%, transparent); }
+    100% { box-shadow: 0 0 0 12px transparent; }
   }
   #chat-who { min-width: 0; }
   #chat-name { font-weight: 600; font-size: 15px; }
@@ -122,14 +133,14 @@
   .turn.system { grid-template-columns: minmax(0,1fr); }
   .turn.system .who { text-align: center; }
   .turn.system .say { color: var(--text-3); font-size: 12px; text-align: center; }
-  .turn.enter { animation: msg-in .26s var(--ease) both; }
+  .turn.enter { animation: msg-in .2s var(--ease) both; }
   @keyframes msg-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
 
   /* A finished attempt is a run card, not speech: caption styling with a
      status edge, and the run's whole record collapsed inside. */
   .run-card { background: var(--panel); border: 1px solid var(--line);
     border-left-width: 2px; border-radius: 14px; padding: 10px 14px; min-width: 0; }
-  .run-card.enter { animation: msg-in .26s var(--ease) both; }
+  .run-card.enter { animation: msg-in .2s var(--ease) both; }
   .run-card.done { border-left-color: var(--ok); }
   .run-card.blocked { border-left-color: var(--warn); }
   .run-card.failed { border-left-color: var(--bad); }
@@ -156,7 +167,7 @@
     display: flex; gap: 10px; align-items: flex-end;
     background: var(--panel); border: 1px solid var(--line); border-radius: 28px;
     padding: 8px 8px 8px 16px;
-    transition: border-color .18s ease;
+    transition: border-color .15s ease;
   }
   .composer-box:focus-within { border-color: rgba(255,255,255,.28); }
   #composer textarea {
@@ -172,13 +183,13 @@
   #browser-pane {
     flex: 0 0 auto; width: 0; overflow: hidden; border-left: 1px solid var(--line);
     display: flex; flex-direction: column; background: #000;
-    transition: width .42s var(--push);
+    transition: width .2s var(--push);
   }
   body.split-open #browser-pane { width: min(52vw, 900px); }
   body.dragging #browser-pane { transition: none; }
   .pane-inner { flex: 1 1 auto; display: flex; flex-direction: column; min-width: 0;
     min-height: 0; width: min(52vw, 900px);
-    opacity: 0; transition: opacity .18s ease .12s; }
+    opacity: 0; transition: opacity .15s ease .06s; }
   body.split-open .pane-inner { opacity: 1; }
   .pane-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px;
     border-bottom: 1px solid var(--line); flex-wrap: wrap; }
@@ -199,24 +210,24 @@
   /* The "Browser" button pulses when a task starts and the pane is closed. */
   .pulse-once { animation: btn-pulse 1.6s ease-out 2; }
   @keyframes btn-pulse {
-    0% { box-shadow: 0 0 0 0 rgba(255,149,0,.5); }
-    100% { box-shadow: 0 0 0 12px rgba(255,149,0,0); }
+    0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 50%, transparent); }
+    100% { box-shadow: 0 0 0 12px transparent; }
   }
 
   /* -- the details drawer ----------------------------------------------- */
   #drawer {
     flex: 0 0 auto; height: 0; overflow: hidden auto; border-top: 1px solid var(--line);
-    transition: height .36s var(--push); background: #000;
+    transition: height .2s var(--push); background: #000;
   }
   body.drawer-open #drawer { height: min(58vh, 660px); }
   #drawer-pad { padding: 16px; max-width: 1080px; margin: 0 auto;
     display: grid; grid-template-columns: minmax(0,1fr); gap: 16px; }
   #drawer-pad > * { min-width: 0; }
-  section { background: var(--panel); border: 1px solid var(--line);
+  #drawer section { background: var(--panel); border: 1px solid var(--line);
     border-radius: var(--radius); padding: 16px; min-width: 0; }
-  section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
+  #drawer section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
     color: var(--text-3); margin: 0 0 4px; }
-  section .sub { color: var(--text-3); font-size: 12px; margin: 0 0 14px; overflow-wrap: anywhere; }
+  #drawer section .sub { color: var(--text-3); font-size: 12px; margin: 0 0 14px; overflow-wrap: anywhere; }
   /* minmax(0,1fr) + min-width:0: a grid item defaults to min-width:auto, so it
      refuses to shrink below its longest unbreakable token. One captcha URL in a
      task detail stretched the whole page to ~3900px regardless of viewport. */
@@ -242,10 +253,10 @@
   .rc .nm { display: flex; align-items: baseline; gap: 7px; flex-wrap: wrap; min-width: 0; }
   .rc .nm code { font-size: 12px; color: var(--text); overflow-wrap: anywhere; }
   .rc .desc { font-size: 12px; color: var(--text-3); overflow-wrap: anywhere; }
-  .rc.enter { animation: card-in .42s var(--ease) both; }
+  .rc.enter { animation: card-in .2s var(--ease) both; }
   @keyframes card-in { from { opacity: 0; transform: translateY(16px) scale(.98); }
     to { opacity: 1; transform: none; } }
-  .pill.stored { color: var(--accent); border-color: rgba(255,149,0,.35); }
+  .pill.stored { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
 
   .alert.bad a { color: inherit; }
   .muted { color: var(--text-3); font-size: 12px; }
@@ -278,7 +289,7 @@
   .feed .k { font-size: 10px; text-transform: uppercase; letter-spacing: .06em; min-width: 46px;
     color: var(--text-3); }
   .feed .k.step  { color: var(--accent); }
-  .feed .k.agent { color: #b58cf0; }
+  .feed .k.agent { color: var(--tint-agent); }
   .feed .k.gate  { color: var(--warn); }
   .feed .k.error { color: var(--bad); }
   .feed .k.operator { color: var(--ok); }
@@ -1143,6 +1154,7 @@ $("thread-text").addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendThread(); }
 });
 $("thread-text").addEventListener("input", autosize);
+autosize();
 
 // -- the drawer's sections ----------------------------------------------------
 
