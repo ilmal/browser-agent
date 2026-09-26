@@ -28,6 +28,7 @@ from .router import claim, learned_match, route
 from .runstore import RunStore
 from .scheduler import ScheduleStore
 from .tasks import (
+    _URL_RE,
     AGENT_RECIPE,
     TaskRunner,
     TaskStatus,
@@ -460,6 +461,48 @@ async def create_task(req: TaskRequest) -> dict[str, Any]:
     # than the attempt it caused, and the thread sorts by time — so the
     # conversation would open with an attempt that answered a question nobody
     # had asked yet.
+    opening = _task_text(task)
+    if opening:
+        threads.say(
+            task.thread_id, "operator", "instruction", opening, at=task.created_at
+        )
+    return task.to_dict()
+
+
+class FreshChatRequest(BaseModel):
+    text: str
+
+
+@app.post("/api/chat", dependencies=[Depends(require_token)])
+async def fresh_chat(req: FreshChatRequest) -> dict[str, Any]:
+    """Start a brand-new thread from one message — the chat's "start over".
+
+    "New chat" has to behave like talking to a person: an empty conversation is
+    not an error state that redirects to a form, it accepts a sentence and work
+    begins. This is the composer's path when the open thread has no attempts,
+    and it routes prose by exactly the same rule as create_task: a recipe whose
+    ``understands`` claims the sentence runs it, a learned recipe may, and
+    otherwise the freeform agent takes it — which is the one case that needs a
+    start URL, extracted from the message itself here. Refusing at submit time
+    (instead of queueing a task destined to fail) is the point: the composer
+    can put the reason next to the text the operator just typed.
+    """
+    text = req.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="text is empty")
+    matched = await learned_match(text, AGENT_RECIPE, settings)
+    recipe = route(text, AGENT_RECIPE, learned_match=matched)
+    payload: dict[str, Any] = {"task": text, "text": text, "goal": text}
+    if recipe == AGENT_RECIPE:
+        found = _URL_RE.search(text)
+        if not found:
+            raise HTTPException(
+                status_code=400,
+                detail="No recipe claimed that, and a freeform run needs a page "
+                "to work on — paste the link into the message, or use Run a task.",
+            )
+        payload["url"] = found.group(0).rstrip(".,;")
+    task = runner.submit(recipe, payload)
     opening = _task_text(task)
     if opening:
         threads.say(

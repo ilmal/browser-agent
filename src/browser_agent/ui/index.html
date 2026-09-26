@@ -71,8 +71,9 @@
     outline: 2px solid rgba(255,255,255,.55); outline-offset: 2px; border-radius: inherit; }
   textarea { min-height: 72px; resize: vertical; }
 
-  /* The workspace: chat always, browser beside it when open. */
-  #workspace { flex: 1 1 auto; display: flex; min-height: 0; }
+  /* The workspace: chat always, browser beside it when open. position:relative
+     anchors the details panel, which overlays this box from the right. */
+  #workspace { flex: 1 1 auto; display: flex; min-height: 0; position: relative; }
   #workspace > * { min-width: 0; }
 
   #banner { flex: 0 0 auto; padding: 0 16px; }
@@ -215,14 +216,31 @@
   }
 
   /* -- the details drawer ----------------------------------------------- */
+  /* A right-side panel overlaying the workspace, NOT a flex sibling: as a
+     bottom sheet in the column it flex-shrunk the chat to zero (the operator
+     opened Details and lost the conversation). Overlaid, the chat keeps its
+     full height; the panel covers whatever is at the right edge (usually the
+     browser pane) and slides away without moving anything else. */
   #drawer {
-    flex: 0 0 auto; height: 0; overflow: hidden auto; border-top: 1px solid var(--line);
-    transition: height .2s var(--push); background: #000;
+    position: absolute; top: 0; right: 0; bottom: 0; width: min(520px, 100%);
+    z-index: 10; background: var(--bg); border-left: 1px solid var(--line);
+    box-shadow: -16px 0 40px rgba(0, 0, 0, .55);
+    overflow: hidden auto;
+    opacity: 0; transform: translateX(16px); pointer-events: none;
+    transition: transform .2s var(--push), opacity .2s var(--push);
   }
-  body.drawer-open #drawer { height: min(58vh, 660px); }
-  #drawer-pad { padding: 16px; max-width: 1080px; margin: 0 auto;
-    display: grid; grid-template-columns: minmax(0,1fr); gap: 16px; }
+  body.drawer-open #drawer { opacity: 1; transform: none; pointer-events: auto; }
+  .drawer-head { position: sticky; top: 0; z-index: 2;
+    display: flex; align-items: center; gap: 8px; padding: 10px 16px;
+    background: var(--bg); border-bottom: 1px solid var(--line); }
+  .drawer-head .title { font-size: 12px; text-transform: uppercase; letter-spacing: .06em;
+    color: var(--text-3); }
+  .drawer-head button { padding: 4px 12px; }
+  #drawer-pad { padding: 16px; display: grid; grid-template-columns: minmax(0,1fr); gap: 16px; }
   #drawer-pad > * { min-width: 0; }
+  @media (max-width: 900px) {
+    #drawer { width: 100%; box-shadow: none; }
+  }
   #drawer section { background: var(--panel); border: 1px solid var(--line);
     border-radius: var(--radius); padding: 16px; min-width: 0; }
   #drawer section h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em;
@@ -259,6 +277,18 @@
   .pill.stored { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, transparent); }
 
   .alert.bad a { color: inherit; }
+  /* The needs-you alert is a summary, not a wall: one ellipsised line per
+     waiting task (full text on hover), a dismiss, and — once dismissed — a
+     one-chip reminder instead of the whole block. */
+  .alert-head { display: flex; align-items: center; gap: 8px; }
+  .alert-head .alert-title { flex: 1; min-width: 0; }
+  .alert-head button { padding: 3px 11px; font-size: 12px; }
+  .alert-line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    margin-top: 4px; }
+  #banner-min { padding: 6px 16px; }
+  #banner-min button { font-size: 12px; padding: 4px 12px; }
+  /* The toggle that opened the panel stays lit while it is open. */
+  #btn-details.on { color: var(--text); border-color: rgba(255, 255, 255, .35); }
   .muted { color: var(--text-3); font-size: 12px; }
   .muted.ok  { color: var(--ok); }
   .muted.bad { color: var(--bad); }
@@ -314,7 +344,7 @@
   <span class="pill" id="p-queue">queue: 0</span>
   <div class="spacer"></div>
   <button class="ghost" id="btn-browser" type="button">Browser</button>
-  <button class="ghost" id="btn-details" type="button">Details</button>
+  <button class="ghost" id="btn-details" type="button" aria-pressed="false">Details</button>
   <button class="ghost" id="refresh" type="button">Refresh</button>
 </header>
 
@@ -329,6 +359,8 @@
         <div id="chat-status"></div>
       </div>
       <div id="chat-ctl">
+        <button class="ghost" id="btn-newchat" type="button"
+          title="Clear this conversation from view and start a fresh one — the old thread stays in History">New chat</button>
         <button class="ghost back-chip hidden" id="follow-latest" type="button">↩ live run</button>
         <button class="ghost ctl-take" type="button">Take over</button>
         <button class="ghost danger ctl-stop" type="button">Stop</button>
@@ -377,9 +409,13 @@
       <div id="vnc-holder"></div>
     </div>
   </section>
-</div>
 
-<div id="drawer">
+  <div id="drawer">
+  <div class="drawer-head">
+    <span class="title">Details</span>
+    <span class="spacer"></span>
+    <button class="ghost" id="drawer-close" type="button" aria-label="Close details">×</button>
+  </div>
   <div id="drawer-pad">
     <section id="sec-run">
       <h2>Run a task</h2>
@@ -509,6 +545,7 @@
         <tbody id="scheds"></tbody>
       </table>
     </section>
+  </div>
   </div>
 </div>
 
@@ -737,7 +774,23 @@ $("pane-popout").onclick = () => { const u = browserUrl(); if (u) window.open(u,
   divider.addEventListener("dblclick", () => { pane.style.width = ""; });
 })();
 
-$("btn-details").onclick = () => document.body.classList.toggle("drawer-open");
+// The details panel. The header toggle mirrors the state (aria-pressed + .on)
+// so it reads as a lit switch, and Escape closes it — a panel you can open
+// must be closable from where you are, without hunting for its ×.
+function setDrawer(open) {
+  document.body.classList.toggle("drawer-open", open);
+  const b = $("btn-details");
+  b.classList.toggle("on", open);
+  b.setAttribute("aria-pressed", String(open));
+}
+
+$("btn-details").onclick = () =>
+  setDrawer(!document.body.classList.contains("drawer-open"));
+$("drawer-close").onclick = () => setDrawer(false);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && document.body.classList.contains("drawer-open"))
+    setDrawer(false);
+});
 
 // -- header pills / banner ---------------------------------------------------
 
@@ -768,6 +821,23 @@ function renderPills() {
   $("chat-avatar").textContent = (st.profile || "·").charAt(0).toUpperCase();
 }
 
+// The blocked-set signature the dismiss is remembered against. Dismissing a
+// wall of tasks must not dismiss a NEW block: the banner stays hidden only
+// while the set of blocked task ids is unchanged, and any task entering (or
+// leaving) blocked brings it back.
+function blockedSig(blocked) {
+  return JSON.stringify(blocked.map(t => t.id).sort());
+}
+
+function rememberDismissed(sig) {
+  try { localStorage.setItem("ba_needsyou_dismissed", sig); } catch (_) { /* private mode */ }
+}
+
+function dismissRemembered(sig) {
+  try { return localStorage.getItem("ba_needsyou_dismissed") === sig; }
+  catch (_) { return false; }
+}
+
 function renderBanner() {
   const st = state;
   const url = browserUrl();
@@ -775,11 +845,29 @@ function renderBanner() {
   const blocked = st.tasks.filter(t => t.status === "blocked");
 
   if (blocked.length) {
-    // The only state that needs a person right now, so it leads the page.
-    set("banner", `<div class="alert"><strong>Needs you.</strong> ` +
-      blocked.slice(0, 3).map(t => esc(t.recipe) + " — " + esc(t.detail)).join("<br>") +
-      `<div class="row">${open}, clear it, then answer it in the chat.
-        <button class="ghost" type="button" data-talk="${esc(blocked[0].thread_id || blocked[0].id)}">Open the conversation</button></div></div>`);
+    // The only state that needs a person right now, so it leads the page —
+    // as a summary. The full multi-line detail wall (one entry per blocked
+    // task, untruncated) took the whole viewport on a phone; one ellipsised
+    // line per task carries the same information at a tenth of the height.
+    const sig = blockedSig(blocked);
+    if (dismissRemembered(sig)) {
+      set("banner", `<div id="banner-min"><button class="ghost" id="banner-show" type="button">` +
+        `⚑ ${blocked.length} task${blocked.length === 1 ? "" : "s"} need you — show</button></div>`);
+      return;
+    }
+    const shown = blocked.slice(0, 3);
+    set("banner", `<div class="alert">` +
+      `<div class="alert-head"><strong class="alert-title">Needs you — ` +
+      `${blocked.length} task${blocked.length === 1 ? "" : "s"} waiting</strong>` +
+      `<button class="ghost" id="banner-hide" type="button" ` +
+      `title="Hide this until the list of waiting tasks changes">Hide</button></div>` +
+      shown.map(t => `<div class="alert-line" title="${esc(t.detail)}">` +
+        `${esc(t.recipe)} — ${esc(t.detail)}</div>`).join("") +
+      (blocked.length > shown.length
+        ? `<div class="alert-line">+ ${blocked.length - shown.length} more</div>` : "") +
+      `<div class="row"><button class="ghost" type="button" ` +
+      `data-talk="${esc(blocked[0].thread_id || blocked[0].id)}">Open the conversation</button>` +
+      `<span class="muted">${open} to clear it, then answer in the chat.</span></div></div>`);
     return;
   }
   if (st.llm_status === "no-key" || st.llm_status === "unreachable") {
@@ -863,15 +951,20 @@ function renderControls() {
   $("manual-box").classList.toggle("hidden", !paused);
   $("pane-paused").classList.toggle("hidden", !paused);
 
-  $("composer-hint").textContent = running
-    ? "This steers the running attempt — it re-plans with what you say."
-    : "This starts the next attempt, told what the last one tried.";
+  const fresh = !threadData || !(threadData.attempts || []).length;
+  $("composer-hint").textContent = fresh
+    ? "Press Enter to start a new task — the bot picks the right tool for what you wrote."
+    : running
+      ? "This steers the running attempt — it re-plans with what you say."
+      : "This starts the next attempt, told what the last one tried.";
   $("thread-send").textContent = running ? "Send" : "Send";
   const ta = $("thread-text");
   if (!ta.value) {
-    ta.placeholder = running
-      ? "Steer it — e.g. actually, search for the company page instead"
-      : "Give this bot something to do — e.g. find me a flight to Tokyo in March";
+    ta.placeholder = fresh
+      ? "Give this bot something to do — e.g. find me a flight to Tokyo in March"
+      : running
+        ? "Steer it — e.g. actually, search for the company page instead"
+        : "Tell it what to try next";
   }
 
   // Following: show the way back when the operator is reading an older thread.
@@ -895,6 +988,20 @@ document.addEventListener("click", (ev) => {
   const t = ev.target;
   const f = t.dataset ? t.dataset.filter : undefined;
   if (f !== undefined) { filter = f; showAll = false; renderTasks(); return; }
+
+  if (t.id === "banner-hide") {
+    rememberDismissed(blockedSig(state.tasks.filter(x => x.status === "blocked")));
+    renderBanner();
+    return;
+  }
+  if (t.id === "banner-show") {
+    try { localStorage.removeItem("ba_needsyou_dismissed"); } catch (_) { /* ignore */ }
+    renderBanner();
+    return;
+  }
+
+  const rt = t.dataset && t.dataset.retry;
+  if (rt) { act(() => api(`/api/tasks/${rt}/retry`, { method: "POST" })); return; }
 
   const talk = t.dataset && t.dataset.talk;
   if (talk) { openThread(talk, { pin: true }); return; }
@@ -968,9 +1075,12 @@ function renderTasks() {
         <summary>result</summary><pre>${esc(JSON.stringify(t.result, null, 2))}</pre></details>` : ""}</td>
       <td>${t.used_agent ? "yes" : "—"}</td>
       <td class="muted"><span data-elapsed="${t.created_at}"></span> ago</td>
-      <td>${canTalk
+      <td class="row">${canTalk
         ? `<button class="ghost" type="button" data-talk="${esc(t.thread_id || t.id)}"
              title="Open the conversation in the chat">${old ? "Read" : isCurrent ? "Watch" : "Open"}</button>`
+        : ""}${!old && (t.status === "failed" || t.status === "blocked")
+        ? `<button class="ghost" type="button" data-retry="${esc(t.id)}"
+             title="Run it again${t.status === "blocked" ? " — helps once the cause of the block is gone" : ""}">Retry</button>`
         : ""}</td>
     </tr>`;
   }).join("") : `<tr><td colspan="6"><div class="empty">` +
@@ -1002,11 +1112,28 @@ function openThread(id, opts = {}) {
 }
 
 async function loadThread() {
-  if (!threadId) return;
+  if (!threadId || threadId.startsWith("fresh:")) return;  // a fresh chat exists client-side only
   if (document.hidden) return;   // a hidden tab needs no updates
   try { threadData = await api(`/api/threads/${threadId}`); } catch (e) { return; }
   renderThread();
 }
+
+// "New chat": clear the conversation from view and start over. The old thread
+// is untouched — it stays in History — this just opens a blank sheet that the
+// composer can start work in (sendThread posts /api/chat for it). Pinned, so
+// a scheduled run starting mid-thought does not yank the fresh sheet away.
+function newChat() {
+  threadId = "fresh:" + Date.now().toString(36);
+  threadData = { thread_id: threadId, attempts: [], messages: [], current: null, archived: false };
+  pinnedThread = true;
+  renderedTurns = new Set();
+  threadPainted = false;
+  renderThread();
+  renderControls();
+  $("thread-text").focus();
+}
+
+$("btn-newchat").onclick = newChat;
 
 function renderThread() {
   if (!threadData) return;
@@ -1075,6 +1202,13 @@ function renderThread() {
         <span class="k ${esc(e.kind)}">${esc(e.kind)}</span> ${esc(e.text)}</div>`).join("");
     const decided = (a.decisions || []).map(d =>
       `<div class="muted"><span class="k ${esc(d.kind)}">${esc(d.kind)}</span> ${esc(d.text)}</div>`).join("");
+    // A dead attempt offers its own way back. Only for attempts this process
+    // still holds: a record from before a restart cannot be retried (the
+    // runner no longer knows the task), and a button that 404s is worse than
+    // none. threadData.archived is exactly that line.
+    const retry = !threadData.archived && (a.status === "failed" || a.status === "blocked")
+      ? `<div class="row" style="margin-top:8px"><button class="ghost" type="button" data-retry="${esc(a.id)}">Retry</button></div>`
+      : "";
     return `<div class="turn" data-turn="a-${esc(a.id)}"${fresh ? ` style="animation-delay:${Math.min(stagger++ * 40, 400)}ms"` : ""}>
       <div class="avatar sm" title="${esc(state.profile)}">${esc((state.profile || "·").charAt(0).toUpperCase())}</div>
       <div class="run-card ${esc(a.status)}${fresh ? " enter" : ""}">
@@ -1083,6 +1217,7 @@ function renderThread() {
         ${decided ? `<details data-keep="d${esc(a.id)}"><summary>what it decided (${(a.decisions || []).length})</summary>${decided}</details>` : ""}
         ${feedHtml ? `<details data-keep="a${esc(a.id)}"><summary>every step (${(a.activity || []).length})</summary>${feedHtml}</details>` : ""}
         ${a.used_agent ? `<div class="muted">finished via the agent fallback</div>` : ""}
+        ${retry}
       </div></div>`;
   });
 
@@ -1090,11 +1225,20 @@ function renderThread() {
   // the enter delay style rides the same attribute. Both are one-shot: the
   // second render finds the ids in renderedTurns and omits them, so the sig
   // stabilises and the node is not rewritten again.
-  set("thread", turns.join("") || `<div class="empty">Nothing here yet — say something below.</div>`);
+  set("thread", turns.join("") ||
+    (threadId.startsWith("fresh:")
+      ? `<div class="empty">New chat — say what this bot should do.</div>`
+      : `<div class="empty">Nothing here yet — say something below.</div>`));
   updateElapsed($("thread"));
+  const first = !threadPainted;
   threadPainted = true;
+  // Follow the conversation only when the reader is already at its end. An
+  // unconditional scroll on every poll yanked the operator back to the bottom
+  // mid-read every 2 s — the transcript was literally unreadable above the
+  // fold while a run was live. First paint still lands at the end.
   const sc = $("thread-scroll");
-  sc.scrollTop = sc.scrollHeight;
+  const nearEnd = sc.scrollHeight - sc.scrollTop - sc.clientHeight < 140;
+  if (first || nearEnd) sc.scrollTop = sc.scrollHeight;
 }
 
 // -- composer -----------------------------------------------------------------
@@ -1116,17 +1260,22 @@ async function sendThread() {
   const text = el.value.trim();
   err.classList.add("hidden");
   if (!text) { el.focus(); return; }
-  if (!threadData || !(threadData.attempts || []).length) {
-    // No attempt to attach to: the only way to start work is the run form.
-    document.body.classList.add("drawer-open");
-    $("sec-run").scrollIntoView({ behavior: "smooth", block: "start" });
-    return;
-  }
+  // An empty conversation is a start, not a dead end: the message routes and
+  // runs exactly like one typed against a thread — a claiming recipe takes it,
+  // otherwise the freeform agent does (which is when the server asks for a
+  // start URL, right here next to the text, instead of a form elsewhere).
+  const fresh = !threadData || !(threadData.attempts || []).length;
   threadSending = true;
   send.disabled = true;
   try {
-    const res = await api(`/api/tasks/${threadData.attempts[threadData.attempts.length - 1].id}/say`,
-      { method: "POST", body: JSON.stringify({ text }) });
+    let res;
+    if (fresh) {
+      res = await api("/api/chat", { method: "POST", body: JSON.stringify({ text }) });
+      openThread(res.thread_id, { force: true });
+    } else {
+      res = await api(`/api/tasks/${threadData.attempts[threadData.attempts.length - 1].id}/say`,
+        { method: "POST", body: JSON.stringify({ text }) });
+    }
     el.value = "";
     autosize();
     await loadThread();
