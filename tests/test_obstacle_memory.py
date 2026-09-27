@@ -362,3 +362,144 @@ def test_captcha_and_hostless_escalations_are_not_memorized(tmp_path):
         Challenge(ChallengeKind.RATE_LIMITED, "blank", "about:blank")))
 
     assert site_health.blocked_hosts(settings, "minesweeper.play") == {}
+
+
+# ---- the entry-unreachable seam (runner-level goto died) -------------------
+
+
+class _HookSession:
+    """Session whose goto fails for the dead canonical, succeeds elsewhere."""
+
+    def __init__(self, dead_url: str, cells_by_url: dict[str, int]) -> None:
+        self.dead_url = dead_url
+        self.cells_by_url = cells_by_url
+        self.gotos: list[str] = []
+        self.page = _HealPage(links=[], cells_by_url=cells_by_url)
+
+    async def goto(self, url, wait_until=None, timeout=None):
+        self.gotos.append(url)
+        if url == self.dead_url:
+            raise TimeoutError("Page.goto: Timeout 30000ms exceeded")
+        return f"PAGE::{url}"
+
+
+def test_entry_unreachable_records_the_obstacle_and_fails_legibly(tmp_path):
+    """A recipe without the recovery hook: obstacle written down, fail as
+    before, exactly one goto (no doubled timeout)."""
+    settings = StubSettings(data_root=tmp_path)
+    task = _StubTask()
+    recipe = _PlainRecipe("https://dead.example/new-game")
+    session = _HookSession("https://dead.example/new-game", {})
+    stub = _StubRunner(settings)
+    stub.session = session
+
+    out = asyncio.run(Runner._entry_unreachable(
+        stub, task, recipe, TimeoutError("Timeout 30000ms exceeded")))
+
+    assert out is None
+    assert task.status == TaskStatus.FAILED
+    assert "entry page unreachable" in task.detail
+    assert session.gotos == [], "no hook → no extra navigation, no doubled timeout"
+    stored = site_health.blocked_hosts(settings, task.recipe)
+    assert stored["dead.example"]["kind"] == "unreachable"
+    assert "Timeout 30000ms" in stored["dead.example"]["reason"]
+
+
+def test_entry_unreachable_lets_the_recipe_heal_and_retries_the_new_entry(
+        tmp_path):
+    """With the hook, a found replacement is recorded and the runner navigates
+    there instead of the dead hop."""
+    settings = StubSettings(data_root=tmp_path)
+    task = _StubTask()
+    recipe = _HealingRecipe("https://dead.example/new-game",
+                            "https://alive.example/board", settings)
+    session = _HookSession("https://dead.example/new-game", {})
+    session.page.links = [{"href": "https://alive.example/board", "text": "x"}]
+    session.page.cells_by_url = {"https://alive.example/board": 81}
+    stub = _StubRunner(settings)
+    stub.session = session
+
+    out = asyncio.run(Runner._entry_unreachable(
+        stub, task, recipe, TimeoutError("Timeout 30000ms exceeded")))
+
+    assert out == "PAGE::https://alive.example/board"
+    assert task.status is None, "the task went on to run, not failed"
+    assert session.gotos == ["https://alive.example/board"], \
+        "the retry navigates the recorded replacement (the dead goto already happened in _run_task)"
+    assert site_health.entry_url(settings, task.recipe) \
+        == "https://alive.example/board"
+
+
+def test_a_failed_recovery_still_fails_the_task_without_crashing(tmp_path):
+    settings = StubSettings(data_root=tmp_path)
+    task = _StubTask()
+    recipe = _BoomRecipe("https://dead.example/new-game")
+    session = _HookSession("https://dead.example/new-game", {})
+    stub = _StubRunner(settings)
+    stub.session = session
+
+    out = asyncio.run(Runner._entry_unreachable(
+        stub, task, recipe, TimeoutError("Timeout")))
+
+    assert out is None
+    assert task.status == TaskStatus.FAILED
+    assert session.gotos == ["https://dead.example/new-game"], \
+        "one retry after the (failed) hook; the original goto is not the helper's"
+
+
+class _PlainRecipe:
+    def __init__(self, url: str) -> None:
+        self.entry_url = url
+
+
+class _HealingRecipe(_PlainRecipe):
+    """entry_url re-reads the store, exactly like Minesweeper's property."""
+
+    def __init__(self, url: str, replacement: str, settings: Any) -> None:
+        self._default = url
+        self._replacement = replacement
+        self._settings = settings
+
+    @property
+    def entry_url(self) -> str:
+        return site_health.entry_url(self._settings, "minesweeper.play") \
+            or self._default
+
+    async def on_entry_unreachable(self, session, exc) -> bool:
+        site_health.record(self._settings, "minesweeper.play",
+                           entry_url=self._replacement, note="healed")
+        return True
+
+
+class _BoomRecipe(_PlainRecipe):
+    async def on_entry_unreachable(self, session, exc) -> bool:
+        raise RuntimeError("search blew up")
+
+
+def test_the_recipe_hook_finds_a_replacement_and_records_it(tmp_path):
+    """minesweeper.on_entry_unreachable: heal succeeds → True + recorded;
+    nothing new → False + nothing recorded."""
+    settings = StubSettings(data_root=tmp_path)
+    site_health.record_blocked(settings, "minesweeper.play",
+                               host="dead.example", kind="unreachable",
+                               reason="timeout")
+    recipe = _recipe(settings)
+    page = _HealPage(
+        links=[{"href": "https://alive.example/board", "text": "real"}],
+        cells_by_url={"https://alive.example/board": 81},
+    )
+
+    ok = asyncio.run(
+        recipe.on_entry_unreachable(_HealSession(page), TimeoutError("t")))
+    assert ok is True
+    assert site_health.entry_url(settings, "minesweeper.play") \
+        == "https://alive.example/board"
+
+    page2 = _HealPage(
+        links=[{"href": "https://dead.example/", "text": "remembered"}],
+        cells_by_url={},
+    )
+
+    assert asyncio.run(
+        recipe.on_entry_unreachable(_HealSession(page2), TimeoutError("t"))
+    ) is False

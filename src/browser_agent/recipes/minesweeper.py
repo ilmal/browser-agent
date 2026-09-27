@@ -339,6 +339,19 @@ class Minesweeper:
         # operator nothing about where it played or why nothing was won.
         return {"games": results, "wins": wins, "site": url, "summary": summary}
 
+    async def on_entry_unreachable(self, session: Any, exc: Exception) -> bool:
+        """The runner-level entry navigation died before run() got control.
+
+        This is the recipe's one chance to find its own way in: search for a
+        real replacement (obstacle memory keeps the search off every host
+        already written off — the unreachable canonical included), verify the
+        board contract, and record it. The runner then re-reads ``entry_url``
+        — now the replacement — and navigates there instead of the dead hop.
+        """
+        log_ = activity_of(session)
+        page = await session.page()
+        return await self._heal(page, log_) is not None
+
     def _exhausted(self, url: str) -> EscalationRequired:
         """The stop for "every venue this bot knows about is written off".
 
@@ -395,7 +408,7 @@ class Minesweeper:
                                       "has no 9x9 board contract", url=url)
                 continue
             record(self._settings, self.name, entry_url=url,
-                   note="minesweeper.online blocked this egress IP; "
+                   note="the canonical site is unusable from this egress; "
                         f"{url} discovered and verified as a replacement")
             log_.note("step", f"recipe updated: canonical site is blocked; "
                               f"playing on {url}")

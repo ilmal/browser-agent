@@ -837,14 +837,9 @@ class TaskRunner:
         try:
             page = await self.session.goto(recipe.entry_url)
         except Exception as exc:
-            # `goto` already retried a transient egress failure. Still failing
-            # means the hop is down for good, which the agent fallback cannot fix
-            # either — it egresses the same tunnel. Fail legibly instead of
-            # escaping to the worker as "unhandled", which reads like a crash.
-            task.status = TaskStatus.FAILED
-            task.detail = f"entry page unreachable: {exc}"
-            log.warning("entry page for %s unreachable: %s", task.recipe, exc)
-            return
+            page = await self._entry_unreachable(task, recipe, exc)
+            if page is None:
+                return
 
         # A challenge before we even start means the profile is not usable.
         challenge = await detect_challenge(page)
@@ -1179,6 +1174,45 @@ class TaskRunner:
         from .notify import notify_escalation
 
         await notify_escalation(self.settings, challenge, takeover_url(self.settings))
+
+    async def _entry_unreachable(self, task: Task, recipe: Recipe,
+                                 exc: Exception) -> Any | None:
+        """The entry hop died before the recipe could speak (timeout, reset).
+
+        The obstacle is written down first (2026-09-26: every problem is noted
+        so the next run routes around it), then a recipe that knows how to
+        find its own way in gets one chance to do so — ``minesweeper.play``
+        searches for and verifies a replacement venue. Only after that hook
+        does the runner re-read ``entry_url`` (a recorded replacement changes
+        it) and try once more; recipes without the hook fail exactly as
+        before, with no extra navigation. Returns the page, or None after
+        failing the task legibly.
+        """
+        from .site_health import host_of, record_blocked
+
+        record_blocked(self.settings, task.recipe,
+                       host=host_of(recipe.entry_url),
+                       kind="unreachable", reason=str(exc)[:300],
+                       url=recipe.entry_url)
+        recover = getattr(recipe, "on_entry_unreachable", None)
+        if recover is None:
+            task.status = TaskStatus.FAILED
+            task.detail = f"entry page unreachable: {exc}"
+            log.warning("entry page for %s unreachable: %s", task.recipe, exc)
+            return None
+        try:
+            await recover(self.session, exc)
+        except Exception:
+            log.warning("entry-unreachable recovery for %s failed",
+                        task.recipe, exc_info=True)
+        try:
+            return await self.session.goto(recipe.entry_url)
+        except Exception as exc2:
+            task.status = TaskStatus.FAILED
+            task.detail = f"entry page unreachable: {exc2}"
+            log.warning("entry page for %s unreachable after recovery: %s",
+                        task.recipe, exc2)
+            return None
 
     async def logged_in(self) -> bool:
         """Whether this profile currently has a usable session."""
