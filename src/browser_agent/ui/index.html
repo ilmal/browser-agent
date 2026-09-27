@@ -832,15 +832,20 @@ function obstacleKey(t) {
 }
 
 function normDetail(detail) {
-  // Strip the volatile tail — "(<url>)" and "(seen Nx)" — keeping the host when
-  // the url names one, so "blocked (https://minesweeper.online/x)" and
-  // "blocked (seen 3x)" collapse, while two different hosts stay distinct.
+  // Strip every count that churns between runs of the SAME obstacle: the
+  // trailing "(<url>)", a per-host "(seen Nx)", and the "N searched
+  // replacement(s) probed and rejected" tally — which grows on each re-run, so
+  // left in it made one obstacle read as a fresh one every time and re-opened
+  // the banner. The host of the trailing url is kept, so two different hosts
+  // still stay distinct.
   let d = String(detail || "");
   const url = d.match(/\((https?:\/\/[^\s)]+)\)/);
   const host = url ? (url[1].match(/^https?:\/\/([^/]+)/) || [])[1] : "";
   d = d.replace(/\s*\(https?:\/\/[^\s)]+\)\s*/g, " ")
        .replace(/\s*\(seen \d+x\)\s*/g, " ")
-       .replace(/\s+/g, " ").trim();
+       .replace(/\s*\d+ searched replacement\(s\) probed and rejected\s*/g,
+                " replacements probed and rejected ")
+       .replace(/\s+;/g, ";").replace(/\s+/g, " ").trim();
   return host ? d + " @ " + host : d;
 }
 

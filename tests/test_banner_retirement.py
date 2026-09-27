@@ -9,6 +9,7 @@ latest thing that happened to its recipe.
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 
 import pytest
 
@@ -79,3 +80,64 @@ def test_a_block_with_no_later_success_is_kept():
     rows = [_row("minesweeper.play", "blocked", 100.0)]
 
     assert _retire()(rows) == rows
+
+
+# -- the banner's obstacle key (served JS, run for real) --------------------
+#
+# ``normDetail``/``obstacleKey`` live in the served index.html, so no Python
+# test would otherwise notice them drifting. They are the whole reason the
+# banner stops re-opening: an obstacle whose headline churns between runs is
+# read as a NEW obstacle and un-hides the wall. These run the page's own
+# functions through node against the exact strings the live bot produced.
+
+_PAGE = Path(__file__).resolve().parents[1] / "src" / "browser_agent" / "ui" / "index.html"
+
+
+def _obstacle_key(details: list[str]) -> list[str]:
+    import re
+    import shutil
+    import subprocess
+
+    if not shutil.which("node"):
+        pytest.skip("node is not installed; cannot run the page's key function")
+    js = _PAGE.read_text()
+    helper = re.search(r"function normDetail\(detail\) \{.*?\n\}", js, re.S)
+    keyer = re.search(r"function obstacleKey\(t\) \{.*?\n\}", js, re.S)
+    assert helper and keyer, "the obstacle-key functions are gone from index.html"
+    script = (
+        helper.group(0) + "\n" + keyer.group(0) + "\n"
+        "const details = " + repr(list(details)).replace("'", '"') + ";\n"
+        "process.stdout.write(JSON.stringify("
+        "details.map(d => obstacleKey({recipe: 'minesweeper.play', detail: d}))));"
+    )
+    proc = subprocess.run(["node", "-e", script], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
+    import json
+
+    return json.loads(proc.stdout)
+
+
+def test_one_obstacle_keeps_one_key_as_its_counts_grow():
+    """The live case: re-running the recipe raises the seen/replacement counts.
+
+    Both rows are the same blocked canonical, so the banner must read them as
+    ONE obstacle — not two — and the dismiss must hold across the change.
+    """
+    a = ("rate_limited: every venue is written off: minesweeper.online (seen 2x); "
+         "4 searched replacement(s) probed and rejected (no board contract). "
+         "The local test board is operator-excluded. Needs a different egress, or "
+         "an adapter for another site. (https://minesweeper.online/new-game)")
+    b = a.replace("4 searched", "8 searched").replace("(seen 2x)", "(seen 9x)")
+
+    keys = _obstacle_key([a, b])
+
+    assert keys[0] == keys[1], "a churning count re-opened the banner"
+
+
+def test_two_different_hosts_stay_distinct():
+    a = "rate_limited: every venue is written off: minesweeper.online (seen 1x). (https://minesweeper.online/new-game)"
+    b = "rate_limited: every venue is written off: other.example (seen 1x). (https://other.example/new-game)"
+
+    keys = _obstacle_key([a, b])
+
+    assert keys[0] != keys[1], "two venues collapsed into one obstacle"
