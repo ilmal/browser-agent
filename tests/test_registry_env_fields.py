@@ -113,7 +113,7 @@ class TestBotUrlTemplate:
             laya_decide_url="", laya_pick_enabled=False,
             laya_min_confidence=0.0, laya_game_min_confidence=0.0,
             laya_max_candidates=1, laya_pick_retries=1,
-            api_port=8000, control_token="", ops_alert_url="",
+            api_port=8000, control_token="", hub_token="", ops_alert_url="",
             notify_on_escalation=False, browser_proxy="",
         )
         assert s.bot_url_template == "http://profile-{profile}:{api_port}"

@@ -513,7 +513,7 @@ def test_the_learned_directory_is_separate_from_the_operator_library(tmp_path):
         agent_timeout_s=1, laya_enabled=False, laya_decide_url="",
         laya_pick_enabled=False, laya_min_confidence=0.75,
         laya_game_min_confidence=0.55, laya_max_candidates=10, laya_pick_retries=0,
-        api_port=1, control_token="", ops_alert_url="", notify_on_escalation=False,
+        api_port=1, control_token="", hub_token="", ops_alert_url="", notify_on_escalation=False,
         browser_proxy="", recipes_dir=tmp_path / "recipes",
         learned_recipes_dir=tmp_path / "learned",
     )
@@ -536,7 +536,7 @@ def test_learning_is_off_when_the_directory_is_empty(tmp_path):
         agent_timeout_s=1, laya_enabled=False, laya_decide_url="",
         laya_pick_enabled=False, laya_min_confidence=0.75,
         laya_game_min_confidence=0.55, laya_max_candidates=10, laya_pick_retries=0,
-        api_port=1, control_token="", ops_alert_url="", notify_on_escalation=False,
+        api_port=1, control_token="", hub_token="", ops_alert_url="", notify_on_escalation=False,
         browser_proxy="", learn_recipes=False,
     )
     assert recipe_store.learned_store_for(s) is None
@@ -632,9 +632,14 @@ async def test_a_request_naming_a_different_url_is_never_matched(tmp_path, monke
     assert _GateStub.calls == [], "laya was asked about a request naming another page"
 
 
-async def test_a_host_only_entry_url_is_named_by_its_host(tmp_path, monkeypatch):
-    # A URL with no path is named by its host alone, so a request that writes a
-    # different page on that same host still names it — the gate then decides.
+async def test_a_host_only_entry_url_matches_only_a_host_only_request(
+    tmp_path, monkeypatch
+):
+    # SEC-BA-010: the precondition is an EQUALITY on host+path, not the old
+    # containment test. A host-only entry (https://example.com) matches a
+    # request for that host and no path; a request for a DIFFERENT page on
+    # the same host (/flights) is a different destination and does not match,
+    # whatever the wording.
     s = _settings_with_learned(tmp_path, monkeypatch)
     store = recipe_store.learned_store_for(s)
     save_learned_spec(
@@ -647,9 +652,83 @@ async def test_a_host_only_entry_url_is_named_by_its_host(tmp_path, monkeypatch)
 
     from browser_agent.router import learned_match
 
-    asked = "find a flight from stockholm on https://example.com/flights"
+    asked = "find a flight from stockholm on https://example.com"
     assert await learned_match(asked, "plan.task", s) == _LEARNED_SPEC["name"]
     assert len(_GateStub.calls) == 1
+
+    _GateStub.calls = []
+    other_page = "find a flight from stockholm on https://example.com/flights"
+    assert await learned_match(other_page, "plan.task", s) is None
+    assert _GateStub.calls == [], "laya was asked about a request for another page"
+
+
+async def test_a_path_entry_matches_only_that_path(tmp_path, monkeypatch):
+    # The spellings of one page match (scheme, www., trailing slash); another
+    # path on the same host does not.
+    s = _settings_with_learned(tmp_path, monkeypatch)
+    store = recipe_store.learned_store_for(s)
+    save_learned_spec(
+        store,
+        dict(
+            _LEARNED_SPEC,
+            entry_url="https://www.example.com/search/",
+            unverified=False,
+            replays=2,
+        ),
+    )
+    _GateStub.calls = []
+    _GateStub.answer = (True, 0.9)
+    monkeypatch.setattr("browser_agent.laya_gate.LayaGate", _GateStub)
+
+    from browser_agent.router import learned_match
+
+    same_page = "search stockholm flights on http://example.com/search"
+    assert await learned_match(same_page, "plan.task", s) == _LEARNED_SPEC["name"]
+
+    _GateStub.calls = []
+    other_page = "check https://example.com/help for flights from stockholm"
+    assert await learned_match(other_page, "plan.task", s) is None
+    assert _GateStub.calls == []
+
+
+async def test_the_payload_url_qualifies_without_a_mention_in_prose(
+    tmp_path, monkeypatch
+):
+    # The structured target (payload["url"]) is the request's destination even
+    # when the sentence itself names no URL.
+    s = _settings_with_learned(tmp_path, monkeypatch)
+    store = recipe_store.learned_store_for(s)
+    save_learned_spec(
+        store,
+        dict(_LEARNED_SPEC, entry_url="https://example.com/search", unverified=False, replays=2),
+    )
+    _GateStub.calls = []
+    _GateStub.answer = (True, 0.9)
+    monkeypatch.setattr("browser_agent.laya_gate.LayaGate", _GateStub)
+
+    from browser_agent.router import learned_match
+
+    assert (
+        await learned_match("find me a flight from stockholm", "plan.task", s,
+                            url="https://example.com/search")
+        == _LEARNED_SPEC["name"]
+    )
+    assert len(_GateStub.calls) == 1
+
+
+async def test_a_request_naming_no_url_at_all_is_never_matched(tmp_path, monkeypatch):
+    # A replay's whole effect is the page it opens, so a request that names no
+    # page cannot be asking for one — refused before the gate, as before.
+    s = _settings_with_learned(tmp_path, monkeypatch)
+    _trusted(recipe_store.learned_store_for(s))
+    _GateStub.calls = []
+    _GateStub.answer = (True, 0.99)
+    monkeypatch.setattr("browser_agent.laya_gate.LayaGate", _GateStub)
+
+    from browser_agent.router import learned_match
+
+    assert await learned_match("find me a flight from stockholm", "plan.task", s) is None
+    assert _GateStub.calls == []
 
 
 async def test_the_gate_declines_below_the_confidence_floor(tmp_path, monkeypatch):

@@ -117,28 +117,40 @@ _FREE_REQUESTS = frozenset({"agent.task", "plan.task"})
 _MATCH_CAP = 10
 
 
-async def learned_match(text: str, requested: str, settings) -> str | None:
+async def learned_match(text: str, requested: str, settings, *, url: str = "") -> str | None:
     """The trusted learned recipe that answers ``text``, or None.
 
     Nils's second-run path (2026-09-23): "I first use laya to figure out if my
     new run is similar to older run, if yes we load it in and let laya do
     basically all steps".
 
-    The "similar" question is asked twice over, and the cheap half goes first: a
-    freeform request only ever names its own URL, and replaying a recipe navigates
-    to *that recipe's* entry URL, so a candidate whose entry URL the request does
-    not name cannot be the one. Measured live 2026-09-24, the match itself cannot
-    tell either: "Go to https://www.iana.org/about and tell me what IANA is
-    responsible for" was routed to an example-domains recipe, whose page was then
-    scraped and reported as the answer to a question about a different page. The
-    URL is a fact about the request, so it is checked before any model call and
-    the model is only asked about the candidates that survive — each on its own,
+    The "similar" question is asked twice over, and the cheap half goes first:
+    replaying a recipe navigates to *that recipe's* entry URL, so a candidate
+    whose entry URL is not the page this request goes to cannot be the one.
+    Measured live 2026-09-24, the match itself cannot tell either: "Go to
+    https://www.iana.org/about and tell me what IANA is responsible for" was
+    routed to an example-domains recipe, whose page was then scraped and
+    reported as the answer to a question about a different page. The URL is a
+    fact about the request, so it is checked before any model call and the
+    model is only asked about the candidates that survive — each on its own,
     so no fixed option set can bias it.
 
-    Four refusals, all deliberate:
+    ``url`` is the request's structured target (the task payload's ``url``
+    field) when the caller has one; the URLs written in the request's own text
+    are extracted as well, which is how the composer passes a start page. The
+    precondition is an EQUALITY on scheme-less host+path between the request's
+    targets and a candidate's entry URL — a prose *mention* of a host or path
+    that is not the page being asked for qualifies nothing (SEC-BA-010: the
+    original containment test let any sentence naming the host put the
+    decision wholly to the gate).
+
+    Five refusals, all deliberate:
 
     * Nothing to match, or nothing trusted yet → None, without a model call.
-    * No candidate whose entry URL the request names → None, without a model
+    * No navigation target anywhere in the request → None, without a model
+      call. A request that names no page cannot be asking for a replay, whose
+      whole effect is the page it opens.
+    * No candidate whose entry URL equals a target → None, without a model
       call. This is the precondition above.
     * More than :data:`_MATCH_CAP` candidates → None. A bucket that large is
       more than the gate should be judging in one decision.
@@ -159,7 +171,7 @@ async def learned_match(text: str, requested: str, settings) -> str | None:
     candidates = [s for s in store.trusted_learned() if s.get("name") != requested]
     if not candidates:
         return None
-    named = _named_by_url(text, candidates)
+    named = _named_by_url(_request_targets(url, text), candidates)
     if not named:
         return None
     if len(named) > _MATCH_CAP:
@@ -191,34 +203,52 @@ async def learned_match(text: str, requested: str, settings) -> str | None:
         return None
 
 
-def _named_by_url(text: str, candidates: list[dict]) -> list[dict]:
-    """Candidates whose entry URL the request itself names.
+def _request_targets(url: str, text: str) -> list[str]:
+    """The URLs this request would navigate to, structured field first.
 
-    A learned recipe's whole effect is the page it navigates to (``_validate``
-    requires a learned spec to carry one), so a request that names a different
-    URL cannot be asking for it — no matter how similar the wording. Checked by
-    host + path, forgiving of the scheme, ``www.``, a trailing slash and a
-    trailing sentence, so a request that writes the URL the way a person would
-    still matches the one the harvest recorded.
+    ``url`` is the payload's ``url`` field — the target the caller stated in
+    the only field the runner reads for a start page. The URLs written in the
+    request's own text come second, because the composer has exactly one box
+    and passes its start page inside the sentence; trailing sentence
+    punctuation is stripped the same way ``api.fresh_chat`` strips it before
+    storing the field.
     """
-    low = (text or "").lower()
-    return [spec for spec in candidates if _url_named(low, str(spec.get("entry_url") or ""))]
+    from .tasks import _URL_RE
+
+    targets = [u.rstrip(".,;") for u in _URL_RE.findall(text or "")]
+    if (url or "").strip():
+        targets.insert(0, url.strip())
+    return targets
 
 
-def _url_named(text: str, url: str) -> bool:
-    """Does ``text`` name ``url``'s host, and its path when the URL has one?
+def _url_key(target: str) -> tuple[str, str]:
+    """Scheme-less, ``www.``-less, trailing-slash-less host+path identity.
 
-    A URL with no path (``https://example.com``) is named by its host alone; one
-    with a path needs the path too, so ``/about`` and ``/help/example-domains``
-    on the same host stay distinct.
+    Two URLs are the same page for the precondition's purpose when this pair
+    is equal — https and http, ``www.``, an explicit ``:443`` and a trailing
+    slash are spellings, not destinations. A different path on the same host
+    is a different page.
     """
     from urllib.parse import urlsplit
 
-    parts = urlsplit(url)
-    host = parts.netloc.lower()
+    parts = urlsplit((target or "").strip())
+    host = (parts.hostname or "").lower()
     if host.startswith("www."):
         host = host[4:]
-    if not host or host not in text:
-        return False
-    path = parts.path.rstrip("/").lower()
-    return not path or path in text
+    return host, parts.path.rstrip("/").lower()
+
+
+def _named_by_url(targets: list[str], candidates: list[dict]) -> list[dict]:
+    """Candidates whose entry URL IS one of the request's navigation targets.
+
+    A learned recipe's whole effect is the page it navigates to (``_validate``
+    requires a learned spec to carry one), so a request whose destination is a
+    different page cannot be asking for it — no matter how similar the
+    wording. Equality on the :func:`_url_key` pair, never containment: a
+    host-only entry matches only a host-only target, and a URL merely
+    mentioned in passing is not a destination.
+    """
+    keys = {key for key in (_url_key(t) for t in targets) if key[0]}
+    return [
+        spec for spec in candidates if _url_key(str(spec.get("entry_url") or "")) in keys
+    ]

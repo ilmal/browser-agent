@@ -66,6 +66,7 @@ def _settings(**over) -> Settings:
         learned_recipe_min_replays=2,
         api_port=8000,
         control_token="t",
+        hub_token="",
         ops_alert_url="",
         notify_on_escalation=False,
         browser_proxy="",

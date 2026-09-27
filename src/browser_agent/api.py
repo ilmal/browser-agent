@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import asyncio
 import logging
 import re
 import uuid
@@ -41,6 +42,7 @@ from .tasks import (
     recipe_reads_instruction,
 )
 from .threads import ThreadStore
+from .urlguard import UrlRejected, validate_public_http_url
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -244,6 +246,28 @@ async def require_token(request: Request) -> None:
 
 
 # -- models ----------------------------------------------------------------
+
+#: The payload keys anything in the codebase actually reads
+#: (``grep -R "payload.get(" src/`` is the audit). The run form's extra-JSON
+#: box used to merge its object into the payload verbatim, so any key a
+#: recipe treats as trusted could be set from the client (SEC-BA-011);
+#: everything outside this set is dropped at the door and logged. Internal
+#: writers — retry/resubmit, the farm fire, the thread brief — construct
+#: their payloads in-process and never pass through here.
+_ALLOWED_PAYLOAD_KEYS = frozenset(
+    {"task", "text", "goal", "url", "max_steps", "page_id", "games", "admin_url"}
+)
+
+
+def _sanitize_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """The client's payload, minus every key nothing downstream reads."""
+    if not isinstance(payload, dict):
+        return {}
+    kept = {k: v for k, v in payload.items() if k in _ALLOWED_PAYLOAD_KEYS}
+    dropped = sorted(set(payload) - set(kept))
+    if dropped:
+        log.info("payload keys dropped (not in the allowlist): %s", ", ".join(dropped))
+    return kept
 
 
 class TaskRequest(BaseModel):
@@ -479,13 +503,14 @@ async def create_task(req: TaskRequest) -> dict[str, Any]:
     # what the operator actually wrote, and a deterministic recipe that can
     # answer it outright must not lose to a 135-second LLM plan just because the
     # dropdown was left on the default. See router.py.
-    text = str(req.payload.get("task") or req.payload.get("text") or "")
+    payload = _sanitize_payload(req.payload)
+    text = str(payload.get("task") or payload.get("text") or "")
     # A learned recipe the agent earned may answer a freeform request, but only
     # once it has replayed cleanly (see Settings.learned_recipe_min_replays).
     # Consulted before the sync route() so a hand-authored predicate still wins.
-    matched = await learned_match(text, req.recipe, settings)
+    matched = await learned_match(text, req.recipe, settings, url=str(payload.get("url") or ""))
     try:
-        task = runner.submit(route(text, req.recipe, learned_match=matched), req.payload)
+        task = runner.submit(route(text, req.recipe, learned_match=matched), payload)
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     # The instruction that STARTED the work is part of the conversation, and it
@@ -528,18 +553,19 @@ async def fresh_chat(req: FreshChatRequest) -> dict[str, Any]:
     text = req.text.strip()
     if not text:
         raise HTTPException(status_code=400, detail="text is empty")
-    matched = await learned_match(text, AGENT_RECIPE, settings)
+    found = _URL_RE.search(text)
+    start = found.group(0).rstrip(".,;") if found else ""
+    matched = await learned_match(text, AGENT_RECIPE, settings, url=start)
     recipe = route(text, AGENT_RECIPE, learned_match=matched)
     payload: dict[str, Any] = {"task": text, "text": text, "goal": text}
     if recipe == AGENT_RECIPE:
-        found = _URL_RE.search(text)
         if not found:
             raise HTTPException(
                 status_code=400,
                 detail="No recipe claimed that, and a freeform run needs a page "
                 "to work on — paste the link into the message, or use Run a task.",
             )
-        payload["url"] = found.group(0).rstrip(".,;")
+        payload["url"] = start
     task = runner.submit(recipe, payload)
     opening = _task_text(task)
     if opening:
@@ -910,8 +936,18 @@ async def start_login(req: LoginRequest) -> dict[str, Any]:
 
     This is the bootstrap path: a fresh profile has no session, so the first
     thing it needs is a human to sign in once. After that the profile persists.
+
+    SEC-BA-008: the URL is caller-supplied and the browser it drives is live
+    and logged-in, so it is held to the same bar as every other navigation
+    target — http(s) only, and nothing that resolves into private, loopback,
+    link-local or metadata space. ``file:``, ``chrome:`` and internal hosts
+    are refused with the reason, rather than navigated.
     """
-    page = await session.goto(req.url)
+    try:
+        url = await asyncio.to_thread(validate_public_http_url, req.url)
+    except UrlRejected as exc:
+        raise HTTPException(status_code=400, detail=f"login url refused: {exc}") from exc
+    page = await session.goto(url)
     return {"opened": page.url, "takeover_url": "/vnc.html"}
 
 
@@ -1076,7 +1112,7 @@ def _clean_account(name: str) -> str:
 @app.post("/api/schedules", dependencies=[Depends(require_token)])
 async def create_schedule(req: ScheduleRequest) -> dict[str, Any]:
     try:
-        sched = store.add(req.id, req.recipe, req.payload, req.cron)
+        sched = store.add(req.id, req.recipe, _sanitize_payload(req.payload), req.cron)
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not req.enabled:
