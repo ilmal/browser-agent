@@ -63,10 +63,21 @@ COPY --from=registry.k8s.io/kubectl:v1.32.13 /bin/kubectl /usr/local/bin/kubectl
 
 WORKDIR /app
 
-# uv for a reproducible, cached dependency install.
+# uv for a reproducible, locked dependency install. The lockfile is the pin:
+# `uv sync --frozen` installs exactly the versions (with hashes) recorded in
+# uv.lock for this commit, so two builds of the same commit ship the same
+# dependencies and a yanked or maliciously retagged release cannot be picked
+# up at build time (SEC-BA-009). The uv version here must read the lockfile
+# format the repo was locked with.
 COPY --from=ghcr.io/astral-sh/uv:0.5.11 /uv /usr/local/bin/uv
 
-COPY pyproject.toml README.md ./
+# Dependency layer first, project source second: a source change does not
+# bust the (large) locked dependency install. The venv lives on a fixed path
+# rather than uv's default relative one so runtime and build agree on it.
+COPY pyproject.toml README.md uv.lock ./
+RUN uv venv --python /usr/local/bin/python3.12 /app/.venv \
+    && uv sync --frozen --no-dev --no-cache --extra agent --no-install-project
+
 COPY src ./src
 # The roster's "new bot" runs this rather than reimplementing it, so there is
 # exactly one definition of what a bot is. It is a generator: it writes YAML to
@@ -78,7 +89,15 @@ COPY scripts/add-profile.sh ./scripts/add-profile.sh
 # is NOT in the image: in the pod it runs over HTTP against llm-service's
 # /v1/decide proxy (LAYA_DECIDE_URL), so no torch and no weights are baked —
 # the in-process pip backend is a laptop-development fallback only.
-RUN uv pip install --system --no-cache ".[agent]"
+# Second sync pass installs the project itself into the locked environment;
+# the dependencies came from uv.lock in the layer above.
+RUN uv sync --frozen --no-dev --no-cache --extra agent
+
+# Runtime prefers the locked environment: CMD's `python`, the `playwright`
+# CLI below and any console script resolve to the venv first, then fall
+# through to the system for the non-Python display stack (Xvnc, x11vnc,
+# websockify) which is not in the venv at all.
+ENV PATH="/app/.venv/bin:$PATH"
 
 # Browsers live outside any user's home: Playwright's default is $HOME/.cache,
 # which differs between build (root) and runtime (agent) and would silently
