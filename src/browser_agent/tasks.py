@@ -141,6 +141,17 @@ class Recipe(Protocol):
 #: agent is the implementation.
 AGENT_RECIPE = "agent.task"
 
+#: Failure signatures that mean "the egress tunnel is down", not "this venue
+#: stopped serving us" (measured 2026-09-27: a proxy outage surfaced as
+#: ERR_PROXY_CONNECTION_FAILED and would otherwise have been recorded as
+#: minesweeper.online being unreachable). Deliberately narrow: a plain
+#: timeout is ambiguous and stays a venue obstacle.
+_EGRESS_FAILURES = (
+    "ERR_PROXY_CONNECTION_FAILED",
+    "ERR_TUNNEL_CONNECTION_FAILED",
+    "ERR_INTERNET_DISCONNECTED",
+)
+
 #: The planner/executor recipe. Named here rather than imported from the recipe
 #: module so the registry stays the only import-time coupling.
 PLAN_RECIPE = "plan.task"
@@ -1179,15 +1190,26 @@ class TaskRunner:
                                  exc: Exception) -> Any | None:
         """The entry hop died before the recipe could speak (timeout, reset).
 
-        The obstacle is written down first (2026-09-26: every problem is noted
-        so the next run routes around it), then a recipe that knows how to
-        find its own way in gets one chance to do so — ``minesweeper.play``
-        searches for and verifies a replacement venue. Only after that hook
-        does the runner re-read ``entry_url`` (a recorded replacement changes
-        it) and try once more; recipes without the hook fail exactly as
-        before, with no extra navigation. Returns the page, or None after
-        failing the task legibly.
+        A transport signature first: when the egress tunnel itself is down,
+        nothing is memorized (a dead proxy is nobody's obstacle — recording
+        hosts during an outage would slander venues that are perfectly
+        reachable once the tunnel returns) and no recovery is attempted (the
+        search would fail through the same tunnel). Otherwise the obstacle is
+        written down (2026-09-26: every problem is noted so the next run
+        routes around it), then a recipe that knows how to find its own way
+        in gets one chance to do so — ``minesweeper.play`` searches for and
+        verifies a replacement venue. Only after that hook does the runner
+        re-read ``entry_url`` (a recorded replacement changes it) and try
+        once more; recipes without the hook fail exactly as before, with no
+        extra navigation. Returns the page, or None after failing the task
+        legibly.
         """
+        if any(sig in str(exc) for sig in _EGRESS_FAILURES):
+            task.status = TaskStatus.FAILED
+            task.detail = f"egress unreachable (not the site): {exc}"
+            log.warning("egress failure running %s — no obstacle recorded: %s",
+                        task.recipe, exc)
+            return None
         from .site_health import host_of, record_blocked
 
         record_blocked(self.settings, task.recipe,

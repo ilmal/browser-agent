@@ -503,3 +503,28 @@ def test_the_recipe_hook_finds_a_replacement_and_records_it(tmp_path):
     assert asyncio.run(
         recipe.on_entry_unreachable(_HealSession(page2), TimeoutError("t"))
     ) is False
+
+
+def test_a_dead_egress_is_nobodys_obstacle(tmp_path):
+    """ERR_PROXY_CONNECTION_FAILED means the tunnel is down: fail legibly,
+    record nothing (a venue reachable once the tunnel returns must not be
+    slandered in the memory), heal nothing, retry nothing."""
+    settings = StubSettings(data_root=tmp_path)
+    task = _StubTask()
+    recipe = _HealingRecipe("https://dead.example/new-game",
+                            "https://alive.example/board", settings)
+    session = _HookSession("https://dead.example/new-game", {})
+    stub = _StubRunner(settings)
+    stub.session = session
+
+    out = asyncio.run(Runner._entry_unreachable(
+        stub, task, recipe,
+        TimeoutError("Page.goto: net::ERR_PROXY_CONNECTION_FAILED")))
+
+    assert out is None
+    assert task.status == TaskStatus.FAILED
+    assert "egress unreachable" in task.detail
+    assert session.gotos == [], "no retry while the tunnel is down"
+    assert site_health.blocked_hosts(settings, "minesweeper.play") == {}
+    assert site_health.entry_url(settings, "minesweeper.play") is None, \
+        "the hook never ran, so no replacement was recorded"
