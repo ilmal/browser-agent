@@ -210,12 +210,21 @@ async def require_token(request: Request) -> None:
     if not settings.control_token:
         raise HTTPException(status_code=503, detail="CONTROL_TOKEN is not configured")
     if request.method not in ("GET", "HEAD", "OPTIONS"):
+        # The browser's own verdict is authoritative and cannot be forged by
+        # page script, so when it is present it is the whole check. The
+        # Origin-vs-Host comparison is only the fallback for clients that send
+        # no Sec-Fetch-Site: any proxy that rewrites Host (nginx stops
+        # inheriting proxy_set_header the moment a location sets its own)
+        # defeats it, which refused every legitimate same-origin POST live
+        # on 2026-09-27.
         site = request.headers.get("sec-fetch-site", "")
-        if site and site not in ("same-origin", "none"):
-            raise HTTPException(status_code=403, detail="cross-site request refused")
-        origin = request.headers.get("origin", "")
-        if origin and origin.split("://", 1)[-1] != request.headers.get("host", ""):
-            raise HTTPException(status_code=403, detail="cross-origin request refused")
+        if site:
+            if site not in ("same-origin", "none"):
+                raise HTTPException(status_code=403, detail="cross-site request refused")
+        else:
+            origin = request.headers.get("origin", "")
+            if origin and origin.split("://", 1)[-1] != request.headers.get("host", ""):
+                raise HTTPException(status_code=403, detail="cross-origin request refused")
     header = request.headers.get("authorization", "")
     if header.removeprefix("Bearer ").strip() != settings.control_token:
         raise HTTPException(status_code=401, detail="unauthorized")
