@@ -89,7 +89,18 @@ _TERMINAL_ACTIONS = frozenset({"done", "extract", "extract_content"})
 #: An id or name is only turned into a CSS selector when it needs no escaping —
 #: a value that requires quoting is a value whose selector would be a quoting
 #: bug waiting to happen, and the XPath fallback is right there.
-_SIMPLE_IDENT = re.compile(r"^[A-Za-z0-9_-]+$")
+#: An id usable verbatim in ``#<id>``. CSS idents may not start with a digit or
+#: a hyphen-then-digit, and an ``id="2fa-go"`` passed the old ``[A-Za-z0-9_-]``
+#: test and emitted ``#2fa-go`` — a selector Chromium refuses outright
+#: (``SyntaxError: not a valid selector``), so the step could never replay. Such
+#: ids take the quoted ``[id="…"]`` form instead, which is always valid.
+_SIMPLE_IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_-]*$")
+
+#: An id safe to quote inside ``[id="…"]``. Only quotes and whitespace are
+#: refused — the selector is a valid attribute selector for anything else, and
+#: a value that needs escaping is a value whose selector would be a quoting bug
+#: waiting to happen, with the XPath fallback right there.
+_QUOTABLE_IDENT = re.compile(r'^[^"\'\s]+$')
 
 #: Cap on a harvested goal string. ``next_goal`` is model output; it is used as
 #: a human-readable step description, not a prompt, but keeping it short keeps a
@@ -131,6 +142,8 @@ def _selector_for(elem: Any) -> str | None:
         ident = str(attrs.get("id") or "").strip()
         if ident and _SIMPLE_IDENT.match(ident):
             return f"#{ident}"
+        if ident and _QUOTABLE_IDENT.match(ident):
+            return f'[id="{ident}"]'
         name = str(attrs.get("name") or "").strip()
         if name and _SIMPLE_IDENT.match(name):
             return f'[name="{name}"]'

@@ -105,18 +105,22 @@ def test_legacy_network_cookies_path_is_understood(tmp_path):
     assert profile_exists(_settings(tmp_path)) is True
 
 
-def test_locked_database_falls_back_to_saying_used(tmp_path):
-    """A running browser holds the database open.
+def test_unreadable_database_is_not_signed_in(tmp_path):
+    """An unconfirmed login must read as no login.
 
-    The count is a roster nicety, not a control path, so an unreadable db must
-    not flip a running profile to "not signed in".
+    A running browser holds the database open, so the read can fail — and the
+    old fallback ("the directory has files") then reported *signed in* for a
+    profile Chrome had merely launched into, the exact false positive this file
+    exists to prevent. The pill is binary and the safe side is "not signed in":
+    a false warning costs a glance, a false "ready" sends a bot out that cannot
+    work.
     """
     profile = _account_dir(tmp_path) / "Default"
     profile.mkdir(parents=True)
     # A file that is present but not a SQLite database: opening it raises.
     (profile / "Cookies").write_bytes(b"not a database")
 
-    assert profile_exists(_settings(tmp_path)) is True
+    assert profile_exists(_settings(tmp_path)) is False
 
 
 def test_a_named_account_is_read_not_the_default(tmp_path):

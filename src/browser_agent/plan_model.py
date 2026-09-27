@@ -23,6 +23,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from .urlguard import public_url_reason
+
 _HTTP_URL = re.compile(r"^https?://\S+$", re.IGNORECASE)
 
 
@@ -98,12 +100,32 @@ def parse_plan(raw: str | dict[str, Any], *, max_steps: int | None = None) -> Pl
 def _check(plan: Plan) -> None:
     if not _HTTP_URL.match(plan.entry_url):
         raise PlanRejected(f"entry_url is not an http(s) URL: {plan.entry_url!r}")
+    _reject_if_not_public(plan.entry_url, "entry_url")
     for i, step in enumerate(plan.steps):
         if step.action == "navigate" and not (step.text and _HTTP_URL.match(step.text)):
             raise PlanRejected(f"step {i}: navigate needs an http(s) URL in `text`")
+        if step.action == "navigate":
+            _reject_if_not_public(step.text or "", f"step {i} navigate")
         if step.action == "click" and not step.goal.strip():
             raise PlanRejected(f"step {i}: click needs a `goal` to resolve on the page")
         if step.action == "type" and (not step.goal.strip() or not step.text):
             raise PlanRejected(f"step {i}: type needs a `goal` and the literal `text` to enter")
         if step.action in {"extract", "wait"} and not step.selector:
             raise PlanRejected(f"step {i}: {step.action} must be deterministic — `selector` required")
+
+
+def _reject_if_not_public(url: str, what: str) -> None:
+    """Refuse a plan target that is not a public http(s) URL.
+
+    The same bar ``POST /api/login`` has always held its URL to, applied to the
+    two places a plan chooses a page (``2026-09-27``): the structural, DNS-free
+    half of :func:`~browser_agent.urlguard.validate_public_http_url`, so a plan
+    naming ``http://169.254.169.254/…`` or a non-http(s) scheme is refused as a
+    *plan* error the planner can be repaired on, rather than a navigation the
+    runner performs. A hostname that resolves into private space is not caught
+    here — a validator has no business resolving — and is refused by
+    ``_run_freeform``'s full check when the plan executes.
+    """
+    reason = public_url_reason(url)
+    if reason:
+        raise PlanRejected(f"{what} is not a navigable public target: {reason}")

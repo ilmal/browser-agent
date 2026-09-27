@@ -89,6 +89,44 @@ def test_record_blocked_upserts_and_keeps_first_sighting(tmp_path):
     assert list(stored) == ["minesweeper.online"], "www is folded away"
 
 
+def test_a_later_timeout_never_demotes_a_recorded_refusal(tmp_path):
+    """A refusal, once recorded, is not overwritten by a bare transport failure.
+
+    Live 2026-09-27: a host served its block page (kind "blocked"), then timed
+    out on the next run. ``record_blocked`` wrote the new sighting's kind
+    verbatim, so "blocked" became "unreachable" and the host fell straight back
+    out of ``written_off`` — the recipe walked into the wall it had already
+    learned to avoid. The reverse direction is wanted: a timeout later proven to
+    be a real refusal does narrow.
+    """
+    settings = StubSettings(data_root=tmp_path)
+    site_health.record_blocked(settings, "minesweeper.play",
+                               host="minesweeper.online", reason="Account blocked",
+                               kind="blocked")
+    after = site_health.record_blocked(
+        settings, "minesweeper.play", host="minesweeper.online",
+        reason="Page.goto: Timeout 30000ms exceeded", kind="unreachable")
+
+    assert after["kind"] == "blocked", "a timeout must not demote a refusal"
+    assert after["count"] == 2, "the sighting is still counted"
+    assert after["last_seen"] >= after["first_seen"]
+    assert "minesweeper.online" in site_health.written_off(settings, "minesweeper.play")
+
+
+def test_a_later_refusal_upgrades_a_recorded_timeout(tmp_path):
+    """The sticky kind only protects a refusal; it never blocks promotion."""
+    settings = StubSettings(data_root=tmp_path)
+    site_health.record_blocked(settings, "minesweeper.play",
+                               host="minesweeper.online", reason="timeout",
+                               kind="unreachable")
+    after = site_health.record_blocked(
+        settings, "minesweeper.play", host="minesweeper.online",
+        reason="Account blocked", kind="blocked")
+
+    assert after["kind"] == "blocked"
+    assert "minesweeper.online" in site_health.written_off(settings, "minesweeper.play")
+
+
 def test_loopback_and_hostless_records_are_refused(tmp_path):
     settings = StubSettings(data_root=tmp_path)
     for host in ("localhost", "127.0.0.1", "", "0.0.0.0"):

@@ -98,6 +98,14 @@ def record_blocked(
     ``reason`` are kept. The agent's own loopback is never recorded: the
     operator excluded it explicitly, and it is not a site that blocked us.
     Best-effort like every write here.
+
+    The kind is *sticky upwards*: a refusal is never demoted by a later bare
+    transport failure. This was a live regression (2026-09-27) — a host that had
+    served its block page, then timed out on the next run, had its ``blocked``
+    overwritten by ``unreachable`` and fell straight back out of
+    :func:`written_off`, so the recipe walked into the wall again. The reverse
+    direction is allowed on purpose: a plain timeout that evidence later proves
+    to be a real refusal does become narrowing.
     """
     host = _normalize_host(host)
     if not host or host in _LOCAL_HOSTS:
@@ -108,6 +116,8 @@ def record_blocked(
     blocked = dict(blocked) if isinstance(blocked, dict) else {}
     now = time.time()
     prev = blocked.get(host) if isinstance(blocked.get(host), dict) else {}
+    if str(prev.get("kind") or "") in _NARROWING_KINDS and kind not in _NARROWING_KINDS:
+        kind = str(prev["kind"])
     record_ = {
         "kind": kind,
         "reason": str(reason or prev.get("reason") or ""),

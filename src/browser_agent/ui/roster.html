@@ -312,6 +312,7 @@
   <span id="bots-pills" class="row" style="gap:6px">
     <span class="pill" id="p-count">…</span>
     <span class="pill" id="p-up">…</span>
+    <button type="button" class="pill hidden" id="p-hidden"></button>
   </span>
   <div class="spacer"></div>
   <button type="button" class="ghost" id="refresh">Refresh</button>
@@ -490,6 +491,7 @@ let lib = null;         // GET /api/recipes
 let farms = null;       // GET /api/farms
 let editing = null;     // profile whose notes are being edited
 let routeName = "bots"; // bots | farms | room
+let showHidden = false; // reveal bots the operator has hidden (Bot.hidden)
 let curFarm = null;     // the farm open in the room
 let sel = "all";        // room selection: "all" or a profile
 let addr = "all";       // composer addressee: "all" or a profile
@@ -639,6 +641,7 @@ function botCard(b) {
         <div class="slug">${esc(b.profile)}</div>
       </div>
       ${ident}
+      ${b.hidden ? `<span class="pill" title="Hidden from the grid; it still runs its schedules.">hidden</span>` : ""}
       ${statusPill(b)}
     </div>
     ${b.job ? `<div class="job">${esc(b.job)}</div>` : `<div class="job muted">No job set yet.</div>`}
@@ -649,6 +652,8 @@ function botCard(b) {
       <a class="primary" href="${esc(url)}" target="_blank" rel="noopener">Open</a>
       <a href="${liveUrl(b.profile)}" target="_blank" rel="noopener">Watch live</a>
       <button type="button" class="ghost" data-edit="${esc(b.profile)}">Notes</button>
+      <button type="button" class="ghost" data-hidetoggle="${esc(b.profile)}" data-to="${b.hidden ? "0" : "1"}"
+        title="Hidden bots stay on the roster and keep their schedules; they are just out of the grid.">${b.hidden ? "Unhide" : "Hide"}</button>
       <button type="button" class="ghost danger" data-remove="${esc(b.profile)}">Remove</button>
     </div>
     <div class="edit hidden" id="edit-${esc(b.profile)}">
@@ -681,12 +686,27 @@ function botCard(b) {
 
 function render() {
   if (!data) return;
-  const bots = data.bots || [];
+  const all = data.bots || [];
+  // Hidden bots are "out of the way", not gone: they keep running their
+  // schedules and are always reachable at their own URL, but the grid does not
+  // show them unless the operator asks. `Bot.hidden` was stored and returned
+  // but read nowhere, so a bot the operator hid stayed on the roster — the
+  // toggle the field's own comment promised (2026-09-27).
+  const bots = showHidden ? all : all.filter(b => !b.hidden);
   $("p-count").textContent = bots.length + (bots.length === 1 ? " bot" : " bots");
   const up = bots.filter(b => b.reachable).length;
   const p = $("p-up");
   p.textContent = up + " up";
   p.className = "pill " + (bots.length === 0 ? "" : up === bots.length ? "ok" : up === 0 ? "bad" : "warn");
+
+  const nHidden = all.length - bots.length;
+  const hp = $("p-hidden");
+  hp.classList.toggle("hidden", nHidden === 0);
+  hp.textContent = showHidden ? "hide hidden" : `${nHidden} hidden`;
+  hp.title = showHidden
+    ? "Stop showing bots the operator has hidden."
+    : "Show the bots that have been hidden — they still run their schedules.";
+  hp.classList.toggle("acc", showHidden);
 
   $("create-wrap").classList.toggle("hidden", !data.can_create);
   const box = $("bots");
@@ -694,7 +714,9 @@ function render() {
   box.classList.toggle("entrance", first);
   set("bots", bots.length
     ? bots.map((b, i) => withDelay(botCard(b), i)).join("")
-    : `<div class="empty">No bots yet. Create one to give it its own browser and login.</div>`);
+    : `<div class="empty">${showHidden || all.length === 0
+        ? "No bots yet. Create one to give it its own browser and login."
+        : "All bots are hidden — click “show hidden” above."}</div>`);
   if (first) setTimeout(() => box.classList.remove("entrance"), 1400);
 }
 
@@ -778,7 +800,11 @@ async function refreshFarms() {
 
 function ensureFarmForm() {
   if (!data) return;
-  const bots = data.bots || [];
+  // A farm composes work across the *active* roster, so hidden bots are not
+  // offered as members — hiding one is how an operator takes it out of
+  // circulation without deleting its logins. A hidden bot that is already
+  // chosen stays chosen (the chip is just not re-rendered away).
+  const bots = (data.bots || []).filter(b => !b.hidden || chosen.has(b.profile));
   const box = $("f-members");
   const sig = bots.map(b => b.profile + (b.reachable ? 1 : 0) + (b.signed_in ? 1 : 0)).join(",");
   if (box.dataset.sig !== sig) {
@@ -1435,6 +1461,20 @@ document.addEventListener("click", async (ev) => {
     location.hash = "#/farm/" + t.dataset.farm; return;
   }
   if (t.id === "back-farms") { location.hash = "#/farms"; return; }
+
+  // ---- hidden bots: reveal toggle, and per-bot hide/unhide ----
+  if (t.id === "p-hidden") { showHidden = !showHidden; render(); return; }
+  if (t.dataset.hidetoggle) {
+    const p = t.dataset.hidetoggle;
+    t.disabled = true;
+    try {
+      await api("/api/bots/" + encodeURIComponent(p), { method: "PATCH",
+        body: JSON.stringify({ hidden: t.dataset.to === "1" }) });
+      await refresh();
+    } catch (e) { banner("bad", "Could not hide that bot: " + esc(e.message)); }
+    finally { t.disabled = false; }
+    return;
+  }
 
   // ---- bot create ----
   if (t.id === "show-create") {

@@ -282,11 +282,12 @@ async def patch_bot(profile: str, req: PatchBot) -> dict[str, Any]:
 async def delete_bot(profile: str, purge: bool = False) -> dict[str, Any]:
     """Remove a bot: drop it from the roster, then delete its cluster objects.
 
-    The PVC is kept unless `purge` is set, and that default is deliberate — the
-    PVC *is* the login. Chrome's profile lives there, so deleting it logs the bot
-    out of every account it holds, which is not something a "remove from the
-    list" click should do. Keeping it means a bot removed by mistake comes back
-    still signed in when it is created again under the same name.
+    The PVCs are kept unless `purge` is set, and that default is deliberate —
+    the profile PVC *is* the login. Chrome's profile lives there, so deleting it
+    logs the bot out of every account it holds, which is not something a
+    "remove from the list" click should do. Keeping it means a bot removed by
+    mistake comes back still signed in when it is created again under the same
+    name. `purge` drops both claims: the profile *and* the schedules/artifacts.
     """
     if not registry.valid_profile(profile):
         raise HTTPException(400, "profile must be lowercase letters, digits and dashes")
@@ -301,20 +302,27 @@ async def delete_bot(profile: str, purge: bool = False) -> dict[str, Any]:
     # the operator cannot get rid of.
     registry.save(settings.registry_path, reg)
 
-    kinds = ["deployment", "service"] + (["pvc"] if purge else [])
+    targets = [("deployment", f"profile-{profile}"), ("service", f"profile-{profile}")]
+    if purge:
+        # Both of the bot's claims, not just the profile: ``data-{profile}``
+        # holds its schedules and artifacts, so purging one and leaving the
+        # other bound leaks the volume forever and lets a bot re-created under
+        # the same name inherit the old state — the opposite of what purge
+        # means (2026-09-27).
+        targets += [("pvc", f"profile-{profile}"), ("pvc", f"data-{profile}")]
     errors: list[str] = []
-    for kind in kinds:
+    for kind, obj in targets:
         try:
             done = subprocess.run(
                 [settings.kubectl_bin, "-n", settings.namespace, "delete", kind,
-                 f"profile-{profile}", "--ignore-not-found"],
+                 obj, "--ignore-not-found"],
                 capture_output=True, text=True, timeout=60,
             )
         except (OSError, subprocess.SubprocessError) as exc:
-            errors.append(f"{kind}: {exc}")
+            errors.append(f"{kind}/{obj}: {exc}")
             continue
         if done.returncode != 0:
-            errors.append(f"{kind}: {done.stderr.strip()[:200]}")
+            errors.append(f"{kind}/{obj}: {done.stderr.strip()[:200]}")
 
     log.info("deleted bot %s (purge=%s)", profile, purge)
     return {

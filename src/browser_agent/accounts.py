@@ -43,6 +43,7 @@ import shutil
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
 
 log = logging.getLogger(__name__)
 
@@ -159,6 +160,11 @@ def signed_in(profile_dir: Path) -> bool:
     Measured on this deployment — a never-used profile has 0, a signed-in one
     has 11. Read over the file's own SQLite, read-only and with a short timeout,
     because the browser holds it open while running.
+
+    A read that fails is reported as *not* signed in, never as signed in: the
+    only safe direction for a binary "ready" pill. The directory fallback this
+    once had was true of every profile Chrome had merely launched into, which is
+    exactly the never-touched bot the operator needs warned about.
     """
     import sqlite3
 
@@ -174,9 +180,7 @@ def signed_in(profile_dir: Path) -> bool:
         return False
     try:
         # A locked database is not an error worth raising: it means the browser
-        # is running, and the count is a roster nicety, not a control path. Fall
-        # back to the directory check so a running-but-unknown profile stays
-        # visible rather than flipping to "not signed in".
+        # is running, and the count is a roster nicety, not a control path.
         con = sqlite3.connect(f"file:{cookies}?mode=ro", uri=True, timeout=1.0)
         try:
             n = con.execute("select count(*) from cookies").fetchone()[0]
@@ -184,10 +188,14 @@ def signed_in(profile_dir: Path) -> bool:
             con.close()
         return bool(n)
     except sqlite3.Error:
-        try:
-            return any(path.iterdir())
-        except OSError:
-            return False
+        # An unconfirmed login is reported as no login. The old fallback here
+        # was ``any(path.iterdir())``, which is true of every profile Chrome has
+        # merely *launched* into — reintroducing the exact false positive this
+        # function's docstring forbids (2026-09-27). The pill the roster renders
+        # is binary, so the unknown state has to pick a side, and the safe side
+        # is "not signed in": a false warning costs a glance, a false "ready"
+        # sends a bot out that cannot work.
+        return False
 
 
 def remove_account(profile_root: Path, name: str) -> bool:
@@ -207,6 +215,21 @@ def remove_account(profile_root: Path, name: str) -> bool:
 
 def _clean(value: str, limit: int = 200) -> str:
     return " ".join(str(value or "").split())[:limit]
+
+
+def _number(value: Any, default: float = 0.0) -> float:
+    """A stored number, or ``default`` when it is not one.
+
+    ``float("later")`` raises ValueError, and this runs on the control plane's
+    import path, where an exception crashloops the pod instead of degrading.
+    ``bool`` is refused rather than coerced: ``True`` is not a timestamp.
+    """
+    if isinstance(value, bool):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 @dataclass
@@ -350,7 +373,17 @@ def load_accounts(root: Path, path: Path) -> AccountStore:
     except (OSError, ValueError):
         raw = None
     if isinstance(raw, dict):
-        for item in raw.get("accounts") or []:
+        # ``raw.get("accounts") or []`` is not enough: a non-list truthy value
+        # (``{"accounts": 5}``) iterates into a TypeError, and this function runs
+        # at import of the control plane, so that is a crashloop rather than the
+        # degrade-to-default it documents. Same for a non-coercible
+        # ``created_at`` below (2026-09-27).
+        items = raw.get("accounts")
+        if not isinstance(items, list):
+            if items:
+                log.warning("%s: accounts is not a list; ignoring it", path)
+            items = []
+        for item in items:
             if not isinstance(item, dict) or not valid_account(item.get("name", "")):
                 continue
             store.accounts.append(Account(
@@ -358,7 +391,7 @@ def load_accounts(root: Path, path: Path) -> AccountStore:
                 label=_clean(item.get("label", "")),
                 email=_clean(item.get("email", "")),
                 notes=_clean(item.get("notes", ""), 500),
-                created_at=float(item.get("created_at") or 0.0),
+                created_at=_number(item.get("created_at")),
             ))
         if isinstance(raw.get("active"), str):
             store.active = raw["active"]

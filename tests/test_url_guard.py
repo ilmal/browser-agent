@@ -151,7 +151,9 @@ class TestLoginEndpoint:
         class Session:
             # The lifespan touches these on startup and shutdown; the test
             # only cares that /api/login validates before any goto happens.
-            async def set_account(self, account):
+            # set_account is sync on the real BrowserSession (browser.py);
+            # mirroring that keeps this fake honest.
+            def set_account(self, account):
                 pass
 
             async def start(self):
@@ -185,7 +187,9 @@ class TestLoginEndpoint:
             url = "https://example.com/login"
 
         class Session:
-            async def set_account(self, account):
+            # set_account is sync on the real BrowserSession (browser.py);
+            # mirroring that keeps this fake honest.
+            def set_account(self, account):
                 pass
 
             async def start(self):
@@ -212,3 +216,141 @@ class TestLoginEndpoint:
         assert res.status_code == 200
         assert res.json()["opened"] == "https://example.com/login"
         assert got == ["https://example.com/login"]
+
+
+class TestStructuralGuardForSyncCallers:
+    """``public_url_reason`` is the DNS-free half, for the two navigation paths
+    that cannot afford a blocking lookup: ``tasks._start_url_for`` (sync) and
+    ``plan_model._check`` (a pure validator). It must refuse every literal
+    private/loopback/metadata address and every non-http(s) scheme — the
+    shapes an SSRF payload actually uses — and pass a public name through.
+    """
+
+    @pytest.mark.parametrize(
+        "url",
+        [
+            "file:///etc/passwd",
+            "data:text/html,hello",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1:8000/api/tasks",
+            "http://[::1]/",
+            "http://10.244.231.211/",
+            "http://100.64.0.3/",
+            "about:blank",
+            "",
+        ],
+    )
+    def test_it_refuses_what_needs_no_dns(self, url):
+        from browser_agent.urlguard import public_url_reason
+
+        assert public_url_reason(url) is not None
+
+    @pytest.mark.parametrize(
+        "url",
+        ["https://example.com/page", "http://8.8.8.8/", "https://sub.example.test/x?q=1"],
+    )
+    def test_it_passes_a_public_target(self, url):
+        from browser_agent.urlguard import public_url_reason
+
+        assert public_url_reason(url) is None
+
+
+class TestRunNavigationIsGuarded:
+    """SEC-BA-011: the guard was live on ``/api/login`` only. These pin it on
+    the two paths a *task* chooses a page — ``tasks._start_url_for`` and
+    ``plan_model._check`` — against the real ``urlguard``, with the conftest
+    stand-in undone so the production behaviour is what runs.
+    """
+
+    @pytest.fixture
+    def real_guard(self, monkeypatch):
+        """Restore the genuine check on the two consumers.
+
+        The autouse conftest fixture patches these to let the loopback test
+        server stand in for a public site; here the point is the guard.
+        """
+        import browser_agent.plan_model as plan_model
+        import browser_agent.tasks as tasks
+        from browser_agent.urlguard import public_url_reason, validate_public_http_url
+
+        monkeypatch.setattr(tasks, "public_url_reason", public_url_reason)
+        monkeypatch.setattr(tasks, "validate_public_http_url", validate_public_http_url)
+        monkeypatch.setattr(plan_model, "public_url_reason", public_url_reason)
+
+    @staticmethod
+    def _task(recipe: str, payload: dict):
+        from browser_agent.tasks import Task
+
+        return Task(recipe=recipe, payload=payload)
+
+    @pytest.mark.parametrize(
+        "target",
+        [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://127.0.0.1:8000/api/tasks",
+            "file:///etc/passwd",
+        ],
+    )
+    def test_start_url_refuses_an_internal_target_in_the_prose(self, real_guard, target):
+        from browser_agent.tasks import _start_url_for
+
+        task = self._task("agent.task", {})
+        assert _start_url_for(f"read {target} and tell me what it says", task) == ""
+
+    @pytest.mark.parametrize(
+        "target",
+        ["http://169.254.169.254/", "http://127.0.0.1:8000/", "data:text/html,x"],
+    )
+    def test_start_url_refuses_an_internal_target_in_the_payload(self, real_guard, target):
+        from browser_agent.tasks import _start_url_for
+
+        task = self._task("agent.task", {"url": target})
+        assert _start_url_for("", task) == ""
+
+    def test_a_public_start_url_survives(self, real_guard):
+        from browser_agent.tasks import _start_url_for
+
+        task = self._task("agent.task", {"url": "https://example.com/x"})
+        assert _start_url_for("", task) == "https://example.com/x"
+
+    @pytest.mark.parametrize(
+        "entry",
+        ["http://169.254.169.254/", "file:///etc/passwd", "http://127.0.0.1/"],
+    )
+    def test_a_plan_naming_an_internal_entry_url_is_rejected(self, real_guard, entry):
+        from browser_agent.plan_model import PlanRejected, parse_plan
+
+        # A non-http scheme is caught by the existing scheme check; a private
+        # literal by the new public-target guard. Either way it is refused
+        # before the browser is asked to go there.
+        with pytest.raises(PlanRejected, match="entry_url is not"):
+            parse_plan(
+                {
+                    "entry_url": entry,
+                    "steps": [{"action": "navigate", "text": "https://example.com/"}],
+                }
+            )
+
+    def test_a_plan_navigate_step_to_an_internal_target_is_rejected(self, real_guard):
+        from browser_agent.plan_model import PlanRejected, parse_plan
+
+        with pytest.raises(PlanRejected, match="not a navigable public target"):
+            parse_plan(
+                {
+                    "entry_url": "https://example.com/",
+                    "steps": [
+                        {"action": "navigate", "text": "http://169.254.169.254/"}
+                    ],
+                }
+            )
+
+    def test_a_public_plan_is_accepted(self, real_guard):
+        from browser_agent.plan_model import parse_plan
+
+        plan = parse_plan(
+            {
+                "entry_url": "https://example.com/",
+                "steps": [{"action": "navigate", "text": "https://example.com/form"}],
+            }
+        )
+        assert plan.entry_url == "https://example.com/"

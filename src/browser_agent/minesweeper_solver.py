@@ -302,7 +302,11 @@ def guess_key(
         if grid[rr][cc].state == OPENED
     )
     corner = r in (0, rows - 1) and c in (0, cols - 1)
-    return (prob, -opened_neighbours, 0 if corner else 1, r, c)
+    # Corners rank *last* at equal risk and equal information: a corner touches
+    # fewer cells, so opening it resolves fewer constraints than opening an
+    # interior cell does. The tuple is lowest-is-best, so a corner takes the
+    # larger value (2026-09-27).
+    return (prob, -opened_neighbours, 1 if corner else 0, r, c)
 
 
 def ranked_guesses(

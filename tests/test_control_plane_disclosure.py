@@ -80,6 +80,21 @@ class TestForwardedPrefix:
             )
         assert res.json()["url_prefix"] == "/b/linkedin"
 
+    def test_a_scheme_relative_authority_prefix_is_dropped(self, bot_env):
+        """SEC-BA-012: the UI fetches ``PREFIX + "/api/..."``. A prefix beginning
+        ``//`` is the protocol-relative authority form — the browser resolves it
+        to a *foreign origin*, so every API call (bearer token attached) would
+        leave the pod. The old character allowlist admitted ``//`` because ``/``
+        is in its class; it must not."""
+        from fastapi.testclient import TestClient
+
+        with TestClient(bot_env.app) as client:
+            for value in ["//evil.example", "///evil.example", "/\\evil.example"]:
+                res = client.get(
+                    "/api/state", headers={**AUTH, "X-Forwarded-Prefix": value}
+                )
+                assert res.json()["url_prefix"] == "", value
+
     def test_prefix_script_escapes_its_value(self, bot_env):
         """The sink itself escapes for the JS-in-HTML context, so even a value
         that got past the allowlist could not close the script tag."""

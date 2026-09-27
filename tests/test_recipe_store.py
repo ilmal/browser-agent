@@ -151,6 +151,32 @@ def test_deleting_removes_either_kind(library):
         recipe_store.delete_recipe(library, "s")
 
 
+def test_deleting_the_overrides_file_by_name_is_refused(library):
+    """``DELETE /api/recipes/_overrides`` must not wipe every operator override.
+
+    ``delete_recipe`` resolves the file as ``directory/<name>.json``, and the
+    overrides live in ``directory/_overrides.json`` — so the name ``_overrides``
+    hit the file itself and unlinked it, taking every built-in override with it.
+    Names are validated on write, so anything that could not have been stored
+    (including the leading underscore) is refused on delete (2026-09-27).
+    """
+    recipe_store.save_overrides(library, "x.post", {"max_chars": 100})
+    recipe_store.save_overrides(library, "linkedin.page_post", {"max_chars": 200})
+    assert len(library.all_overrides()) == 2
+
+    with pytest.raises(RecipeError, match="reserved"):
+        recipe_store.delete_recipe(library, "_overrides")
+    # Both overrides are still there — the file was not unlinked.
+    assert len(library.all_overrides()) == 2
+    assert library.cfg("x.post", "max_chars", 280) == 100
+
+
+@pytest.mark.parametrize("name", ["_overrides", "_anything", "Has Caps", "..", "a/b"])
+def test_a_name_that_could_not_have_been_stored_is_refused_on_delete(library, name):
+    with pytest.raises(RecipeError, match="reserved"):
+        recipe_store.delete_recipe(library, name)
+
+
 def test_a_saved_recipe_is_one_the_loader_accepts(library):
     # "Saved but unreadable" must be impossible: save goes through the same gate.
     saved = recipe_store.save_step_recipe(
@@ -224,6 +250,53 @@ def test_a_stored_recipe_is_installed_and_can_be_forgotten(monkeypatch, tmp_path
         tasks.forget_recipe("mine")
 
 
+# ---- a stored name may not leave a built-in missing -------------------------
+
+
+def test_removing_a_stored_recipe_that_shadowed_a_builtin_restores_it(monkeypatch, tmp_path):
+    """A stored recipe named after a built-in is a *stand-in*, not a deletion.
+
+    ``_validate`` accepts ``minesweeper.play`` (dots are legal in a name), so
+    the library could install a stored entry over the live built-in object — and
+    the library's own cleanup (``load_stored_recipes`` forgetting a name absent
+    from the store) then deleted the name from the registry entirely. The
+    built-in was gone for the life of the process: ``get_recipe`` raised
+    KeyError and the recipe disappeared from the panel (2026-09-27).
+    """
+    import browser_agent.recipes  # noqa: F401  — registers the built-ins
+    from browser_agent.recipes import stored as stored_module
+
+    builtin = tasks.get_recipe_or_none("minesweeper.play")
+    assert builtin is not None and builtin.__class__.__name__ == "Minesweeper"
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(recipe_store.time, "monotonic", lambda: clock["t"])
+    store = RecipeStore(tmp_path)
+    _write(store, "minesweeper.play.json", {
+        "name": "minesweeper.play",
+        "description": "a stand-in that is not the game",
+        "entry_url": "https://example.com/",
+        "steps": [{"action": "navigate", "goal": "go", "text": "https://example.com/"}],
+    })
+    monkeypatch.setattr(stored_module, "store_for", lambda settings: store)
+
+    try:
+        stored_module.load_stored_recipes()
+        assert tasks.get_recipe_or_none("minesweeper.play").__class__.__name__ == "StoredRecipe"
+
+        # The library's cleanup path: the file is gone, so the name is pruned.
+        (tmp_path / "minesweeper.play.json").unlink()
+        clock["t"] += 60.0
+        tasks.get_recipe_or_none("minesweeper.play")  # triggers the prune
+        restored = tasks.get_recipe_or_none("minesweeper.play")
+        assert restored is builtin, "the built-in must come back, not vanish"
+    finally:
+        tasks.forget_recipe("minesweeper.play")
+        tasks._SHADOWED_BUILTINS.pop("minesweeper.play", None)
+        tasks._STORED_NAMES.discard("minesweeper.play")
+        tasks._REGISTRY["minesweeper.play"] = builtin
+
+
 # ---- flights.search is a first-class library recipe -------------------------
 
 
@@ -251,3 +324,4 @@ def test_the_hub_shows_flights_defaults_off_the_module() -> None:
     defaults = _builtin_defaults()["flights.search"]
     assert defaults["entry_url"] == "https://www.google.com/travel/flights"
     assert defaults["anchor_gap_s"] == 2.5
+

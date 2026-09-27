@@ -148,18 +148,44 @@ def test_guess_key_orders_by_risk_then_information():
             [0, 0, 0, "#"],
         ]
     )
-    # (0,3) has 3 opened neighbours and is a corner; (1,3) has 3 and is not;
-    # (2,3) has 1 and is a corner.
-    corner_edge = guess_key(grid, 3, 4, (0, 3), 0.25)
-    plain_edge = guess_key(grid, 3, 4, (1, 3), 0.25)
+    # (0,3) is a corner; (1,3) and (2,3) are not. All four cells below share the
+    # same risk and the same opened-neighbour count, so the only thing that can
+    # separate them is the corner tie-break.
+    grid = _grid(
+        [
+            [0, 0, 0, "#"],
+            [0, 0, 0, "#"],
+            [0, 0, 0, "#"],
+        ]
+    )
+    corner = guess_key(grid, 3, 4, (0, 3), 0.25)
+    interior_a = guess_key(grid, 3, 4, (1, 3), 0.25)
+    interior_b = guess_key(grid, 3, 4, (2, 3), 0.25)
     lower_risk = guess_key(grid, 3, 4, (1, 3), 0.10)
 
-    # Same risk, same neighbour count: the non-corner wins.
-    assert plain_edge < corner_edge
+    # Same risk, same neighbour count: the non-corner wins (corners last).
+    assert interior_a < corner
     # Lower risk always wins, whatever the neighbour counts.
-    assert lower_risk < plain_edge
-    # More opened neighbours wins at equal risk.
-    assert guess_key(grid, 3, 4, (1, 3), 0.25) < guess_key(grid, 3, 4, (2, 3), 0.25)
+    assert lower_risk < interior_a
+    # Row/column is the final, purely-deterministic tie-break.
+    assert interior_a < interior_b
+
+
+def test_guess_key_prefers_more_information_at_equal_risk():
+    # The neighbour-count tie-break, on its own: an interior cell and an edge
+    # cell with the same risk, differing only in how many opened neighbours they
+    # have — the one constrained by more of the board comes first.
+    grid = _grid(
+        [
+            [0, 0, 0, "#"],
+            [0, 0, 0, "#"],
+            [0, 0, 0, 0],
+        ]
+    )
+    # (1,3) touches three opened cells; (2,3) touches two. Neither is a corner.
+    more = guess_key(grid, 3, 4, (1, 3), 0.25)
+    fewer = guess_key(grid, 3, 4, (2, 3), 0.25)
+    assert more < fewer
 
 
 def test_ranked_guesses_is_a_permutation_of_the_unsettled_cells():

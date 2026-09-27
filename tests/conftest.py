@@ -81,6 +81,31 @@ def _no_cluster_commands(monkeypatch):
     monkeypatch.setattr(subprocess, "Popen", guarded_popen)
 
 
+@pytest.fixture(autouse=True)
+def _loopback_is_a_stand_in(monkeypatch):
+    """Let a run target the test suite's loopback HTTP fixture.
+
+    Every run fixture here serves its pages from ``127.0.0.1`` (see the ``site``
+    fixture), which the runner refuses in production: a freeform start URL must
+    resolve to a public address, or a task naming the metadata service or a
+    cluster address would be queued and navigated (the guard added 2026-09-27,
+    ``tasks._start_url_for`` + ``_run_freeform``). A test's loopback server is a
+    *stand-in* for the public site the operator would really name, so tests opt
+    out at the boundary exactly as they do for ``subprocess`` above.
+
+    The patch is on the names as *imported by* the two consumers, never on
+    ``browser_agent.urlguard`` itself — so ``test_url_guard.py`` and the SSRF
+    tests keep exercising the real check, and a test that wants the refusal to
+    happen re-patches these back to the real functions.
+    """
+    import browser_agent.plan_model as plan_model
+    import browser_agent.tasks as tasks
+
+    monkeypatch.setattr(tasks, "public_url_reason", lambda url: None)
+    monkeypatch.setattr(tasks, "validate_public_http_url", lambda url: url)
+    monkeypatch.setattr(plan_model, "public_url_reason", lambda url: None)
+
+
 #: The inline scripts in the two pages. Checked here because there is no other
 #: gate on them: they are strings served to a browser, so nothing in the Python
 #: test suite would otherwise notice a syntax error — and a page that fails to

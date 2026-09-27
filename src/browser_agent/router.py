@@ -138,11 +138,12 @@ async def learned_match(text: str, requested: str, settings, *, url: str = "") -
     ``url`` is the request's structured target (the task payload's ``url``
     field) when the caller has one; the URLs written in the request's own text
     are extracted as well, which is how the composer passes a start page. The
-    precondition is an EQUALITY on scheme-less host+path between the request's
-    targets and a candidate's entry URL — a prose *mention* of a host or path
-    that is not the page being asked for qualifies nothing (SEC-BA-010: the
-    original containment test let any sentence naming the host put the
-    decision wholly to the gate).
+    precondition is an EQUALITY on scheme-less host+path+query between the
+    request's targets and a candidate's entry URL — a prose *mention* of a host
+    or path that is not the page being asked for qualifies nothing, and a
+    different query string is a different page (SEC-BA-010: the original
+    containment test let any sentence naming the host put the decision wholly
+    to the gate).
 
     Five refusals, all deliberate:
 
@@ -221,13 +222,16 @@ def _request_targets(url: str, text: str) -> list[str]:
     return targets
 
 
-def _url_key(target: str) -> tuple[str, str]:
-    """Scheme-less, ``www.``-less, trailing-slash-less host+path identity.
+def _url_key(target: str) -> tuple[str, str, str]:
+    """Scheme-less, ``www.``-less, trailing-slash-less host+path+query identity.
 
-    Two URLs are the same page for the precondition's purpose when this pair
+    Two URLs are the same page for the precondition's purpose when this triple
     is equal — https and http, ``www.``, an explicit ``:443`` and a trailing
-    slash are spellings, not destinations. A different path on the same host
-    is a different page.
+    slash are spellings, not destinations. A different path on the same host is
+    a different page, and so is a different query: ``/search?q=stockholm`` and
+    ``/search?q=oslo`` are the same path but not the same results page, so
+    dropping the query matched one and served the other's answer — the
+    wrong-page failure this precondition exists to prevent (2026-09-27).
     """
     from urllib.parse import urlsplit
 
@@ -235,7 +239,10 @@ def _url_key(target: str) -> tuple[str, str]:
     host = (parts.hostname or "").lower()
     if host.startswith("www."):
         host = host[4:]
-    return host, parts.path.rstrip("/").lower()
+    # A bare "?" and a trailing "&" are spellings of no query at all, so they
+    # normalize to "" rather than to a distinct key.
+    query = parts.query.strip("&").lower()
+    return host, parts.path.rstrip("/").lower(), query
 
 
 def _named_by_url(targets: list[str], candidates: list[dict]) -> list[dict]:
@@ -244,7 +251,7 @@ def _named_by_url(targets: list[str], candidates: list[dict]) -> list[dict]:
     A learned recipe's whole effect is the page it navigates to (``_validate``
     requires a learned spec to carry one), so a request whose destination is a
     different page cannot be asking for it — no matter how similar the
-    wording. Equality on the :func:`_url_key` pair, never containment: a
+    wording. Equality on the :func:`_url_key` triple, never containment: a
     host-only entry matches only a host-only target, and a URL merely
     mentioned in passing is not a destination.
     """

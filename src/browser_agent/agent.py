@@ -332,6 +332,32 @@ def make_agent_runner(settings: Settings):
                     "agent ended on a browser error page "
                     f"({page.url}); the last navigation failed"
                 )
+            # ``final_result()`` is just "the last step's extracted text", which
+            # browser-use fills even on ``done(success=False)`` and even after a
+            # step errored — its own prompts tell the model to write a closing
+            # sentence after giving up. So a run the agent itself marked failed
+            # is the same non-success ``_raise_for_no_result`` classifies just
+            # below: reporting it DONE (and, worse, harvesting a recipe from it)
+            # is the false success the 2026-09-23 incident was about, reached by
+            # a different door (2026-09-27).
+            #
+            # An explicit ``False`` always fails. A recorded error fails *unless*
+            # the run also declared success: ``has_errors()`` is true for any
+            # errored step, and a run that hit a transient error and recovered
+            # ends ``done(success=True)`` — failing on the error alone would
+            # throw that away (the same false-negative the recovered-run case
+            # warns about). So the question is "did the run say it succeeded?",
+            # not "was any step ever unhappy?". ``is_successful() is None`` with
+            # no errors stays a success — that is the shape the chrome-error
+            # incident was described with, and the fix for it was the URL check.
+            if history.is_successful() is False or (
+                history.has_errors() and history.is_successful() is not True
+            ):
+                reasons = "; ".join(str(e) for e in (history.errors() or []) if e)
+                raise RuntimeError(
+                    "agent did not complete the task: "
+                    f"{reasons[:300] or 'the run was marked unsuccessful'}"
+                )
             log.info("agent fallback finished")
             out: dict[str, Any] = {"agent_result": str(result), "url": page.url}
             # The recipe half of Nils's idea: a run that succeeded is the only

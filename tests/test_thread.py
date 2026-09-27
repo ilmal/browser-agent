@@ -332,3 +332,72 @@ def test_retry_keeps_the_recipe_when_none_is_given(runner):
     register(_OkRecipe())
     first = runner.submit("thread.ok", {"task": "one"})
     assert runner.retry(first.id).recipe == "thread.ok"
+
+
+# -- bounded memory --------------------------------------------------------
+
+
+def test_finished_attempts_are_evicted_past_the_cap(runner, monkeypatch):
+    """The live task map is not allowed to grow for the pod's lifetime.
+
+    Each finished attempt pins its payload, its result and a 200-entry activity
+    feed, so a long-lived pod accumulated one per run. History reads through to
+    the archive, so dropping the oldest terminal attempts costs nothing the
+    archive does not already hold.
+    """
+    import browser_agent.tasks as tasks_mod
+
+    register(_OkRecipe())
+    monkeypatch.setattr(tasks_mod, "MAX_TASKS", 5)
+    ids = [runner.submit("thread.ok", {"task": "one"}).id for _ in range(12)]
+    for t in runner.tasks.values():
+        t.status = TaskStatus.DONE
+    runner._evict_finished()
+
+    assert len(runner.tasks) == 5
+    # The oldest are gone, the newest are kept.
+    assert ids[0] not in runner.tasks
+    assert ids[-1] in runner.tasks
+
+
+def test_a_live_attempt_is_never_evicted(runner, monkeypatch):
+    """Eviction must never drop an attempt the operator can still steer."""
+    import browser_agent.tasks as tasks_mod
+
+    register(_OkRecipe())
+    monkeypatch.setattr(tasks_mod, "MAX_TASKS", 1)
+    live = runner.submit("thread.ok", {"task": "running"})
+    live.status = TaskStatus.RUNNING
+    for _ in range(4):
+        runner.submit("thread.ok", {"task": "done"}).status = TaskStatus.DONE
+    runner._evict_finished()
+    assert live.id in runner.tasks
+
+
+def test_the_thread_store_stays_bounded(monkeypatch):
+    """Thread ids are random and never reused, so both maps need a cap."""
+    import browser_agent.threads as threads_mod
+
+    monkeypatch.setattr(threads_mod, "MAX_THREADS", 3)
+    store = ThreadStore(runs=None)
+    for i in range(10):
+        store.say(f"t{i}", "operator", "instruction", "hello")
+    assert len(store._by_thread) <= 3
+    assert len(store._loaded) <= 3
+
+
+def test_an_evicted_thread_is_re_read_from_the_archive(tmp_path, monkeypatch):
+    """Eviction is lossless: the archive refolds on the next read."""
+    from browser_agent.runstore import RunStore
+    import browser_agent.threads as threads_mod
+
+    runs = RunStore(tmp_path / "runs.db", profile="p")
+    monkeypatch.setattr(threads_mod, "MAX_THREADS", 1)
+    store = ThreadStore(runs=runs)
+    store.say("keep", "operator", "instruction", "first")
+    store.say("other", "operator", "instruction", "second")  # evicts "keep"
+
+    assert "keep" not in store._by_thread
+    # Reading it again folds the archived message back in.
+    again = store.for_thread("keep")
+    assert [m.text for m in again] == ["first"]

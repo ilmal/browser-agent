@@ -26,23 +26,29 @@ def test_profile_names_agree_with_the_generator():
 
     The two rules live in different languages, so this pins them to the same
     set: anything the API takes is something the generator can actually build,
-    and neither can drift into accepting a name the other rejects.
+    and neither can drift into accepting a name the other rejects. The bound is
+    55 because the name becomes ``profile-<name>`` (a k8s resource name) and a
+    label value, both capped at 63.
     """
     import re
     import subprocess
 
     script = Path(__file__).resolve().parents[1] / "scripts" / "add-profile.sh"
-    # Same regex as the shell guard, written once here as the contract.
-    shell_rule = re.compile(r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?$")
+    # Same rule as the shell guard, written once here as the contract.
+    shell_rule = re.compile(r"^[a-z0-9]([a-z0-9-]{0,53}[a-z0-9])?$")
 
-    for name in ["x", "linkedin", "intercom-2", "a", "bot123", "a-b-c"]:
+    for name in ["x", "linkedin", "intercom-2", "a", "bot123", "a-b-c", "a" * 55]:
         assert registry.valid_profile(name), name
         assert shell_rule.match(name), name
         # And the generator really does accept it, run for real.
         out = subprocess.run([str(script), name], capture_output=True, text=True, timeout=30)
         assert out.returncode == 0, (name, out.stderr)
 
-    for name in ["", "Bad", "UPPER", "-lead", "trail-", "has space", "a_b", "bot.name"]:
+    # 64 characters passed the old unbounded rule and then failed ``kubectl
+    # apply`` — the derived ``profile-<name>`` resource name and label value are
+    # both capped at 63 (2026-09-27).
+    for name in ["", "Bad", "UPPER", "-lead", "trail-", "has space", "a_b",
+                 "bot.name", "a" * 56, "a" * 64]:
         assert not registry.valid_profile(name), name
         assert not shell_rule.match(name), name
         out = subprocess.run([str(script), name], capture_output=True, text=True, timeout=30)
@@ -126,6 +132,46 @@ def test_a_corrupt_roster_does_not_take_the_hub_down(tmp_path: Path):
         {"profile": "alsogood"},
     ]}))
     assert [b.profile for b in registry.load(path).bots] == ["good", "alsogood"]
+
+
+@pytest.mark.parametrize("payload", ["[1, 2, 3]", '"hello"', "42", "null", "true"])
+def test_a_valid_json_non_object_roster_also_degrades(tmp_path: Path, payload: str):
+    """Valid JSON that is not an object is still a broken roster.
+
+    The file is read on every hub request, so an uncaught AttributeError here
+    is a 500 on the hub's only page — the exact failure the corrupt-file guard
+    above promises to prevent. A list, string or number parses fine and then
+    raised out of ``raw.get`` (2026-09-27).
+    """
+    path = tmp_path / "bots.json"
+    path.write_text(payload)
+
+    assert registry.load(path).bots == []
+
+
+def test_a_roster_whose_bots_key_is_not_a_list_degrades(tmp_path: Path):
+    """The same defect one level in: ``{"bots": 5}`` is not iterable."""
+    path = tmp_path / "bots.json"
+    path.write_text(json.dumps({"bots": 5}))
+
+    assert registry.load(path).bots == []
+
+
+def test_a_dropped_entry_is_logged_so_it_does_not_vanish_silently(
+    tmp_path: Path, caplog
+):
+    """A hand-edited roster must not lose an entry without a trace.
+
+    A capitalised or over-long profile is dropped by design, but silently: the
+    pod keeps running while the roster loses its entry and the operator sees
+    only a bot that disappeared (2026-09-27).
+    """
+    path = tmp_path / "bots.json"
+    path.write_text(json.dumps({"bots": [{"profile": "Bad Name"}]}))
+
+    with caplog.at_level("WARNING", logger="browser_agent.registry"):
+        assert registry.load(path).bots == []
+    assert any("Bad Name" in r.getMessage() for r in caplog.records)
 
 
 def test_text_is_cleaned_before_it_is_stored(tmp_path: Path):
@@ -1119,3 +1165,79 @@ def test_probe_urls_follow_bot_url_template(hub_env, monkeypatch):
 
     assert seen, "the probe never asked any pod"
     assert seen == [f"http://probe-hit:linkedin:{hub_env.settings.api_port}/api/whoami"]
+
+
+def test_hidden_is_stored_and_returned_on_the_roster(hub_env):
+    """``Bot.hidden`` is the "out of the way, still running" flag. It was stored
+    and returned but read nowhere in the UI, so hiding a bot left it on the grid
+    (2026-09-27). Pin the round trip the grid now depends on."""
+    from fastapi.testclient import TestClient
+
+    reg = hub_env.registry.Registry()
+    hub_env.registry.upsert(reg, "kai", name="Kai")
+    hub_env.registry.save(hub_env.settings.registry_path, reg)
+
+    with TestClient(hub_env.app) as client:
+        res = client.patch("/api/bots/kai", headers={"Authorization": "Bearer test-token"},
+                           json={"hidden": True})
+        assert res.status_code == 200
+        assert res.json()["bot"]["hidden"] is True
+        roster = client.get("/api/bots", headers={"Authorization": "Bearer test-token"})
+        assert roster.json()["bots"][0]["hidden"] is True
+        # And it can be unhidden again — the flag is not one-way.
+        res = client.patch("/api/bots/kai", headers={"Authorization": "Bearer test-token"},
+                           json={"hidden": False})
+        assert res.json()["bot"]["hidden"] is False
+
+
+def test_a_hidden_bot_keeps_its_other_fields(hub_env):
+    """Hiding must not be a write that clobbers the rest of the record."""
+    from fastapi.testclient import TestClient
+
+    reg = hub_env.registry.Registry()
+    hub_env.registry.upsert(reg, "kai", name="Kai", job="Post and reply")
+    hub_env.registry.save(hub_env.settings.registry_path, reg)
+
+    with TestClient(hub_env.app) as client:
+        client.patch("/api/bots/kai", headers={"Authorization": "Bearer test-token"},
+                     json={"hidden": True})
+        bot = client.get("/api/bots", headers={"Authorization": "Bearer test-token"}
+                         ).json()["bots"][0]
+        assert bot["job"] == "Post and reply"
+        assert bot["display_name"] == "Kai"
+
+
+def test_purging_a_bot_deletes_both_of_its_pvcs(hub_env, monkeypatch):
+    """``purge=true`` must drop ``data-<profile>`` as well as ``profile-<profile>``.
+
+    Deleting only the profile PVC left the schedules/artifacts volume bound
+    forever, and a bot re-created under the same name inherited the old state —
+    the opposite of what purge means (2026-09-27). The argv is asserted, not a
+    real kubectl: the conftest guard forbids the latter.
+    """
+    from fastapi.testclient import TestClient
+
+    reg = hub_env.registry.Registry()
+    hub_env.registry.upsert(reg, "kai", name="Kai")
+    hub_env.registry.save(hub_env.settings.registry_path, reg)
+
+    calls: list[list[str]] = []
+
+    class Done:
+        returncode = 0
+        stderr = ""
+        stdout = ""
+
+    def fake_run(argv, **kwargs):
+        calls.append(list(argv))
+        return Done()
+
+    monkeypatch.setattr(hub_env.subprocess, "run", fake_run)
+
+    with TestClient(hub_env.app) as client:
+        res = client.delete("/api/bots/kai?purge=true",
+                            headers={"Authorization": "Bearer test-token"})
+    assert res.status_code == 200
+    flattened = [c[-2] for c in calls]  # the object name precedes --ignore-not-found
+    assert "profile-kai" in flattened
+    assert "data-kai" in flattened, "purge left the data PVC bound"

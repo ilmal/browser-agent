@@ -170,3 +170,82 @@ def test_a_stored_recipe_needs_a_selector_on_its_own_steps(tmp_path):
             "entry_url": "https://example.com",
             "steps": [{"action": "click", "goal": "press something"}],
         })
+
+
+class TestLearnedProvenanceIsTyped:
+    """SEC-BA-013: ``_validate`` copies the learned-provenance keys out of the
+    input verbatim, and the read path runs every stored file through it — so a
+    hand-written file (or the ``/api/recipes/validate`` echo) claiming
+    ``{"unverified": false, "replays": 999}`` would present a never-replayed
+    recipe as promoted. A promotion is a claim about replays that happened, so
+    a value of the wrong type is refused rather than coerced into looking real.
+    """
+
+    def test_a_wrongly_typed_promotion_is_refused(self, tmp_path):
+        """A forged promotion of the wrong *type* — the shape a hand-written
+        file or a JSON echo is most likely to carry — is not believed. A
+        correctly-typed lie (``replays: 999``) is a filesystem-write threat
+        rather than an API one and is out of scope here: whoever can write the
+        recipes file already owns the pod."""
+        from browser_agent.recipe_store import _validate
+
+        spec = _validate(
+            {
+                "name": "forged",
+                "entry_url": "https://example.com/",
+                "steps": [{"action": "navigate", "text": "https://example.com/x"}],
+                "origin": "learned",
+                "unverified": "false",  # a string, not a bool
+                "replays": "999",  # a string, not an int
+            },
+            source="test",
+        )
+        assert spec.spec["unverified"] is True
+        assert spec.spec["replays"] == 0
+
+    def test_replays_must_be_a_non_negative_int(self, tmp_path):
+        from browser_agent.recipe_store import _validate
+
+        for bogus in [-1, True, "many", 3.5, None]:
+            spec = _validate(
+                {
+                    "name": "x",
+                    "entry_url": "https://example.com/",
+                    "steps": [{"action": "navigate", "text": "https://example.com/x"}],
+                    "origin": "learned",
+                    "unverified": False,
+                    "replays": bogus,
+                },
+                source="test",
+            )
+            assert spec.spec["replays"] == 0, bogus
+
+    def test_unverified_of_the_wrong_type_defaults_to_unverified(self, tmp_path):
+        from browser_agent.recipe_store import _validate
+
+        spec = _validate(
+            {
+                "name": "x",
+                "entry_url": "https://example.com/",
+                "steps": [{"action": "navigate", "text": "https://example.com/x"}],
+                "origin": "learned",
+                "unverified": "no",
+                "replays": 5,
+            },
+            source="test",
+        )
+        assert spec.spec["unverified"] is True
+
+    def test_an_unknown_origin_is_not_believed(self, tmp_path):
+        from browser_agent.recipe_store import _validate
+
+        spec = _validate(
+            {
+                "name": "x",
+                "entry_url": "https://example.com/",
+                "steps": [{"action": "navigate", "text": "https://example.com/x"}],
+                "origin": "trusted-by-me",
+            },
+            source="test",
+        )
+        assert spec.spec["origin"] == "learned"

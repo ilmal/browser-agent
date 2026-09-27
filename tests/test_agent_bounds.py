@@ -68,10 +68,13 @@ class _FakeAgent:
             await on_step_end(self)
         if _FakeAgent.hang:
             await asyncio.sleep(3600)
-        return _FakeHistory()
+        return _FakeAgent.history_override or _FakeHistory()
 
     hang = False
     last = None
+    #: A history to return instead of the default success one, so a test can
+    #: drive the outcome-classification paths.
+    history_override = None
 
 
 class _FakeBrowser:
@@ -191,6 +194,122 @@ async def test_a_hung_run_ends_instead_of_blocking_the_queue(patched, monkeypatc
             )
     finally:
         _FakeAgent.hang = False
+
+
+@pytest.mark.asyncio
+async def test_a_run_the_agent_marked_unsuccessful_is_not_a_success(patched):
+    """``final_result()`` is not proof of success — the run's own verdict is.
+
+    browser-use fills the last step's ``extracted_content`` even on
+    ``done(success=False)``, and its prompts tell the model to write a closing
+    sentence after giving up. So a run marked unsuccessful (or one that
+    recorded errors) still has a non-empty ``final_result()``, and the success
+    branch accepted it — the same false success the 2026-09-23 chrome-error
+    incident was about, reached by a different door. It must fail instead, and
+    must not be harvested into a recipe.
+    """
+
+    class _Unsuccessful(_FakeHistory):
+        def is_successful(self):
+            return False
+
+        def errors(self):
+            return ["step 4: click failed"]
+
+        def has_errors(self):
+            return True
+
+    _FakeAgent.history_override = _Unsuccessful()
+    try:
+        runner = agent_mod.make_agent_runner(patched)
+        with pytest.raises(RuntimeError, match="did not complete"):
+            await runner(_Session(), "https://example.com", {"goal": "scroll"})
+    finally:
+        _FakeAgent.history_override = None
+
+
+@pytest.mark.asyncio
+async def test_an_errored_run_that_never_declared_success_is_not_a_success(patched):
+    """A recorded error with no affirmative success verdict must fail.
+
+    ``has_errors()`` is true for *any* errored step, and the run's own verdict
+    is ``None`` when it never called ``done`` — so an errored run that simply
+    stopped (max steps, or a step the model never recovered from) still left a
+    non-empty ``final_result()`` and was reported DONE. Requiring an explicit
+    ``True`` to excuse the errors is what closes that door without failing a
+    run that genuinely recovered.
+    """
+
+    class _ErroredNoVerdict(_FakeHistory):
+        def is_successful(self):
+            return None
+
+        def errors(self):
+            return ["step 2: navigation timed out"]
+
+        def has_errors(self):
+            return True
+
+    _FakeAgent.history_override = _ErroredNoVerdict()
+    try:
+        runner = agent_mod.make_agent_runner(patched)
+        with pytest.raises(RuntimeError, match="did not complete"):
+            await runner(_Session(), "https://example.com", {"goal": "scroll"})
+    finally:
+        _FakeAgent.history_override = None
+
+
+@pytest.mark.asyncio
+async def test_an_errored_run_that_recovered_and_declared_success_is_a_success(patched):
+    """A step error a run recovered from must not throw away a clean finish.
+
+    A transient failure mid-run (a flaky hop, a selector that resolved on the
+    retry) leaves ``has_errors()`` true while the run goes on to
+    ``done(success=True)``. Failing on the error alone would discard a task that
+    actually completed — a false negative in the opposite direction from the one
+    this branch exists to catch.
+    """
+
+    class _Recovered(_FakeHistory):
+        def is_successful(self):
+            return True
+
+        def errors(self):
+            return ["step 2: click retried"]
+
+        def has_errors(self):
+            return True
+
+    _FakeAgent.history_override = _Recovered()
+    try:
+        runner = agent_mod.make_agent_runner(patched)
+        out = await runner(_Session(), "https://example.com", {"goal": "scroll"})
+        assert out["agent_result"] == "did the thing"
+    finally:
+        _FakeAgent.history_override = None
+
+
+@pytest.mark.asyncio
+async def test_a_none_successful_verdict_is_still_a_success(patched):
+    """``is_successful() is None`` must stay a success.
+
+    The 2026-09-23 chrome-error incident was *described* as ``is_successful()``
+    being None, and the fix for it was the URL check — not a blanket rejection
+    of None. Only an explicit ``False`` or a recorded error is a failure here,
+    or a normal run that never marked itself done would be thrown away.
+    """
+
+    class _NoneVerdict(_FakeHistory):
+        def is_successful(self):
+            return None
+
+    _FakeAgent.history_override = _NoneVerdict()
+    try:
+        runner = agent_mod.make_agent_runner(patched)
+        out = await runner(_Session(), "https://example.com", {"goal": "scroll"})
+        assert out["agent_result"] == "did the thing"
+    finally:
+        _FakeAgent.history_override = None
 
 
 # --- the stall latch -------------------------------------------------------

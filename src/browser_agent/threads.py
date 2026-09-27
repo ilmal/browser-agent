@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import time
 import uuid
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -36,6 +37,13 @@ KINDS = ("instruction", "parameter", "config", "note")
 #: Bounded per thread, so a long conversation cannot grow the process without
 #: limit. Far more than any real thread needs.
 MAX_PER_THREAD = 500
+
+#: Threads kept in memory. Each thread holds a capped message list plus two dict
+#: keys, and thread ids are random and never reused, so both maps grew a key per
+#: conversation for the pod's lifetime (2026-09-27). Evicting the oldest thread
+#: is safe: ``for_thread`` re-folds it from the archive on the next read, so the
+#: only cost is one extra query for a thread nobody has touched in a long while.
+MAX_THREADS = 500
 
 
 @dataclass
@@ -64,10 +72,10 @@ class ThreadStore:
     """Messages per thread, in process memory and mirrored to the archive."""
 
     def __init__(self, runs: Any = None) -> None:
-        self._by_thread: dict[str, list[Message]] = {}
+        self._by_thread: OrderedDict[str, list[Message]] = OrderedDict()
         #: Threads whose archive rows have already been folded into memory, so a
         #: poll every 2 s does not re-read the table every time.
-        self._loaded: dict[str, bool] = {}
+        self._loaded: OrderedDict[str, bool] = OrderedDict()
         # The durable half, or None. Optional for the same reason the runner's
         # archive is: a caller that only wants the live behaviour should not be
         # forced to build one, and a missing archive costs the record, never the
@@ -99,6 +107,7 @@ class ThreadStore:
         )
         bucket = self._by_thread.setdefault(thread_id, [])
         bucket.append(msg)
+        self._by_thread.move_to_end(thread_id)
         if len(bucket) > MAX_PER_THREAD:
             del bucket[: len(bucket) - MAX_PER_THREAD]
         if self._runs is not None:
@@ -107,7 +116,24 @@ class ThreadStore:
             # this process. Losing the durable copy must not fail a send.
             with contextlib.suppress(Exception):
                 self._runs.save_message(msg)
+        self._evict_stale_threads()
         return msg
+
+    def _evict_stale_threads(self) -> None:
+        """Drop the least-recently-used threads beyond the in-memory cap.
+
+        Dropping a thread is lossless: ``for_thread`` merges the archive back in
+        on the next read, so an evicted conversation is one query away, not one
+        lost. Both maps are bounded independently — ``_loaded`` gets a key on
+        every read even when ``_by_thread`` already held the bucket, so a
+        read-only process would otherwise grow that one alone (2026-09-27).
+        """
+        while len(self._by_thread) > MAX_THREADS:
+            stale, _ = self._by_thread.popitem(last=False)
+            self._loaded.pop(stale, None)
+        while len(self._loaded) > MAX_THREADS:
+            stale, _ = self._loaded.popitem(last=False)
+            self._by_thread.pop(stale, None)
 
     def for_thread(self, thread_id: str) -> list[Message]:
         """This thread's messages: memory first, the archive behind it.
@@ -119,6 +145,8 @@ class ThreadStore:
         join the conversation instead of appearing to start a fresh one.
         """
         live = self._by_thread.get(thread_id) or []
+        if thread_id in self._by_thread:
+            self._by_thread.move_to_end(thread_id)
         if self._runs is None:
             return list(live)
         # Only load once per thread per process: after the first read, memory
@@ -126,6 +154,7 @@ class ThreadStore:
         loaded = self._loaded.setdefault(thread_id, False)
         if not loaded:
             self._loaded[thread_id] = True
+            self._loaded.move_to_end(thread_id)
             if not live:
                 live = []
                 self._by_thread[thread_id] = live
@@ -143,6 +172,7 @@ class ThreadStore:
                     meta=r.get("meta") or {},
                 ))
             live.sort(key=lambda m: m.at)
+        self._evict_stale_threads()
         return list(live)
 
     def last_instruction(self, thread_id: str) -> str:

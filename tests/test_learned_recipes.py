@@ -296,6 +296,32 @@ def test_the_xpath_is_the_last_resort_selector():
     assert spec["steps"][0]["selector"] == "xpath=/html/body/div[3]/button"
 
 
+def test_a_digit_leading_id_becomes_a_quoted_attribute_selector():
+    # CSS idents may not start with a digit, so ``#2fa-go`` is a selector
+    # Chromium refuses outright (``SyntaxError: not a valid selector``) — the
+    # old ``[A-Za-z0-9_-]`` test accepted the id and emitted exactly that, so
+    # the step could never replay. The quoted form is always valid.
+    history = _run(
+        _step(_Action(click={"index": 1}),
+              [_Element(attributes={"id": "2fa-go"})]),
+    )
+    spec = harvest(history, entry_url="https://example.com", goal="g")
+    assert spec is not None
+    assert spec["steps"][0]["selector"] == '[id="2fa-go"]'
+
+
+def test_an_id_that_needs_quoting_still_uses_the_hash_form():
+    # An underscore-leading id is a valid CSS ident, so it keeps the cheaper
+    # ``#id`` form; the quote fallback is for the ones that are not.
+    history = _run(
+        _step(_Action(click={"index": 1}),
+              [_Element(attributes={"id": "_panel"})]),
+    )
+    spec = harvest(history, entry_url="https://example.com", goal="g")
+    assert spec is not None
+    assert spec["steps"][0]["selector"] == "#_panel"
+
+
 def test_a_trailing_done_becomes_an_extract_and_mid_run_done_disqualifies():
     # Done at the end is how every successful run finishes, and it carried the
     # answer the agent reached — so it becomes one final extract step that reads
@@ -714,6 +740,43 @@ async def test_the_payload_url_qualifies_without_a_mention_in_prose(
         == _LEARNED_SPEC["name"]
     )
     assert len(_GateStub.calls) == 1
+
+
+async def test_a_different_query_string_is_a_different_page(tmp_path, monkeypatch):
+    """The same path with another query is not the same page.
+
+    ``_url_key`` once returned host+path only, so ``/search?q=stockholm`` and
+    ``/search?q=oslo`` compared equal and a stockholm recipe could be routed to
+    an oslo request — serving one page's answer to a question about another,
+    the exact failure the precondition exists to prevent (2026-09-27).
+    """
+    s = _settings_with_learned(tmp_path, monkeypatch)
+    store = recipe_store.learned_store_for(s)
+    save_learned_spec(
+        store,
+        dict(
+            _LEARNED_SPEC,
+            entry_url="https://example.com/search?q=stockholm",
+            unverified=False,
+            replays=2,
+        ),
+    )
+    _GateStub.calls = []
+    _GateStub.answer = (True, 0.99)  # even a maximally confident gate cannot match
+    monkeypatch.setattr("browser_agent.laya_gate.LayaGate", _GateStub)
+
+    from browser_agent.router import learned_match
+
+    # The identical query page still matches.
+    same = "flights from https://example.com/search?q=stockholm"
+    assert await learned_match(same, "plan.task", s) == _LEARNED_SPEC["name"]
+    assert len(_GateStub.calls) == 1
+
+    # A different query on the same path is a different page, refused before Laya.
+    _GateStub.calls = []
+    other = "flights from https://example.com/search?q=oslo"
+    assert await learned_match(other, "plan.task", s) is None
+    assert _GateStub.calls == [], "laya was asked about a request for another page"
 
 
 async def test_a_request_naming_no_url_at_all_is_never_matched(tmp_path, monkeypatch):

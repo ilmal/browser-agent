@@ -29,7 +29,8 @@ import time
 import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from collections.abc import Callable
+from typing import Any
 
 import httpx
 
@@ -163,6 +164,22 @@ def _clean(value: Any, limit: int) -> str:
     return " ".join(str(value or "").split())[:limit]
 
 
+def _number(value: Any, default: float = 0.0) -> float:
+    """A stored number, or ``default`` when it is not one.
+
+    ``float("soon")`` raises ValueError and a nested dict raises TypeError, so
+    a hand-edited farm file still produced the crash this loader promises to
+    survive (2026-09-27). ``bool`` is refused rather than coerced: ``True`` is
+    not a timestamp.
+    """
+    if isinstance(value, bool):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
 def load(path: Path) -> list[Farm]:
     """Read the farm file; a corrupt one degrades to empty.
 
@@ -175,22 +192,42 @@ def load(path: Path) -> list[Farm]:
         raw = json.loads(path.read_text())
     except (OSError, ValueError):
         return []
+    # Valid JSON is not a valid store: a top-level list, string or null parses
+    # fine and then raises AttributeError out of ``raw.get`` — so the file the
+    # handler promises to survive took the hub's page down instead (2026-09-27).
+    # A dict with a non-list ``farms`` is the same defect one level in.
+    if not isinstance(raw, dict) or not isinstance(raw.get("farms"), list):
+        log.warning("%s is not a farm store; treating it as empty", path)
+        return []
     farms: list[Farm] = []
-    for item in raw.get("farms", []):
+    for item in raw["farms"]:
         if not isinstance(item, dict) or not item.get("id"):
             continue
         members = []
-        for m in item.get("members", []):
+        # ``members`` is iterated, so a null or wrong-shaped value raised
+        # ``TypeError: 'NoneType' object is not iterable`` here — and this runs
+        # at hub import (``FarmStore.__init__`` -> ``load``), so one bad field in
+        # the file crashlooped the whole control plane. The ``farms`` guard above
+        # covers the same defect one level out (2026-09-27).
+        raw_members = item.get("members")
+        if not isinstance(raw_members, list):
+            if raw_members:
+                log.warning("%s: farm %s has a non-list members; ignoring it",
+                            path, item.get("id"))
+            raw_members = []
+        for m in raw_members:
             if not isinstance(m, dict) or not m.get("profile"):
                 continue
             members.append(Member(
                 profile=str(m["profile"]),
                 task_text=str(m.get("task_text", "")),
-                start_at=float(m.get("start_at") or 0.0),
+                start_at=_number(m.get("start_at")),
                 status=str(m.get("status", "pending")),
                 task_id=str(m.get("task_id", "")),
                 thread_id=str(m.get("thread_id", "")),
-                finished_at=(float(m["finished_at"]) if m.get("finished_at") is not None else None),
+                finished_at=(
+                    _number(m["finished_at"]) if m.get("finished_at") is not None else None
+                ),
                 outcome=str(m.get("outcome", "")),
             ))
         farms.append(Farm(
@@ -200,8 +237,8 @@ def load(path: Path) -> list[Farm]:
             task=str(item.get("task", "")),
             url=str(item.get("url", "")),
             mode=str(item.get("mode", "parallel")),
-            stagger_seconds=int(item.get("stagger_seconds") or 0),
-            created_at=float(item.get("created_at") or 0.0),
+            stagger_seconds=int(_number(item.get("stagger_seconds"))),
+            created_at=_number(item.get("created_at")),
             status=str(item.get("status", "pending")),
             members=members,
         ))

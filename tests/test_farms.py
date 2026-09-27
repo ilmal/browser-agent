@@ -132,6 +132,53 @@ class TestBuildMembers:
         assert members[0].task_text == "You are Ada. bg\n\nTASK: T"
 
 
+@pytest.mark.parametrize("payload", ["[1, 2, 3]", '"hello"', "null", "42", "true"])
+def test_a_valid_json_non_object_farm_file_degrades(tmp_path: Path, payload: str):
+    """A farm file that parses to a non-object is a broken file, not a crash.
+
+    The hub's page reads this on every request, so an uncaught AttributeError
+    here is a 500 on the only page the operator has (2026-09-27).
+    """
+    path = tmp_path / "farms.json"
+    path.write_text(payload)
+
+    assert farms.load(path) == []
+
+
+def test_a_farm_file_whose_farms_key_is_not_a_list_degrades(tmp_path: Path):
+    path = tmp_path / "farms.json"
+    path.write_text(json.dumps({"farms": 5}))
+
+    assert farms.load(path) == []
+
+
+@pytest.mark.parametrize("members", [None, 5, "bob"])
+def test_a_farm_whose_members_is_not_a_list_degrades(tmp_path: Path, members):
+    """The same defect one level in, and the one that actually crashed the hub.
+
+    ``farm.load`` runs at hub import (``FarmStore.__init__``), so a
+    ``members: null`` raised ``TypeError`` during uvicorn's import and the pod
+    crashlooped — the control plane could not come up to fix the file that broke
+    it (2026-09-27).
+    """
+    path = tmp_path / "farms.json"
+    path.write_text(json.dumps({"farms": [{"id": "a", "members": members}]}))
+
+    loaded = farms.load(path)
+    assert [f.id for f in loaded] == ["a"]
+    assert loaded[0].members == []
+
+
+def test_a_member_that_is_not_an_object_is_skipped(tmp_path: Path):
+    path = tmp_path / "farms.json"
+    path.write_text(json.dumps({"farms": [{"id": "a", "members": [
+        {"profile": "good"}, None, 3, {"nope": True},
+    ]}]}))
+
+    loaded = farms.load(path)
+    assert [m.profile for m in loaded[0].members] == ["good"]
+
+
 def test_cancel_farm_spares_running_members():
     farm = farms.Farm(id="f", name="", recipe="r", task="t", url="", mode="stagger",
                       stagger_seconds=60, created_at=0.0, members=[

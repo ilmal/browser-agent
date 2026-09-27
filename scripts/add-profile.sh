@@ -22,8 +22,9 @@ if [ -z "$NAME" ]; then
   echo "usage: $0 <profile-name>   e.g. $0 linkedin" >&2
   exit 1
 fi
-if ! printf '%s' "$NAME" | grep -qE '^[a-z0-9]([a-z0-9-]*[a-z0-9])?$'; then
-  echo "error: profile name must be lowercase alphanumeric with dashes" >&2
+if ! printf '%s' "$NAME" | grep -qE '^[a-z0-9]([a-z0-9-]{0,53}[a-z0-9])?$'; then
+  echo "error: profile name must be 1-55 chars, lowercase alphanumeric with dashes" >&2
+  echo "       (the name becomes 'profile-<name>' and a k8s label, both ≤63)" >&2
   exit 1
 fi
 

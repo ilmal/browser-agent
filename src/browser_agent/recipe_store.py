@@ -267,11 +267,42 @@ def _validate(data: Any, *, source: str) -> "StoredSpec":
     }
     # A learned recipe's provenance rides along, so the router can tell one the
     # agent wrote from one a human did, and hold the former to its replay count.
+    # Coerced per key rather than copied verbatim: the read path feeds every
+    # stored file through here, so a hand-written ``{"unverified": false,
+    # "replays": 999}`` would otherwise persist a recipe that looks promoted
+    # without ever having replayed, and ``/api/recipes/validate`` echoed the
+    # caller's own values back as if the store had verified them (2026-09-27).
     for key in LEARNED_KEYS:
         if key in data:
-            spec[key] = data[key]
+            spec[key] = _coerce_learned(key, data[key])
 
     return StoredSpec(name=name, spec=spec)
+
+
+#: The only values ``origin`` may take, i.e. the three the runner reports.
+_ORIGINS = frozenset({"learned", "stored", "builtin"})
+
+
+def _coerce_learned(key: str, value: Any) -> Any:
+    """One provenance field, typed to what the router and panel can trust.
+
+    ``_number``-style leniency would be wrong here: a *promotion* is a claim
+    about replays that actually happened, so a value that is not the right type
+    is refused rather than coerced into one. ``unverified`` defaults to True —
+    refusing to call anything verified is the safe direction — and a negative
+    or non-integer replay count is 0.
+    """
+    if key == "unverified":
+        return value if isinstance(value, bool) else True
+    if key in {"replays", "min_replays"}:
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return 0
+        return value
+    if key == "origin":
+        return value if value in _ORIGINS else "learned"
+    if key == "created":
+        return value if isinstance(value, str) else ""
+    return None
 
 
 def _require_deterministic_targets(plan: Plan) -> None:
@@ -387,6 +418,13 @@ def delete_recipe(store: RecipeStore, name: str) -> str:
     Returns "stored" | "override", or raises when there is nothing to remove.
     """
     if name in RESERVED_NAMES:
+        raise RecipeError(f"{name!r} is reserved and cannot be removed")
+    # ``_overrides.json`` is the overrides file itself, so ``{name}.json`` for
+    # the name ``_overrides`` resolves to it and the unlink below would delete
+    # every operator override on the hub in one request. Names are validated on
+    # the way in, so refuse anything that could not have been stored — which
+    # also covers the leading-underscore case (2026-09-27).
+    if name == OVERRIDES_FILE or not _valid_name(name):
         raise RecipeError(f"{name!r} is reserved and cannot be removed")
     path = store.directory / f"{name}.json"
     if path.exists():

@@ -195,10 +195,24 @@ _REACHED_PREFIX = ContextVar("reached_prefix", default="")
 _PREFIX_RE = re.compile(r"^/[A-Za-z0-9._~/-]*$")
 
 
+#: A prefix starts with exactly one `/`: the UI builds every request as
+#: ``PREFIX + "/api/..."`` and a value beginning ``//`` is the scheme-relative
+#: authority form — ``new URL("//evil.example/api/state", base)`` resolves to
+#: ``https://evil.example/api/state``, so the page's fetch (which carries the
+#: bearer token) would leave for a foreign origin. ``_PREFIX_RE`` admits ``//``
+#: because ``/`` is in its class; a backslash is also refused, since some
+#: parsers normalize ``\/`` to ``/``. Nginx sets this header itself from a
+#: fixed path, so this is defence-in-depth against any other setter (2026-09-27).
+def _is_safe_prefix(raw: str) -> bool:
+    if not raw.startswith("/") or raw.startswith("//") or "\\" in raw:
+        return False
+    return bool(_PREFIX_RE.match(raw))
+
+
 @app.middleware("http")
 async def _capture_prefix(request: Request, call_next):
     raw = request.headers.get("x-forwarded-prefix", "").rstrip("/")
-    if raw and not _PREFIX_RE.match(raw):
+    if raw and not _is_safe_prefix(raw):
         log.warning("dropping non-prefix X-Forwarded-Prefix value")
         raw = ""
     token = _REACHED_PREFIX.set(raw or settings.url_prefix)

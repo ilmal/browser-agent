@@ -326,18 +326,25 @@ class Minesweeper:
 
         wins = sum(1 for r in results if r["outcome"] == "won")
         lost = sum(1 for r in results if r["outcome"] == "lost")
-        unfinished = len(results) - wins - lost
+        blocked = sum(1 for r in results if r["outcome"] == "blocked")
+        stalled = sum(1 for r in results if r["outcome"] == "stalled")
+        unfinished = len(results) - wins - lost - blocked - stalled
         host = urlsplit(url).hostname or url
         bits = [f"{wins} won"]
         if lost:
             bits.append(f"{lost} lost on a guess")
+        if blocked:
+            bits.append(f"{blocked} blocked mid-game")
+        if stalled:
+            bits.append(f"{stalled} settled without a win signal")
         if unfinished:
             bits.append(f"{unfinished} unfinished")
         summary = f"played {len(results)} board(s) on {host}: " + ", ".join(bits)
         log_.note("info", summary)
         # "summary" is what the thread note renders — "Done: wins: 0" told the
         # operator nothing about where it played or why nothing was won.
-        return {"games": results, "wins": wins, "site": url, "summary": summary}
+        return {"games": results, "wins": wins, "blocked": blocked,
+                "site": url, "summary": summary}
 
     async def on_entry_unreachable(self, session: Any, exc: Exception) -> bool:
         """The runner-level entry navigation died before run() got control.
@@ -498,6 +505,22 @@ class Minesweeper:
         first_press = True
 
         while clicks < max_clicks:
+            if view.blocked:
+                # The IP block is app-side and can arrive *mid-game*, after the
+                # board has booted. It is read on every ``read_game`` but was
+                # only ever checked at game start, so a board that got blocked
+                # partway kept clicking a block page until the click budget ran
+                # out and reported "unfinished" — a false non-result that hid
+                # the real cause (2026-09-27). Record the sighting and stop.
+                from ..site_health import host_of, record_blocked
+
+                record_blocked(self._settings, self.name, host=host_of(page.url),
+                               reason="the site served its block page mid-game",
+                               url=page.url)
+                log_.note("error", f"game {game_no}: blocked mid-game after "
+                                   f"{clicks} clicks")
+                return {"outcome": "blocked", "clicks": clicks, "guesses": guesses,
+                        "laya_calls": laya_calls}
             if view.won:
                 log_.note("step", f"game {game_no}: won in {clicks} clicks")
                 return {"outcome": "won", "clicks": clicks, "guesses": guesses,
@@ -510,11 +533,18 @@ class Minesweeper:
 
             moves, proved = view.board.next_moves()
             if not moves:
-                # No proof and no gamble left: the board is fully settled, which
-                # only happens once every non-mine cell is open — i.e. a win the
-                # face check should already have caught.
-                log_.note("info", f"game {game_no}: no moves left")
-                break
+                # No proof and no gamble left: the solver considers the board
+                # fully settled, which should mean every non-mine cell is open —
+                # a win the face check ought to have caught already. It is not
+                # reported as a win, because the face says otherwise and a false
+                # win is worse than an honest stall; it is reported as its own
+                # outcome so the summary can say the board settled without a win
+                # signal rather than lumping it into "unfinished" with a board
+                # abandoned mid-play (2026-09-27).
+                log_.note("error", f"game {game_no}: board settled with no win "
+                                   f"signal after {clicks} clicks")
+                return {"outcome": "stalled", "clicks": clicks, "guesses": guesses,
+                        "laya_calls": laya_calls, "board": view.board.render()}
 
             if not proved:
                 guesses += 1

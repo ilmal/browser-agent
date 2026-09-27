@@ -21,7 +21,6 @@ import logging
 import random
 import re
 import time
-import uuid
 from pathlib import Path
 
 from playwright.async_api import Locator, Page
@@ -82,9 +81,19 @@ async def check_done_when(page: Page, dw: DoneWhen) -> bool:
             if await loc.count() == 0 or not await loc.is_visible():
                 return False
         if dw.text_contains:
-            body = (await page.inner_text("body"))[:20_000].lower()
-            if dw.text_contains.lower() not in body:
-                return False
+            # The <title> is part of what the page shows, and a harvested
+            # type-step's proof is deliberately drawn from the title — the body
+            # could be the string the step just typed, so ``harvest._done_when_for``
+            # refuses a body proof and takes the title instead. Matching only the
+            # body therefore made every such proof unverifiable: the step failed
+            # into the agent, ``_note_replay(ok=False)`` never incremented, and a
+            # learned recipe could never earn the replays that promote it
+            # (2026-09-27). Read both, title first so the cheap check short-circuits.
+            needle = dw.text_contains.lower()
+            if needle not in (await page.title() or "").lower():
+                body = (await page.inner_text("body"))[:20_000].lower()
+                if needle not in body:
+                    return False
     except Exception:
         return False
     return True
@@ -383,7 +392,24 @@ async def run_plan(
                 raise StepFailure(
                     f"step {i} done_when unmet after: {desc}", task_text, plan.entry_url
                 )
-        elif step.action in {"click", "type"} and laya.enabled:
+        elif step.action in {"click", "type"}:
+            # A mutating step with no deterministic proof can only be confirmed
+            # by the gate — that is the case laya_gate's contract names when it
+            # says the executor "treats an off/low-confidence gate as a step
+            # failure". Skipping the check when the gate is off let an
+            # unverifiable action report success on the strength of "it did not
+            # throw", which is the false success the whole gate exists to stop
+            # (2026-09-27). No gate means no way to know the step worked, so
+            # hand it to the agent, which can look at the page. A step with a
+            # ``done_when`` is unaffected: that proof is deterministic and runs
+            # whether or not the gate is up.
+            if not laya.enabled:
+                raise StepFailure(
+                    f"step {i}: {desc} cannot be verified — the gate is off and "
+                    "the step has no done_when",
+                    task_text,
+                    plan.entry_url,
+                )
             if not await confirm_step(page, laya, settings, task_text, desc):
                 raise StepFailure(
                     f"step {i}: not confirmed by the gate after: {desc}",

@@ -38,11 +38,21 @@ from .escalation import (
 )
 from .llm import LLMClient
 from .plan_model import PlanRejected, StepFailure
+from .urlguard import UrlRejected, public_url_reason, validate_public_http_url
 
 #: How many times one task may be re-planned by an operator amendment before it
 #: is refused. A person steering a run types a few times; a loop means the
 #: instruction itself cannot be planned and should be surfaced, not retried.
 MAX_AMENDMENTS = 5
+
+#: Finished attempts kept in the live ``tasks`` map. The map is the source of
+#: truth for "what has this process done", but nothing evicted it, so it grew a
+#: Task per run for the pod's whole lifetime — each pinning its payload, result
+#: and a 200-entry activity feed (2026-09-27). Terminal attempts beyond this are
+#: dropped from memory; History reads them on from the archive, which is exactly
+#: the durable half these were duplicated from. Queued and running attempts are
+#: never evicted, and neither is an attempt in a thread that still has one live.
+MAX_TASKS = 500
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +63,12 @@ class TaskStatus(StrEnum):
     DONE = "done"
     FAILED = "failed"
     BLOCKED = "blocked"  # needs a human; never auto-retried
+
+
+#: Statuses that still have work ahead of them: an attempt the operator can
+#: still steer, retry or watch. The rest are terminal, and only terminal
+#: attempts are ever evicted from memory (see ``TaskRunner._evict_finished``).
+_LIVE_STATUSES = frozenset({TaskStatus.QUEUED, TaskStatus.RUNNING})
 
 
 @dataclass
@@ -186,7 +202,15 @@ def _start_url_for(text: str, task: Task) -> str:
     for candidate in (text, task.detail or ""):
         found = _URL_RE.search(candidate or "")
         if found:
-            return found.group(0).rstrip(".,;")
+            # A URL the operator names in prose is still a navigation target,
+            # so it meets the same bar as the explicit field below. `_URL_RE`
+            # can only match http(s), so this only rejects a *literal* private
+            # address (the metadata service written out in full) — the DNS half
+            # needs a lookup and is enforced where the run can afford one
+            # (``_run_freeform``). 2026-09-27.
+            url = found.group(0).rstrip(".,;")
+            if public_url_reason(url) is None:
+                return url
     # The explicit fields are taken at face value, not filtered to http: a value
     # someone wrote into `url` deliberately is not a guess, whereas a regex over
     # prose can only ever match http(s). Only a blank page is refused, and a
@@ -194,7 +218,9 @@ def _start_url_for(text: str, task: Task) -> str:
     for source in (task.result or {}, task.payload):
         url = source.get("url") if isinstance(source, dict) else None
         if isinstance(url, str) and url.strip() and url.strip() != "about:blank":
-            return url.strip()
+            url = url.strip()
+            if public_url_reason(url) is None:
+                return url
     entry = (getattr(get_recipe_or_none(task.recipe), "entry_url", "") or "").strip()
     return entry if entry and entry != "about:blank" else ""
 
@@ -336,6 +362,16 @@ _BUILTIN_NAMES: set[str] = set()
 #: nobody's to forget, and inferring would delete it on the next library read.
 _STORED_NAMES: set[str] = set()
 
+#: Built-in recipes a stored library entry is currently standing in front of,
+#: by name. A stored recipe is validated on the same rules a built-in's name
+#: obeys, so ``minesweeper.play`` is a legal *stored* name — and installing it
+#: used to overwrite the built-in object outright while ``forget_recipe`` then
+#: deleted the name from the registry. Deleting the library file (or a name that
+#: failed to reload) therefore left the built-in gone for the life of the
+#: process: ``get_recipe`` raised KeyError and the recipe vanished from the
+#: panel (2026-09-27). Stashing the object here lets the removal restore it.
+_SHADOWED_BUILTINS: dict[str, Recipe] = {}
+
 
 def register(recipe: Recipe) -> Recipe:
     _REGISTRY[recipe.name] = recipe
@@ -434,11 +470,17 @@ def install_stored(spec: dict) -> Recipe:
     """Register (or refresh) one stored recipe from an already-validated spec."""
     from .recipes.stored import StoredRecipe
 
-    existing = _REGISTRY.get(spec["name"])
+    name = spec["name"]
+    existing = _REGISTRY.get(name)
     if isinstance(existing, StoredRecipe):
         existing.replace(spec)
-        _STORED_NAMES.add(spec["name"])
+        _STORED_NAMES.add(name)
         return existing
+    if existing is not None:
+        # A stored name that collides with a live built-in (or a directly
+        # registered recipe): keep the object so removing the stored entry can
+        # put it back, rather than leaving a hole in the registry.
+        _SHADOWED_BUILTINS[name] = existing
     recipe = StoredRecipe(spec)
     _REGISTRY[recipe.name] = recipe
     _STORED_NAMES.add(recipe.name)
@@ -451,11 +493,20 @@ def stored_recipe_names() -> set[str]:
 
 
 def forget_recipe(name: str) -> bool:
-    """Drop a stored recipe, so deleting it from the library takes effect."""
+    """Drop a stored recipe, so deleting it from the library takes effect.
+
+    When it was shadowing a built-in, the built-in returns: the library was
+    standing in front of it, not replacing it, and a deletion must fall back to
+    the Python recipe exactly as overriding a built-in's config does.
+    """
     if name not in _STORED_NAMES or name not in _REGISTRY:
         return False
     _STORED_NAMES.discard(name)
-    del _REGISTRY[name]
+    shadowed = _SHADOWED_BUILTINS.pop(name, None)
+    if shadowed is not None:
+        _REGISTRY[name] = shadowed
+    else:
+        del _REGISTRY[name]
     return True
 
 
@@ -732,7 +783,34 @@ class TaskRunner:
                 # that ends says so in its thread, not only in History.
                 self._speak_outcome(task)
                 self.current = None
+                self._evict_finished()
                 self.queue.task_done()
+
+    def _evict_finished(self) -> None:
+        """Drop the oldest terminal attempts beyond the in-memory cap.
+
+        Called after each attempt ends, when the map is quiescent (the worker is
+        the only writer, and it is between tasks here). A queued or running
+        attempt is never evicted, and neither is a terminal attempt whose thread
+        still has a live one — History groups by thread, and a thread with a live
+        attempt must keep its finished attempts beside it (2026-09-27).
+        """
+        if len(self.tasks) <= MAX_TASKS:
+            return
+        live_threads = {
+            t.thread_id for t in self.tasks.values() if t.status in _LIVE_STATUSES
+        }
+        terminal = sorted(
+            (
+                t
+                for t in self.tasks.values()
+                if t.status not in _LIVE_STATUSES and t.thread_id not in live_threads
+            ),
+            key=lambda t: t.created_at,
+        )
+        excess = len(self.tasks) - MAX_TASKS
+        for t in terminal[:excess]:
+            self.tasks.pop(t.id, None)
 
     def _archive(self, task: Task) -> None:
         if self.runs is None:
@@ -1074,6 +1152,20 @@ class TaskRunner:
         if not url or url == "about:blank":
             task.status = TaskStatus.FAILED
             task.detail = "freeform tasks need a url in the payload or the task text"
+            return
+        # The full check, now that this is an async context and a DNS lookup is
+        # affordable: `_start_url_for` only refused a literal private address or
+        # a non-http(s) scheme, and a *name* that resolves into loopback or the
+        # cluster net would still have reached Chrome. Fail closed — an
+        # unresolvable name was already refused by `_start_url_for`'s structural
+        # half only if it looked private; here the honest answer is that a run
+        # which cannot prove its start page is public does not start (2026-09-27).
+        try:
+            url = await asyncio.to_thread(validate_public_http_url, url)
+        except UrlRejected as exc:
+            task.status = TaskStatus.FAILED
+            task.detail = f"refused start url: {exc}"
+            log.warning("freeform task %s refused start url %r: %s", task.id, url, exc)
             return
 
         for _attempt in range(MAX_AMENDMENTS + 1):

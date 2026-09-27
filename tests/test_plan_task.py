@@ -146,16 +146,18 @@ class FakePlanner:
 
 
 class FakeLaya:
-    def __init__(self, pick: int | None = 0, conf: float = 0.95, yes: bool = True) -> None:
+    def __init__(self, pick: int | None = 0, conf: float = 0.95, yes: bool = True,
+                 enabled: bool = True) -> None:
         self.pick = pick
         self.conf = conf
         self.yes = yes
+        self._enabled = enabled
         self.seen_lines: list[str] | None = None
         self.stats = {"calls": 0, "picks": 0, "confirms": 0, "inconclusive": 0}
 
     @property
     def enabled(self) -> bool:
-        return True
+        return self._enabled
 
     @property
     def pick_enabled(self) -> bool:
@@ -704,6 +706,68 @@ async def test_unconfirmed_click_falls_back_to_agent(runner_factory, site, yes, 
     assert agent_calls["n"] == 1
 
 
+async def test_an_unverifiable_click_with_the_gate_off_falls_back_to_agent(runner_factory, site):
+    """With no gate and no ``done_when`` there is nothing to confirm the step.
+
+    ``laya_gate`` promises the executor "treats an off/low-confidence gate as a
+    step failure", but the gate was skipped when disabled, so an unverifiable
+    click reported DONE on the strength of "it did not throw". That is the
+    silent success the gate exists to prevent; it must fail into the agent
+    instead (2026-09-27).
+    """
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/form",
+        "steps": [{"action": "click", "goal": "submit the form", "selector": "#go"}],
+    }
+    agent_calls = {"n": 0}
+
+    async def agent(session, url, payload):
+        agent_calls["n"] += 1
+        return {"agent": True}
+
+    runner = make(
+        agent_runner=agent, planner=FakePlanner(plan), laya=FakeLaya(enabled=False)
+    )
+    task = runner.submit("plan.task", {"task": "submit"})
+    done = await _drain(runner, task.id)
+
+    assert done.used_agent is True
+    assert agent_calls["n"] == 1
+
+
+async def test_a_click_with_done_when_succeeds_with_the_gate_off(runner_factory, site):
+    """A deterministic proof does not need the gate.
+
+    The gate-off failure is scoped to steps with no other proof: a step that
+    names a ``done_when`` is checked by reading the page, and must keep working
+    with Laya off (laptop dev, or a broken engine).
+    """
+    make, site_url = runner_factory
+    plan = {
+        "entry_url": f"{site_url}/form",
+        "steps": [{
+            "action": "click", "goal": "submit the form", "selector": "#go",
+            "done_when": {"text_contains": "submitted"},
+        }],
+    }
+    agent_calls = {"n": 0}
+
+    async def agent(session, url, payload):
+        agent_calls["n"] += 1
+        return {"agent": True}
+
+    runner = make(
+        agent_runner=agent, planner=FakePlanner(plan), laya=FakeLaya(enabled=False)
+    )
+    task = runner.submit("plan.task", {"task": "submit"})
+    done = await _drain(runner, task.id)
+
+    assert done.status is TaskStatus.DONE
+    assert done.used_agent is False
+    assert agent_calls["n"] == 0
+
+
 async def test_llm_picker_resolves_when_laya_declines(runner_factory, site):
     make, site_url = runner_factory
     plan = {
@@ -1104,12 +1168,47 @@ def test_parse_plan_rejects_unknown_fields():
         parse_plan({"entry_url": "https://x/", "extra": 1, "steps": []})
 
 
-def test_step_failure_defaults():
+async def test_step_failure_defaults():
     from browser_agent.plan_model import StepFailure
 
     exc = StepFailure("boom")
     assert exc.goal == ""
     assert exc.entry_url == ""
+
+
+class _TitlePage:
+    """A page whose title and body the test controls independently.
+
+    ``check_done_when`` reads both, so a fake has to keep them apart: a proof
+    drawn from the title must be satisfiable by the title alone, which is the
+    regression this pins.
+    """
+
+    url = "https://example.com/departures"
+
+    def __init__(self, title="", body=""):
+        self._title = title
+        self._body = body
+
+    async def title(self):
+        return self._title
+
+    async def inner_text(self, _sel):
+        return self._body
+
+
+async def test_a_title_proof_is_checked_against_the_title():
+    # A harvested type-step's proof is the next page's <title>, because the body
+    # could be the string the step just typed. Checking only ``inner_text``
+    # therefore made every such proof unverifiable: the step failed into the
+    # agent, no replay ever counted, and the recipe could never be promoted.
+    from browser_agent.plan_model import DoneWhen
+    from browser_agent.recipes._plan_exec import check_done_when
+
+    dw = DoneWhen(text_contains="Departures")
+    assert await check_done_when(_TitlePage(title="Departures — SJ"), dw) is True
+    assert await check_done_when(_TitlePage(body="Departures"), dw) is True
+    assert await check_done_when(_TitlePage(title="Other", body="x"), dw) is False
 
 
 async def test_transient_network_error_is_retried_once():

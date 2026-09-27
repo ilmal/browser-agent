@@ -19,10 +19,14 @@ stale one.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Any
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -75,10 +79,40 @@ def _clean(value: str, limit: int = 200) -> str:
 
 def valid_profile(name: str) -> bool:
     """Same rule as scripts/add-profile.sh, so a name the roster accepts is a
-    name the generator and k8s will accept."""
+    name the generator and k8s will accept.
+
+    The 55-char cap is load-bearing, not cosmetic: the name becomes
+    ``profile-<name>`` as a k8s resource name and ``<name>`` as a *label*
+    value, whose limit is 63. Unbounded, a 64-char name passed this check and
+    then failed ``kubectl apply`` — leaving the two PVCs it had already applied
+    behind, with no roster entry to clean them up (2026-09-27, verified by
+    server-side dry-run). The suffix ``profile-`` is 8 characters, so 55 is the
+    longest name that keeps the derived name within the limit.
+    """
     import re
 
-    return bool(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", str(name or "")))
+    name = str(name or "")
+    if len(name) > 55:
+        return False
+    return bool(re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", name))
+
+
+def _number(value: Any, default: float = 0.0) -> float:
+    """A timestamp from the file, or ``default`` when it is not a number.
+
+    The roster documents itself as never raising — a corrupt roster must not
+    take the hub down — but ``float("soon")`` raises ValueError and a nested
+    dict raises TypeError, so a hand-edited or half-written file still produced
+    the 500 the loader exists to prevent (2026-09-27). ``bool`` is refused
+    rather than coerced: ``float(True) == 1.0`` would turn a wrong-shaped field
+    into a plausible-looking 1970 timestamp.
+    """
+    if isinstance(value, bool):
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 
 def load(path: Path) -> Registry:
@@ -90,9 +124,25 @@ def load(path: Path) -> Registry:
         # A corrupt roster must not take the hub down: an empty one is
         # recoverable by hand, a 500 on every page is not.
         return Registry()
+    # Valid JSON is not a valid roster: a top-level list, string or null parses
+    # fine and then raises AttributeError out of ``raw.get`` — the very 500 this
+    # function exists to prevent (2026-09-27). A dict with a non-list ``bots``
+    # is the same defect one level in.
+    if not isinstance(raw, dict) or not isinstance(raw.get("bots"), list):
+        log.warning("%s is not a roster; treating it as empty", path)
+        return Registry()
     bots = []
-    for item in raw.get("bots", []):
-        if not isinstance(item, dict) or not valid_profile(item.get("profile", "")):
+    for item in raw["bots"]:
+        if not isinstance(item, dict):
+            log.warning("%s: skipping a bot entry that is not an object (%r)", path, item)
+            continue
+        if not valid_profile(item.get("profile", "")):
+            # A hand-edited roster with a capitalised or over-long profile would
+            # otherwise vanish from the page with no trace: the pod keeps
+            # running while the roster silently loses its entry (2026-09-27).
+            log.warning(
+                "%s: skipping entry with invalid profile %r", path, item.get("profile")
+            )
             continue
         bots.append(Bot(
             profile=item["profile"],
@@ -102,7 +152,7 @@ def load(path: Path) -> Registry:
             notes=_clean(item.get("notes", ""), 500),
             background=_clean(item.get("background", ""), 2000),
             login_notes=_clean(item.get("login_notes", ""), 2000),
-            created_at=float(item.get("created_at") or 0.0),
+            created_at=_number(item.get("created_at")),
             hidden=bool(item.get("hidden")),
         ))
     return Registry(bots)

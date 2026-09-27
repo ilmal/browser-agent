@@ -32,6 +32,11 @@ log = logging.getLogger(__name__)
 _DEVTOOLS_PORT_FILE = "DevToolsActivePort"
 
 _browser_exe: str | None = None
+#: The bundled Chromium's version, cached once a real browser has launched.
+#: Resolving it any other way needs the sync Playwright API, which raises inside
+#: a running event loop — so before the first launch the version is unknown, and
+#: :func:`_user_agent` is told that rather than being handed a stale literal.
+_browser_version_cached: str | None = None
 
 
 def chromium_executable() -> str | None:
@@ -99,17 +104,43 @@ def _browser_version() -> str | None:
     """The bundled Chromium's own version, e.g. ``153.0.8010.12``.
 
     Read from the binary so a Playwright upgrade cannot leave a hand-written
-    version string behind that no longer matches the engine underneath it.
+    version string behind that no longer matches the engine underneath it. The
+    binary path comes from the *async* API (``chromium.executable_path``), which
+    is safe inside a running loop — the sync entry point this once used raises
+    there, so the version silently fell back to a literal for every headless run
+    (2026-09-27). Resolved once and cached.
     """
+    global _browser_version_cached
+    if _browser_version_cached is not None:
+        return _browser_version_cached
+    exe = _browser_exe or chromium_executable()
+    if not exe:
+        return None
     try:
-        exe = chromium_executable()
-        if not exe:
-            return None
         proc = subprocess.run([exe, "--version"], capture_output=True, text=True, timeout=20)
     except (OSError, subprocess.SubprocessError):
         return None
     match = re.search(r"(\d+\.\d+\.\d+\.\d+)", proc.stdout)
-    return match.group(1) if match else None
+    if match:
+        _browser_version_cached = match.group(1)
+    return _browser_version_cached
+
+
+def _note_browser_exe(exe: str | None) -> None:
+    """Record the binary path the async Playwright API resolved.
+
+    ``_user_agent`` runs during ``start()``, inside the event loop, where the
+    sync probe cannot run; the async handle is already in hand at that point, so
+    the path is taken from it instead.
+    """
+    global _browser_exe
+    if exe:
+        _browser_exe = exe
+
+
+#: Fallback Chromium major version, used only when the binary's own version
+#: cannot be read. The bundled Chromium is the source of truth; this is a floor.
+_UA_FALLBACK_VERSION = "140.0.0.0"
 
 
 def _user_agent(headless: bool) -> str | None:
@@ -124,7 +155,7 @@ def _user_agent(headless: bool) -> str | None:
     """
     if not headless:
         return None
-    version = _browser_version() or "131.0.0.0"
+    version = _browser_version() or _UA_FALLBACK_VERSION
     return (
         f"Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
         f"(KHTML, like Gecko) Chrome/{version} Safari/537.36"
@@ -271,6 +302,10 @@ class BrowserSession:
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         _clear_stale_profile_lock(self.profile_dir)
         self._playwright = await async_playwright().start()
+        # The async API hands back the binary path directly, no sync entry point
+        # needed — so the real Chromium version is available *before* the UA is
+        # built, on the first launch, rather than falling back to a literal.
+        _note_browser_exe(getattr(self._playwright.chromium, "executable_path", None))
 
         launch: dict = {
             "user_data_dir": str(self.profile_dir),
@@ -296,6 +331,9 @@ class BrowserSession:
         # Present a browser that does not announce itself as automated. Some
         # sites (minesweeper.online) serve a script-less shell to Playwright's
         # headless UA, which looks like a broken selector rather than a refusal.
+        # The UA must match the engine, so the version is read from the browser
+        # *after* it launches and set on the context then — resolving it here
+        # would need the sync API inside this event loop, which raises.
         agent = _user_agent(self.settings.headless)
         if agent:
             launch["user_agent"] = agent
@@ -314,7 +352,18 @@ class BrowserSession:
                 "bypass": "localhost,127.0.0.1",
             }
 
-        self._context = await self._playwright.chromium.launch_persistent_context(**launch)
+        try:
+            self._context = await self._playwright.chromium.launch_persistent_context(
+                **launch
+            )
+        except Exception:
+            # The Playwright driver process is up but no browser is. Drop it
+            # before the exception escapes, or ``_playwright`` stays set with no
+            # ``_context`` — and a later ``stop()``/``start()`` is a no-op on the
+            # dead driver, leaking one node process per failed launch
+            # (2026-09-27).
+            await self.stop()
+            raise
         self._context.set_default_timeout(30_000)
         log.info(
             "browser started profile=%s account=%s dir=%s",

@@ -187,13 +187,19 @@ class RunStore:
         """
         if self._conn is None:
             return
-        with contextlib.suppress(Exception):
+        try:
             have = {r["name"] for r in self._conn.execute("PRAGMA table_info(runs)")}
             if "reads_instruction" not in have:
                 self._conn.execute(
                     "ALTER TABLE runs ADD COLUMN reads_instruction "
                     "INTEGER NOT NULL DEFAULT 1"
                 )
+        except Exception:
+            # Logged, not silent: a suppress here hid the fact that a failed
+            # migration then makes every save() insert fail on the missing
+            # column, turning one warning into a silently empty archive
+            # (2026-09-27).
+            log.warning("could not migrate the run archive schema", exc_info=True)
 
     @property
     def enabled(self) -> bool:
@@ -281,23 +287,51 @@ class RunStore:
                 ),
             )
             self._conn.commit()
+            self._prune_messages(msg.thread_id)
             return True
         except Exception:
             log.warning("could not archive message %s", getattr(msg, "id", "?"),
                         exc_info=True)
             return False
 
+    def _prune_messages(self, thread_id: str) -> None:
+        """Drop this thread's oldest messages beyond the retention bound.
+
+        The bound was documented but never enforced: only ``runs`` was pruned,
+        so a long-lived pod accumulated every message it ever wrote (2026-09-27).
+        Per-thread rather than global, matching the reader — each thread is its
+        own conversation, and one busy thread must not evict a quiet one.
+        """
+        if self._conn is None:
+            return
+        with contextlib.suppress(Exception):
+            self._conn.execute(
+                "DELETE FROM messages WHERE thread_id = ? AND id NOT IN ("
+                "  SELECT id FROM messages WHERE thread_id = ? "
+                "  ORDER BY at DESC, id DESC LIMIT ?"
+                ")",
+                (thread_id, thread_id, KEEP_MESSAGES_PER_THREAD),
+            )
+            self._conn.commit()
+
     def messages(self, thread_id: str, *, limit: int = KEEP_MESSAGES_PER_THREAD
                  ) -> list[dict[str, Any]]:
-        """This thread's saved messages, oldest first."""
+        """This thread's saved messages, oldest first.
+
+        The most *recent* ``limit``, not the first: the old ``ORDER BY at ASC
+        LIMIT ?`` returned the oldest 500, so once a thread passed the bound
+        every new message lived in the database but was invisible in the panel
+        — a conversation that silently stopped updating (2026-09-27).
+        """
         if self._conn is None:
             return []
         with contextlib.suppress(Exception):
             rows = self._conn.execute(
                 "SELECT id, thread_id, at, role, kind, text, meta FROM messages "
-                "WHERE thread_id = ? ORDER BY at ASC LIMIT ?",
+                "WHERE thread_id = ? ORDER BY at DESC, id DESC LIMIT ?",
                 (thread_id, limit),
             ).fetchall()
+            rows.reverse()   # newest-first for the LIMIT, oldest-first to return
             return [
                 {
                     "id": r["id"],

@@ -86,9 +86,8 @@ class PlanTask:
         # re-decided everything from zero. That is the bug behind "not remembering
         # between prompts" (2026-09-23).
         history = str(payload.get("history") or "").strip()
-        raw = await self._planner.plan(
-            task_text, prompt=cfg("plan.task", "planner_prompt", PROMPT), history=history
-        )
+        planner_prompt = cfg("plan.task", "planner_prompt", PROMPT)
+        raw = await self._planner.plan(task_text, prompt=planner_prompt, history=history)
         # Repair before rejecting, not after: a plan that fails ``_check`` on one
         # step is a model-quality hiccup, and every step it got right is work the
         # agent fallback will otherwise redo blind. Asking the planner once more
@@ -99,8 +98,12 @@ class PlanTask:
         try:
             plan = parse_plan(raw, max_steps=self._settings.planner_max_steps)
         except PlanRejected as exc:
+            # The operator's override again, not the module literal: the repair
+            # is the *same* question asked better, so re-asking under the default
+            # rules silently threw away the operator's own plan.task config on
+            # the retry — the one call where it matters most (2026-09-27).
             repaired = await self._planner.plan(
-                task_text, prompt=_repair_prompt(PROMPT, raw, exc), history=history
+                task_text, prompt=_repair_prompt(planner_prompt, raw, exc), history=history
             )
             plan = parse_plan(repaired, max_steps=self._settings.planner_max_steps)
         log.info(
