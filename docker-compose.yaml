@@ -32,7 +32,7 @@ services:
       PROFILES_ROOT: /profiles
       DATA_ROOT: /data
       NOVNC_PORT: "6080"
-      CONTROL_TOKEN: ${CONTROL_TOKEN:-devtoken}
+      CONTROL_TOKEN: ${CONTROL_TOKEN:?CONTROL_TOKEN must be set (no dev default)}
       LLM_ENABLED: ${LLM_ENABLED:-false}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       # A model with no second leg has no failover: glm-4.5v is zai-only in
@@ -76,7 +76,7 @@ services:
   #     PROFILES_ROOT: /profiles
   #     DATA_ROOT: /data
   #     NOVNC_PORT: "6080"
-  #     CONTROL_TOKEN: ${CONTROL_TOKEN:-devtoken}
+  #     CONTROL_TOKEN: ${CONTROL_TOKEN:?CONTROL_TOKEN must be set (no dev default)}
   #     LLM_ENABLED: "false"
   #   ports:
   #     - "127.0.0.1:8902:8000"

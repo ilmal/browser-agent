@@ -64,10 +64,27 @@ app = FastAPI(title="browser-agent roster", lifespan=_lifespan)
 
 
 async def require_token(request: Request) -> None:
-    if not settings.control_token:
-        return
+    """Bearer auth.
+
+    SEC-BA-002 (2026-09-26): fails CLOSED. An unset CONTROL_TOKEN used to
+    disable auth on every route; it now refuses the request instead.
+
+    SEC-BA-004: a browser that passed nginx basic auth has the bearer injected
+    for it, so without an origin check a page on another site could drive the
+    control plane with the operator's own credentials. Refuse mutating
+    requests that arrive cross-site.
+    """
+    if not settings.hub_token:
+        raise HTTPException(status_code=503, detail="HUB_TOKEN is not configured")
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        site = request.headers.get("sec-fetch-site", "")
+        if site and site not in ("same-origin", "none"):
+            raise HTTPException(status_code=403, detail="cross-site request refused")
+        origin = request.headers.get("origin", "")
+        if origin and origin.split("://", 1)[-1] != request.headers.get("host", ""):
+            raise HTTPException(status_code=403, detail="cross-origin request refused")
     header = request.headers.get("authorization", "")
-    if header.removeprefix("Bearer ").strip() != settings.control_token:
+    if header.removeprefix("Bearer ").strip() != settings.hub_token:
         raise HTTPException(status_code=401, detail="unauthorized")
 
 
@@ -301,7 +318,7 @@ async def delete_bot(profile: str, purge: bool = False) -> dict[str, Any]:
     }
 
 
-@app.get("/", response_class=HTMLResponse)
+@app.get("/", response_class=HTMLResponse, dependencies=[Depends(require_token)])
 async def roster_page() -> HTMLResponse:
     ui = Path(__file__).parent / "ui" / "roster.html"
     return HTMLResponse(ui.read_text())

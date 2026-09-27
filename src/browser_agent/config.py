@@ -127,6 +127,12 @@ class Settings:
     # Control plane
     api_port: int
     control_token: str
+    # SEC-BA-001 (2026-09-26): the hub authenticates in-bound callers with its
+    # own token so one shared secret no longer covers both the roster and every
+    # bot. Falls back to control_token when unset, so an un-migrated deployment
+    # keeps working. control_token stays what a bot validates, and what the hub
+    # presents when it probes a bot.
+    hub_token: str
 
     # Alerts
     ops_alert_url: str
@@ -365,6 +371,7 @@ def load_settings() -> Settings:
         ),
         api_port=_env_int("API_PORT", 8000),
         control_token=_env("CONTROL_TOKEN"),
+        hub_token=_env("HUB_TOKEN") or _env("CONTROL_TOKEN"),
         recipes_dir=Path(_env("RECIPES_DIR", "/recipes")),
         recipes_configmap=_env("RECIPES_CONFIGMAP", "browser-agent-recipes"),
         recipes_publish=_env("RECIPES_PUBLISH", "false").lower() in {"1", "true", "yes"},
