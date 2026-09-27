@@ -179,8 +179,15 @@ class EscalationRequired(Exception):
     Carrying the Challenge out as an exception (rather than returning a status)
     makes it impossible for a caller to accidentally treat a blocked run as a
     success and retry it.
+
+    ``blocked`` distinguishes a venue that REFUSED us (it served its own block
+    page) from one we merely could not finish: only a refusal may be written
+    down as a permanent obstacle, so the runner keys its memory on this flag. A
+    RATE_LIMITED challenge raised because *no* venue could be found is not a
+    refusal, and treating it as one wrote a healthy site off for good.
     """
 
-    def __init__(self, challenge: Challenge) -> None:
+    def __init__(self, challenge: Challenge, *, blocked: bool = True) -> None:
         super().__init__(challenge.describe())
         self.challenge = challenge
+        self.blocked = blocked

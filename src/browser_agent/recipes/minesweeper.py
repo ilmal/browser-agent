@@ -257,9 +257,9 @@ class Minesweeper:
         # or a lifted ban is the operator's hand, and the memory only ever
         # narrows what the bot chooses on its own.
         if not override:
-            from ..site_health import blocked_hosts, host_of
+            from ..site_health import host_of, written_off
 
-            if host_of(url) in blocked_hosts(self._settings, self.name):
+            if host_of(url) in written_off(self._settings, self.name):
                 log_.note(
                     "info",
                     f"{host_of(url)} is remembered-blocked; searching only for "
@@ -267,7 +267,7 @@ class Minesweeper:
                 )
                 healed = await self._heal(page, log_)
                 if healed is None:
-                    raise self._exhausted(page.url)
+                    raise self._exhausted(url)
                 url = healed
 
         for game_no in range(1, games + 1):
@@ -290,7 +290,7 @@ class Minesweeper:
                                       "(Account blocked)", url=url)
                 healed = await self._heal(page, log_)
                 if healed is None:
-                    raise self._exhausted(page.url)
+                    raise self._exhausted(url)
                 url = healed
                 view = await start_beginner(page, url=url)
                 if view.blocked:
@@ -352,24 +352,35 @@ class Minesweeper:
         page = await session.page()
         return await self._heal(page, log_) is not None
 
-    def _exhausted(self, url: str) -> EscalationRequired:
+    def _exhausted(self, url: str, *, blocked: bool = False) -> EscalationRequired:
         """The stop for "every venue this bot knows about is written off".
 
         The message IS the memory — which hosts blocked this egress and how
         often, how many searched replacements were probed and rejected — so
         the escalation carries the whole history and the operator decides
         with everything in view, once, instead of re-deriving it each run.
+
+        ``url`` is the venue this run was working on, NOT ``page.url``: the
+        page usually ended on the search engine or the last probed candidate,
+        and escalating against those memorized DuckDuckGo as a blocked venue.
+
+        ``blocked`` marks a genuine refusal of that venue (it served its block
+        page). Without it the challenge is RATE_LIMITED with blocked=False —
+        "we could not finish" is not "this site refused us", and the runner
+        must not write a permanent refusal from it. That inversion is what
+        turned a single transient timeout into a site written off for good.
         """
         from ..site_health import blocked_hosts
 
-        blocked: list[str] = []
+        blocked_hosts_ = blocked_hosts(self._settings, self.name)
+        names: list[str] = []
         rejected = 0
-        for host, b in sorted(blocked_hosts(self._settings, self.name).items()):
+        for host, b in sorted(blocked_hosts_.items()):
             if b.get("kind") == "rejected":
                 rejected += 1
-            else:
-                blocked.append(f"{host} (seen {b.get('count', 1)}x)")
-        msg = ("every venue is written off: " + ", ".join(blocked)) if blocked \
+            elif b.get("kind") in ("blocked", "unreachable"):
+                names.append(f"{host} (seen {b.get('count', 1)}x)")
+        msg = ("every venue is written off: " + ", ".join(names)) if names \
             else "no playable venue is known"
         if rejected:
             msg += (f"; {rejected} searched replacement(s) probed and rejected "
@@ -377,7 +388,7 @@ class Minesweeper:
         msg += (". The local test board is operator-excluded. Needs a different "
                 "egress, or an adapter for another site.")
         return EscalationRequired(
-            Challenge(ChallengeKind.RATE_LIMITED, msg, url))
+            Challenge(ChallengeKind.RATE_LIMITED, msg, url), blocked=blocked)
 
     async def _heal(self, page: Any, log_: Any) -> str | None:
         """Update the recipe after its canonical site stopped working.
@@ -392,15 +403,29 @@ class Minesweeper:
         as rejected, so the next search never re-probes it. Returns the new
         URL, or None when nothing real qualifies — honesty over a fake board.
         """
-        from ..site_health import host_of, record, record_blocked
+        from ..site_health import host_of, record, record_blocked, written_off
 
-        for url in await self._search_candidates(page):
+        for url in await self._search_candidates(page, skip=written_off(
+                self._settings, self.name)):
             try:
                 await page.goto(url, wait_until="domcontentloaded", timeout=45_000)
-                cells = await page.evaluate(_BOARD_PROBE)
             except Exception:
                 log_.note("error", f"candidate {url} could not be checked")
                 continue
+            # The board paints only after the site's script runs, so a single
+            # un-waited read at domcontentloaded legitimately sees an empty
+            # grid — and writing that off as "rejected" shrinks the candidate
+            # pool toward exhaustion on a page that was merely slow. Poll for
+            # the contract before judging; a real absence still records.
+            cells = 0
+            for _ in range(10):
+                try:
+                    cells = await page.evaluate(_BOARD_PROBE)
+                except Exception:
+                    cells = 0
+                if cells == 81:
+                    break
+                await page.wait_for_timeout(1000)
             if cells != 81:
                 record_blocked(self._settings, self.name, host=host_of(url),
                                kind="rejected",
@@ -415,15 +440,23 @@ class Minesweeper:
             return url
         return None
 
-    async def _search_candidates(self, page: Any) -> list[str]:
+    async def _search_candidates(self, page: Any,
+                                 skip: dict | None = None) -> list[str]:
         """Real minesweeper pages found by search, best guess first.
 
         Navigates a search engine like a person would, collects the result
         links, and filters to real http(s) pages — never a host this bot has
-        written down as blocked or rejected (obstacle memory), never the
-        agent's own loopback (operator-excluded), one per host.
+        written off as a REFUSAL (``skip``, the narrowing set: blocked or
+        rejected), never the agent's own loopback (operator-excluded), one per
+        host.
+
+        A transient ``unreachable`` host is deliberately NOT skipped: the run
+        is searching precisely because a venue did not answer, and the
+        canonical is the first candidate worth re-probing. Excluding it here
+        would make the transient record act like a permanent write-off — the
+        exact defect this round removes.
         """
-        from ..site_health import blocked_hosts
+        from ..site_health import written_off as _written_off
 
         try:
             await page.goto(_SEARCH_URL, wait_until="domcontentloaded", timeout=45_000)
@@ -432,7 +465,8 @@ class Minesweeper:
             log.warning("site search failed; no candidates", exc_info=True)
             return []
 
-        remembered = blocked_hosts(self._settings, self.name)
+        remembered = skip if skip is not None else _written_off(
+            self._settings, self.name)
         seen: set[str] = set()
         out: list[str] = []
         for link in found or []:

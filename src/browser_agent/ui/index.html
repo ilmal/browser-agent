@@ -821,12 +821,31 @@ function renderPills() {
   $("chat-avatar").textContent = (st.profile || "·").charAt(0).toUpperCase();
 }
 
-// The blocked-set signature the dismiss is remembered against. Dismissing a
-// wall of tasks must not dismiss a NEW block: the banner stays hidden only
-// while the set of blocked task ids is unchanged, and any task entering (or
-// leaving) blocked brings it back.
+// The obstacle signature the dismiss is remembered against. Dismissing a wall
+// must not dismiss a NEW block: the banner stays hidden only while the set of
+// distinct OBSTACLES is unchanged. Keyed on the obstacle (recipe + its
+// normalized headline) rather than the task ids, so ten re-runs of the same
+// block read as one obstacle — the id-keyed signature was defeated by churn,
+// re-opening the wall every time another identical row arrived (2026-09-27).
+function obstacleKey(t) {
+  return t.recipe + "|" + normDetail(t.detail);
+}
+
+function normDetail(detail) {
+  // Strip the volatile tail — "(<url>)" and "(seen Nx)" — keeping the host when
+  // the url names one, so "blocked (https://minesweeper.online/x)" and
+  // "blocked (seen 3x)" collapse, while two different hosts stay distinct.
+  let d = String(detail || "");
+  const url = d.match(/\((https?:\/\/[^\s)]+)\)/);
+  const host = url ? (url[1].match(/^https?:\/\/([^/]+)/) || [])[1] : "";
+  d = d.replace(/\s*\(https?:\/\/[^\s)]+\)\s*/g, " ")
+       .replace(/\s*\(seen \d+x\)\s*/g, " ")
+       .replace(/\s+/g, " ").trim();
+  return host ? d + " @ " + host : d;
+}
+
 function blockedSig(blocked) {
-  return JSON.stringify(blocked.map(t => t.id).sort());
+  return JSON.stringify([...new Set(blocked.map(obstacleKey))].sort());
 }
 
 function rememberDismissed(sig) {
@@ -855,15 +874,17 @@ function renderBanner() {
         `⚑ ${blocked.length} task${blocked.length === 1 ? "" : "s"} need you — show</button></div>`);
       return;
     }
-    const shown = blocked.slice(0, 3);
-    // N identical rows are one fact, not N problems: collapse same-text
-    // details into one line with a count, so three copies of the same block
-    // read as one obstacle instead of a wall.
+    // N identical rows are one fact, not N problems: collapse same-obstacle
+    // details into one line with a count, over the WHOLE set (not just the
+    // first three), so a wall of the same block reads as the single obstacle
+    // it is instead of a truncated "+N more".
     const uniq = [];
-    for (const t of shown) {
-      const last = uniq[uniq.length - 1];
-      if (last && last.detail === t.detail && last.recipe === t.recipe) last.n += 1;
-      else uniq.push({ recipe: t.recipe, detail: t.detail, n: 1 });
+    const at = new Map();
+    for (const t of blocked) {
+      const k = obstacleKey(t);
+      if (at.has(k)) { uniq[at.get(k)].n += 1; continue; }
+      at.set(k, uniq.length);
+      uniq.push({ recipe: t.recipe, detail: t.detail, n: 1 });
     }
     set("banner", `<div class="alert">` +
       `<div class="alert-head"><strong class="alert-title">Needs you — ` +
@@ -872,8 +893,6 @@ function renderBanner() {
       `title="Hide this until the list of waiting tasks changes">Hide</button></div>` +
       uniq.map(t => `<div class="alert-line" title="${esc(t.detail)}">` +
         `${esc(t.recipe)} — ${esc(t.detail)}${t.n > 1 ? ` <b>×${t.n}</b>` : ""}</div>`).join("") +
-      (blocked.length > shown.length
-        ? `<div class="alert-line">+ ${blocked.length - shown.length} more</div>` : "") +
       `<div class="row"><button class="ghost" type="button" ` +
       `data-talk="${esc(blocked[0].thread_id || blocked[0].id)}">Open the conversation</button>` +
       `<span class="muted">${open} to clear it, then answer in the chat.</span></div></div>`);

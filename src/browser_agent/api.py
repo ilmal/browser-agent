@@ -353,6 +353,9 @@ def _recent_tasks(limit: int = 50) -> list[dict[str, Any]]:
     An archived row is shaped like a live one so the UI needs no second code
     path, and is marked ``archived`` so "Read" is offered instead of controls
     that would 404.
+
+    A blocked row is also retired read-time once a later run of the same recipe
+    succeeded (see below) — the archive itself is never mutated.
     """
     live = sorted(runner.tasks.values(), key=lambda t: t.created_at, reverse=True)
     out = [{**t.to_dict(), "archived": False} for t in live[:limit]]
@@ -373,7 +376,35 @@ def _recent_tasks(limit: int = 50) -> list[dict[str, Any]]:
         out.append(d)
         if len(out) >= limit:
             break
-    return sorted(out, key=lambda t: t["created_at"], reverse=True)
+    out = sorted(out, key=lambda t: t["created_at"], reverse=True)
+    return _retire_superseded_blocked(out)
+
+
+def _retire_superseded_blocked(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Drop a blocked row once a LATER run of its recipe succeeded.
+
+    A blocked row is "needs you" only while it is the latest thing that
+    happened to its recipe. Once a later run of that recipe succeeds, the
+    obstacle is visibly gone and the old row is history, not a request — it
+    stops being an alert and keeps its place in the list. Without this the
+    banner is a permanent wall: every exhausted run mints a row and nothing
+    ever retires it, so the same minesweeper block sat at the top for two days
+    alongside a dozen identical copies (2026-09-27). Kept per recipe, and only
+    a strictly later row clears an earlier one, so a genuinely fresh block —
+    nothing since succeeded — still surfaces. Read-time only; the archive is
+    never mutated.
+    """
+    latest: dict[str, float] = {}
+    for t in rows:
+        if t.get("status") == "done":
+            key = t.get("recipe")
+            latest[key] = max(latest.get(key, 0.0), float(t.get("created_at") or 0))
+    return [
+        t for t in rows
+        if not (t.get("status") == "blocked"
+                and latest.get(t.get("recipe"), 0.0)
+                > float(t.get("created_at") or 0))
+    ]
 
 
 @app.get("/api/state", dependencies=[Depends(require_token)])

@@ -48,6 +48,10 @@ class _HealPage:
         self._url = url
         self.visited.append(url)
 
+    async def wait_for_timeout(self, ms: int) -> None:
+        """The board poll between probes (the real Page has it); cells here are
+        static so the first read decides."""
+
     @property
     def url(self) -> str:
         return self._url
@@ -528,3 +532,169 @@ def test_a_dead_egress_is_nobodys_obstacle(tmp_path):
     assert site_health.blocked_hosts(settings, "minesweeper.play") == {}
     assert site_health.entry_url(settings, "minesweeper.play") is None, \
         "the hook never ran, so no replacement was recorded"
+
+
+# ---- the narrowing rule: only a REFUSAL writes a venue off -------------------
+#
+# The defect this round removes (2026-09-27): a single 30s navigation timeout
+# was memorized as kind "unreachable", and the recipe's fast path treated mere
+# membership as a permanent write-off — so a healthy canonical (curl: 200 in
+# 0.26s) was never tried again, and every later run escalated into a fresh
+# "needs you" row. A transient sighting must be recorded and shown, but it must
+# not narrow the choice.
+
+
+def test_written_off_excludes_the_transient_unreachable_kind(tmp_path):
+    settings = StubSettings(data_root=tmp_path)
+    _seed(settings, {"a.example": "unreachable", "b.example": "blocked",
+                     "c.example": "rejected"})
+
+    narrow = site_health.written_off(settings, "minesweeper.play")
+
+    assert set(narrow) == {"b.example", "c.example"}, \
+        "only refusals narrow; a bare timeout is advisory"
+    # The full store still carries every sighting — nothing is forgotten.
+    assert set(site_health.blocked_hosts(settings, "minesweeper.play")) == \
+        {"a.example", "b.example", "c.example"}
+
+
+def test_a_transient_unreachable_record_does_not_divert_the_fast_path(
+        monkeypatch, tmp_path):
+    """The live bug, pinned: the canonical was recorded unreachable by a
+    timeout, then a later run with a healthy canonical must try it — not jump
+    straight to _heal."""
+    settings = StubSettings(data_root=tmp_path)
+    _seed(settings, {"minesweeper.online": "unreachable"})
+    recipe = _recipe(settings=settings)
+    page = _HealPage(links=[], cells_by_url={})
+    seen: list[str | None] = []
+
+    class _View:
+        blocked = False
+        cells_ready = True
+        n_cells = 81
+
+    async def _start(_page, url=None):
+        seen.append(url)
+        return _View()
+
+    async def _play(*_a):
+        return {"outcome": "won"}
+
+    mod = __import__("browser_agent.recipes.minesweeper", fromlist=["x"])
+    monkeypatch.setattr(mod, "start_beginner", _start)
+    monkeypatch.setattr(recipe, "_play_game", _play)
+    monkeypatch.setattr(mod, "cfg", lambda *a, **k: "")
+
+    asyncio.run(recipe.run(_HealSession(page), {"task": "play minesweeper"}))
+
+    assert seen == [recipe.entry_url], "the canonical is tried, not skipped"
+    assert page.visited == [], "no search when the canonical is merely advisory"
+    assert site_health.blocked_hosts(settings, "minesweeper.play")[
+        "minesweeper.online"]["kind"] == "unreachable"
+
+
+def test_a_genuine_block_still_diverts_the_fast_path(monkeypatch, tmp_path):
+    """The mandate holds: a real refusal is routed around, never re-walked."""
+    settings = StubSettings(data_root=tmp_path)
+    _seed(settings, {"minesweeper.online": "blocked"})
+    recipe = _recipe(settings=settings)
+    page = _HealPage(
+        links=[{"href": "https://fresh.example/board", "text": "new"}],
+        cells_by_url={"https://fresh.example/board": 81},
+    )
+    seen: list[str | None] = []
+
+    class _View:
+        blocked = False
+        cells_ready = True
+        n_cells = 81
+
+    async def _start(_page, url=None):
+        seen.append(url)
+        return _View()
+
+    async def _play(*_a):
+        return {"outcome": "won"}
+
+    mod = __import__("browser_agent.recipes.minesweeper", fromlist=["x"])
+    monkeypatch.setattr(mod, "start_beginner", _start)
+    monkeypatch.setattr(recipe, "_play_game", _play)
+    monkeypatch.setattr(mod, "cfg", lambda *a, **k: "")
+
+    out = asyncio.run(recipe.run(_HealSession(page), {"task": "play minesweeper"}))
+
+    assert seen == ["https://fresh.example/board"], "the block is routed around"
+    assert out["site"] == "https://fresh.example/board"
+
+
+def test_search_re_probes_an_unreachable_host_but_never_a_refused_one(tmp_path):
+    """A transient host stays a candidate (the run is searching BECAUSE it did
+    not answer); a refused host stays excluded."""
+    settings = StubSettings(data_root=tmp_path)
+    _seed(settings, {"minesweeper.online": "unreachable",
+                     "blocked.example": "blocked"})
+    recipe = _recipe(settings=settings)
+    page = _HealPage(
+        links=[{"href": "https://minesweeper.online/new", "text": "canonical"},
+               {"href": "https://blocked.example/play", "text": "refused"},
+               {"href": "https://new.example/board", "text": "new"}],
+        cells_by_url={},
+    )
+
+    out = asyncio.run(recipe._search_candidates(page))
+
+    assert out == ["https://minesweeper.online/new", "https://new.example/board"]
+
+
+# ---- the escalation must not memorize a non-venue ---------------------------
+
+
+def test_exhaustion_escalates_against_the_venue_not_the_search_page(tmp_path):
+    """_exhausted carried page.url — usually the DuckDuckGo SERP or the last
+    probed candidate — and Runner._block then memorized that host as a BLOCKED
+    venue. It must name the venue the run was working on."""
+    settings = StubSettings(data_root=tmp_path)
+    _seed(settings, {"minesweeper.online": "unreachable"})
+    recipe = _recipe(settings=settings)
+
+    exc = recipe._exhausted("https://minesweeper.online/new-game")
+
+    assert exc.challenge.url == "https://minesweeper.online/new-game"
+    assert "duckduckgo" not in exc.challenge.url
+
+
+def test_an_exhausted_escalation_is_not_memorized_as_a_venue_refusal(tmp_path):
+    """blocked=False: "no venue could be found" is RATE_LIMITED yet refuses
+    nothing, so Runner._block must write nothing. Memorizing it promoted the
+    healthy canonical to a permanent kind="blocked" write-off."""
+    settings = _StubSettingsForBlock(tmp_path)
+    task = _StubTask()
+    recipe = _recipe(StubSettings(data_root=tmp_path))
+    exc = recipe._exhausted("https://minesweeper.online/new-game")
+
+    assert exc.blocked is False
+
+    asyncio.run(Runner._block(_StubRunner(settings), task, exc.challenge,
+                              memory_block=exc.blocked))
+
+    assert task.status == TaskStatus.BLOCKED, "the operator is still asked"
+    assert site_health.blocked_hosts(settings, "minesweeper.play") == {}, \
+        "an absence of venues is not a venue refusal"
+
+
+def test_a_genuine_refusal_escalation_is_still_memorized(tmp_path):
+    """blocked=True (the default) keeps today's behaviour for a real block."""
+    settings = _StubSettingsForBlock(tmp_path)
+    task = _StubTask()
+    exc = EscalationRequired(Challenge(
+        ChallengeKind.RATE_LIMITED, "the replacement page is blocked too",
+        "https://blocked.example/x"))
+
+    assert exc.blocked is True
+
+    asyncio.run(Runner._block(_StubRunner(settings), task, exc.challenge,
+                              memory_block=exc.blocked))
+
+    assert "blocked.example" in site_health.blocked_hosts(
+        settings, "minesweeper.play")

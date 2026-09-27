@@ -138,6 +138,36 @@ def blocked_hosts(settings, recipe: str) -> dict[str, dict]:
     return dict(blocked) if isinstance(blocked, dict) else {}
 
 
+#: Obstacles that REFUSE service — the venue itself turned us away. Only these
+#: narrow what the recipe may choose. ``unreachable`` (a bare transport/nav
+#: failure: a 30s timeout, a reset, a cold DNS cache) is NOT one of them: it is
+#: ambiguous by construction — the code's own egress guard admits a plain
+#: timeout cannot be told from a hiccup — so it is recorded and shown, but it
+#: must never write a venue off. Recorded forever, it once disabled a healthy
+#: canonical site for good (2026-09-27): a single timeout was memorized, every
+#: later run skipped the site that curl reached in 0.26s, and the recipe
+#: escalated anew each time into a permanent wall of "needs you" rows.
+_NARROWING_KINDS = frozenset({"blocked", "rejected"})
+
+
+def written_off(settings, recipe: str) -> dict[str, dict]:
+    """The obstacles that narrow the choice: host -> record, refusal kinds only.
+
+    This is the read seam the recipe consults before it decides whether to walk
+    into a venue. It is a filter over the full store rather than a second store,
+    so a transient ``unreachable`` sighting is still written down and still
+    shown in the history — it simply does not, on its own, stop the bot from
+    reaching a site that is in fact healthy. The operator's rule is that every
+    problem is noted; the corollary this adds is that only a *refusal* is
+    grounds to write a venue off.
+    """
+    return {
+        host: rec
+        for host, rec in blocked_hosts(settings, recipe).items()
+        if isinstance(rec, dict) and rec.get("kind") in _NARROWING_KINDS
+    }
+
+
 def entry_url(settings, recipe: str) -> str | None:
     """The replacement recorded for ``recipe``, or None.
 

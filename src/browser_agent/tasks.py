@@ -872,7 +872,8 @@ class TaskRunner:
             task.detail = "stopped by the operator"
             return
         except EscalationRequired as exc:
-            await self._block(task, exc.challenge)
+            await self._block(task, exc.challenge,
+                               memory_block=exc.blocked)
             return
         except Exception as exc:
             log.warning("recipe %s failed for %s: %s", task.recipe, task.id, exc)
@@ -937,7 +938,8 @@ class TaskRunner:
             task.detail = f"{prefix} succeeded"
             self._maybe_learn(task.result)
         except EscalationRequired as exc:
-            await self._block(task, exc.challenge)
+            await self._block(task, exc.challenge,
+                               memory_block=exc.blocked)
         except Cancelled:
             task.status = TaskStatus.FAILED
             task.detail = "stopped by the operator"
@@ -1128,7 +1130,8 @@ class TaskRunner:
                 self.activity.note("error", "stopped by the operator")
                 return
             except EscalationRequired as exc:
-                await self._block(task, exc.challenge)
+                await self._block(task, exc.challenge,
+                                  memory_block=exc.blocked)
                 return
             except PlanRejected as exc:
                 task.status = TaskStatus.FAILED
@@ -1164,7 +1167,8 @@ class TaskRunner:
         task.status = TaskStatus.FAILED
         task.detail = f"too many amendments ({MAX_AMENDMENTS}) without a plan that ran"
 
-    async def _block(self, task: Task, challenge) -> None:
+    async def _block(self, task: Task, challenge, *,
+                     memory_block: bool = True) -> None:
         """Record a blocker and hand it to a human. Never retried automatically.
 
         A rate-limit class block is also written down permanently for the
@@ -1172,11 +1176,16 @@ class TaskRunner:
         route around that host instead of walking into the same wall. Captcha
         and sign-in escalations are deliberately not memorized — those are the
         human-takeover flow working, not a venue that stopped serving us.
+
+        ``memory_block`` is False when the escalation is not a venue's refusal
+        — minesweeper's "no venue could be found" is RATE_LIMITED yet refuses
+        nothing, and memorizing it wrote the healthy canonical off for good
+        (2026-09-27). Only a genuine refusal narrows the next run's choice.
         """
         task.status = TaskStatus.BLOCKED
         task.detail = challenge.describe()
         log.warning("task %s BLOCKED: %s", task.id, task.detail)
-        if challenge.kind == ChallengeKind.RATE_LIMITED:
+        if challenge.kind == ChallengeKind.RATE_LIMITED and memory_block:
             from .site_health import host_of, record_blocked
 
             record_blocked(self.settings, task.recipe,

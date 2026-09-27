@@ -382,6 +382,10 @@ class _HealPage:
         self._url = url
         self.visited.append(url)
 
+    async def wait_for_timeout(self, ms: int) -> None:
+        """The board poll between probes; the stub's cells are static, so the
+        first read already decides and this never actually sleeps."""
+
     @property
     def url(self) -> str:
         return self._url
