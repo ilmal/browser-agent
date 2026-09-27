@@ -230,3 +230,77 @@ def test_account_endpoints_require_the_token(bot):
     with _client(api) as c:
         assert c.get("/api/accounts").status_code == 401
         assert c.post("/api/accounts", json={"name": "work"}).status_code == 401
+
+
+async def test_restart_waits_for_a_running_task(bot):
+    """Restart must take the run lock, like the account switch it mirrors.
+
+    Both close and relaunch the one browser behind noVNC. Without the lock a
+    Restart click during a running task would close the context the live
+    agent's page belongs to (its next Playwright call fails with "Target page,
+    context or browser has been closed") and relaunch Chrome on the same
+    user-data-dir while the old browser is still winding down — the
+    single-writer corruption the lock exists to prevent. A held lock must make
+    the request wait, not tear the browser out from under the run.
+    """
+    import asyncio
+
+    api, _, started = bot
+    lock = api.runner.account_switch()
+    await lock.acquire()  # a task is "running": the lock is held
+
+    async def do_restart():
+        # Drive the handler directly on this loop, so the lock it takes is the
+        # same object — a thread or a second loop would bind a different one.
+        return await api.restart_browser()
+
+    try:
+        pending = asyncio.create_task(do_restart())
+        # Let it reach the lock; it must not proceed past it.
+        await asyncio.sleep(0.2)
+        assert started == [], "restart relaunched the browser while a task held the lock"
+        assert not pending.done(), "restart did not wait for the running task"
+    finally:
+        lock.release()
+    body = await pending
+    assert body["browser_running"] is True
+    assert started, "restart never relaunched the browser after the lock was free"
+
+
+async def test_account_summary_runs_off_the_event_loop(bot, monkeypatch):
+    """The summary walks every account dir and reads each cookie DB — blocking
+    I/O that must not run on the single event loop, where it would stall the
+    running task's Playwright awaits and every other handler.
+
+    Proven by interleaving: a ticker runs on the loop while the summary is
+    blocked, and the summary records how many ticks landed *during* its own
+    body. Off-loop, the loop keeps turning and the count grows; inline, the
+    loop is frozen for the whole body and not a single tick lands inside it.
+    """
+    import asyncio
+    import time
+
+    api, _, _ = bot
+    ticked: list[int] = []
+    during: dict[str, int] = {}
+
+    real_summary = api.AccountStore.summary
+
+    def blocking_summary(self):
+        entered = len(ticked)
+        time.sleep(0.3)  # stands in for the dir walk + cookie-DB read
+        during["inside"] = len(ticked) - entered
+        return real_summary(self)
+
+    monkeypatch.setattr(api.AccountStore, "summary", blocking_summary)
+
+    async def ticker():
+        for _ in range(20):
+            await asyncio.sleep(0.02)
+            ticked.append(1)
+
+    await asyncio.gather(api.list_accounts(), ticker())
+    assert during["inside"] > 0, (
+        "the event loop was frozen while the account summary ran: no tick "
+        "landed inside the blocking body, so it ran inline instead of off-loop"
+    )

@@ -469,3 +469,55 @@ async def test_stop_is_failed_not_blocked(runner_factory, site):
 
     assert finished.status is TaskStatus.FAILED
     assert "operator" in finished.detail
+
+
+@pytest.mark.asyncio
+async def test_a_second_steer_survives_the_unwind(runner_factory, site):
+    """A steer typed while the first amendment is unwinding must not be lost.
+
+    The operator types "search for X", and while the runner is applying it —
+    restarting the agent, seconds of work — they type "no, use Y". The
+    amendment list exists for exactly that ("the last one wins"), but the
+    runner used to ``clear()`` the list after applying the first, wiping the
+    correction too, while the thread still showed it delivered. ``checkpoint``
+    now consumes only what it raises, so the correction re-triggers on the next
+    run. The steer is injected at ``_apply_amendment`` — the one seam that runs
+    inside the unwind window, standing in for the API request that would land
+    there for real.
+    """
+    make, site_url = runner_factory
+    from browser_agent.control import Amended
+    from browser_agent.tasks import AGENT_RECIPE
+
+    calls: list[str] = []
+
+    async def agent(session, url, payload):
+        calls.append(payload.get("goal") or payload.get("task") or "")
+        control = runner_ref[0].control
+        if len(calls) == 1:
+            control.steer("search for X instead")
+            raise Amended("search for X instead", url)
+        # Every later run passes a checkpoint, as the real agent does per step;
+        # this is what re-surfaces a correction left pending by the previous one.
+        await control.checkpoint(url)
+        return {"agent_result": "did the amended thing"}
+
+    runner = make(agent_runner=agent)
+    runner_ref = [runner]
+
+    original = runner._apply_amendment
+
+    def apply_then_correct(task, exc):
+        original(task, exc)
+        if task.amended_count == 1:
+            runner.control.steer("no, use Y")
+
+    runner._apply_amendment = apply_then_correct
+
+    task = runner.submit(AGENT_RECIPE, {"goal": "read every story", "url": site_url})
+    finished = await _drain(runner, task.id)
+
+    assert finished.status is TaskStatus.DONE, finished.detail
+    # Both amendments were delivered and applied, in order.
+    assert calls == ["read every story", "search for X instead", "no, use Y"]
+    assert finished.amended_count == 2

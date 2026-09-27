@@ -1194,7 +1194,6 @@ class TaskRunner:
                 return
             except Amended as exc:
                 self._apply_amendment(task, exc)
-                self.session.control.amendments.clear()
                 continue
 
         task.status = TaskStatus.FAILED
@@ -1235,7 +1234,6 @@ class TaskRunner:
                 self._apply_amendment(task, exc)
                 if exc.url and exc.url.startswith("http"):
                     task.payload["entry_url"] = exc.url
-                self.session.control.amendments.clear()
                 continue
             except StepFailure as exc:
                 # The plan was fine, the page disagreed. Hand the job to the

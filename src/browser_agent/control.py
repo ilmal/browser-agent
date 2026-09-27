@@ -84,8 +84,16 @@ class Control:
             await self._resume.wait()
             if self.cancelled:
                 raise Cancelled("stopped by operator")
-        if self.amendment is not None:
-            raise Amended(self.amendment, url)
+        if self.amendments:
+            # Consume here, synchronously, and *only* what is pending now: the
+            # raise unwinds through the agent's async machinery, and an
+            # instruction typed during that unwind must survive to the next
+            # checkpoint rather than be wiped by the caller. Clearing in the
+            # caller instead lost it — the second steer of a run vanished while
+            # the thread still showed it delivered (2026-09-27).
+            instruction = self.amendments[-1]
+            self.amendments.clear()
+            raise Amended(instruction, url)
 
     def to_dict(self) -> dict:
         return {

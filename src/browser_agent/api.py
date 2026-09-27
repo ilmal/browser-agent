@@ -6,9 +6,9 @@ served from here, so there is no separate frontend build to keep in sync.
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import json
-import asyncio
 import logging
 import re
 import uuid
@@ -439,7 +439,7 @@ async def state() -> dict[str, Any]:
         # immediately — the UI's question after clicking "switch" is "did it
         # take", and a cached answer would say no.
         "account": session.account,
-        "accounts": store_accounts().to_dict(),
+        "accounts": await asyncio.to_thread(store_accounts().to_dict),
         # Whether the browser behind noVNC is actually up. The window can be
         # closed from inside the live view, and until now nothing said so: the
         # next task just failed with a connection error. Recovery is automatic
@@ -1005,18 +1005,25 @@ async def restart_browser() -> dict[str, Any]:
     task, but a human watching noVNC wants it now rather than after queueing
     something — and the session is one browser per profile, so this is also the
     honest "start over" when a page has wedged.
+
+    Serialised against a running task by the runner's lock, exactly like the
+    account switch: this closes the context a live agent's page belongs to, so
+    without the lock a click during a run would fail that task with "Target
+    page, context or browser has been closed" and relaunch Chrome on the same
+    user-data-dir while the old browser is still winding down.
     """
-    await session.stop()
-    try:
-        await session.start()
-        page = await session.page()
-        if page.url in ("", "about:blank"):
-            await page.goto(_IDLE_PAGE)
-    except Exception as exc:
-        # SEC-BA-006: the exception text stays in the log, not the response.
-        log.exception("browser restart failed")
-        raise HTTPException(status_code=500, detail="browser restart failed") from exc
-    return {"browser_running": session.is_running(), "url": page.url}
+    async with runner.account_switch():
+        await session.stop()
+        try:
+            await session.start()
+            page = await session.page()
+            if page.url in ("", "about:blank"):
+                await page.goto(_IDLE_PAGE)
+        except Exception as exc:
+            # SEC-BA-006: the exception text stays in the log, not the response.
+            log.exception("browser restart failed")
+            raise HTTPException(status_code=500, detail="browser restart failed") from exc
+        return {"browser_running": session.is_running(), "url": page.url}
 
 
 # -- accounts --------------------------------------------------------------
@@ -1038,8 +1045,13 @@ async def list_accounts() -> dict[str, Any]:
     """Every account on this bot, and which of them is running.
 
     Cheap and browser-free, like /api/whoami: the UI polls it beside the state.
+
+    The summary walks every account's directory and reads each Chrome cookie
+    DB, which is blocking I/O, so it runs off the event loop: on the single
+    loop a slow or locked account DB would stall the running task's Playwright
+    awaits and every other handler.
     """
-    return store_accounts().to_dict()
+    return await asyncio.to_thread(store_accounts().to_dict)
 
 
 @app.post("/api/accounts", dependencies=[Depends(require_token)])
