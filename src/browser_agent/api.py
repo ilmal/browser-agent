@@ -9,6 +9,8 @@ from __future__ import annotations
 import contextlib
 import json
 import logging
+import re
+import uuid
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from pathlib import Path
@@ -181,12 +183,23 @@ app = FastAPI(title="browser-agent", lifespan=lifespan)
 # understands) and it takes precedence over the static setting.
 _REACHED_PREFIX = ContextVar("reached_prefix", default="")
 
+# SEC-BA-005 (2026-09-27): X-Forwarded-Prefix is client-controlled and used to
+# reach an inline <script> in the served UI verbatim, so a crafted header was
+# stored XSS on the bot's own origin. The value is only ever a URL path prefix
+# (nginx sends /b/<profile>; the standalone default is the operator's own
+# BROWSER_URL_PREFIX), so anything outside this character set is not a prefix
+# and is dropped in favour of the configured one. The render site escapes too —
+# this validates the stored value, the sink is still escaped.
+_PREFIX_RE = re.compile(r"^/[A-Za-z0-9._~/-]*$")
+
 
 @app.middleware("http")
 async def _capture_prefix(request: Request, call_next):
-    token = _REACHED_PREFIX.set(
-        request.headers.get("x-forwarded-prefix", "").rstrip("/") or settings.url_prefix
-    )
+    raw = request.headers.get("x-forwarded-prefix", "").rstrip("/")
+    if raw and not _PREFIX_RE.match(raw):
+        log.warning("dropping non-prefix X-Forwarded-Prefix value")
+        raw = ""
+    token = _REACHED_PREFIX.set(raw or settings.url_prefix)
     try:
         return await call_next(request)
     finally:
@@ -919,8 +932,9 @@ async def restart_browser() -> dict[str, Any]:
         if page.url in ("", "about:blank"):
             await page.goto(_IDLE_PAGE)
     except Exception as exc:
+        # SEC-BA-006: the exception text stays in the log, not the response.
         log.exception("browser restart failed")
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="browser restart failed") from exc
     return {"browser_running": session.is_running(), "url": page.url}
 
 
@@ -1091,6 +1105,24 @@ async def toggle_schedule(schedule_id: str) -> dict[str, Any]:
 _UI = Path(__file__).parent / "ui" / "index.html"
 
 
+def _prefix_script(value: str) -> str:
+    """The inline bootstrap that hands the UI its prefix, escaped for its context.
+
+    SEC-BA-005 (2026-09-27): the value lands inside a <script> block in served
+    HTML, and json.dumps alone leaves "<" and ">" literal — so a crafted
+    X-Forwarded-Prefix used to close the tag and run script on the bot's own
+    origin. The capture middleware already allowlists the header; this escaping
+    is the second half, so no path to the sink can emit markup.
+    """
+    escaped = (
+        json.dumps(value)
+        .replace("<", "\\u003c")
+        .replace(">", "\\u003e")
+        .replace("&", "\\u0026")
+    )
+    return f'<script>window.BA_PREFIX={escaped};</script>'
+
+
 @app.get("/", response_class=HTMLResponse)
 async def ui() -> HTMLResponse:
     # The page is served from the SAME prefix it will talk to, so the prefix has
@@ -1099,9 +1131,10 @@ async def ui() -> HTMLResponse:
     # hub — not this bot. It would then render the roster's state (no profile,
     # no tasks) while looking perfectly healthy. Handing it the prefix here is
     # what makes the same file work both standalone and behind /b/<bot>.
-    html = _UI.read_text().replace(
-        "<!--PREFIX-->", f'<script>window.BA_PREFIX={json.dumps(_REACHED_PREFIX.get())};</script>'
-    )
+    # SEC-BA-005: the prefix is escaped for the JS-in-HTML context even after
+    # the capture-side allowlist, so a value that closes the script tag cannot
+    # reach the page through any path (json.dumps leaves "<" and ">" literal).
+    html = _UI.read_text().replace("<!--PREFIX-->", _prefix_script(_REACHED_PREFIX.get()))
     return HTMLResponse(html)
 
 
@@ -1130,5 +1163,11 @@ async def minesweeper_local() -> HTMLResponse:
 
 @app.exception_handler(Exception)
 async def unhandled(request: Request, exc: Exception) -> JSONResponse:
-    log.exception("unhandled error on %s", request.url.path)
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
+    # SEC-BA-006: the response carries only a generic body plus a request id
+    # the log line shares — str(exc) has leaked subprocess stderr and library
+    # internals to whoever was calling. The detail stays here, in the log.
+    rid = uuid.uuid4().hex[:12]
+    log.exception("unhandled error on %s [req=%s]", request.url.path, rid)
+    return JSONResponse(
+        status_code=500, content={"detail": "internal error", "request_id": rid}
+    )
